@@ -207,6 +207,14 @@ target_include_directories(
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE SK_HDR_PNG_COMMUNITY_SHADERS)
 
+# NGX SDK headers for DLSS Neural Rendering (NeuralRendering/Runtime.cpp)
+target_include_directories(
+    ${PROJECT_NAME}
+    SYSTEM
+    PRIVATE
+        "${CMAKE_SOURCE_DIR}/extern/Streamline-DX12/external/ngx-sdk/include"
+)
+
 target_link_libraries(
     ${PROJECT_NAME}
     PRIVATE

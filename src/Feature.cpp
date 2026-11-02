@@ -210,6 +210,15 @@ void Feature::Save(json& o_json)
 		SaveSettings(o_json[GetName()]);
 }
 
+bool Feature::FindSceneExposure(SceneExposure& a_out)
+{
+	for (auto* feature : GetFeatureList()) {
+		if (feature->loaded && feature->GetSceneExposure(a_out))
+			return true;
+	}
+	return false;
+}
+
 /**
  * @brief Provides access to the registry of all known features.
  * @return A constant reference to the vector of all known feature instances.

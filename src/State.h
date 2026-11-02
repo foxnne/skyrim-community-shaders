@@ -534,6 +534,12 @@ public:
 	std::unique_ptr<ConstantBuffer> sharedDataCB;
 	std::unique_ptr<ConstantBuffer> featureDataCB;
 
+	/** @brief Binds the shared (and optionally feature) constant buffers to compute register b5 onward. */
+	void BindSharedDataCS(ID3D11DeviceContext* a_context, bool a_withFeatureData = true) const;
+
+	/** @brief Set when the world render pass ran this frame; cleared at frame start. */
+	bool worldRenderedThisFrame = false;
+
 	PermutationCB permutationData{};
 	PermutationCB permutationDataPrevious{};
 

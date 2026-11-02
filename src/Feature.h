@@ -184,6 +184,37 @@ public:
 	/** @brief Releases and recreates transient state (e.g. on resolution change). */
 	virtual void Reset() {}
 
+	/**
+	 * @brief Global exposure a feature applies to pre-tonemap scene-linear color this frame.
+	 * @note Members are only meaningful once a feature fills them; consumers use exposure 1 otherwise.
+	 */
+	struct SceneExposure
+	{
+		ID3D11ShaderResourceView* adaptedLuminance = nullptr;  ///< StructuredBuffer<float>, element 0
+		float2 luminanceRange{ 1.0f, 1.0f };                   ///< clamp applied to adaptedLuminance
+		float compensationScale = 1.0f;                        ///< linear, exp2(compensation EV)
+
+		static constexpr float kMiddleGrey = 0.18f;
+
+		/** @brief CPU twin of SceneExposure::Evaluate in SceneExposure.hlsli; keep numerically identical. */
+		static float Evaluate(float a_adapted, float2 a_range, float a_scale)
+		{
+			return kMiddleGrey * a_scale / std::min(std::max(a_adapted, a_range.x), a_range.y);
+		}
+	};
+
+	/**
+	 * @brief Fills @p a_out when this feature applies a scene exposure this frame.
+	 * @return true when this feature applies a scene exposure this frame.
+	 */
+	virtual bool GetSceneExposure(SceneExposure& /*a_out*/) const { return false; }
+
+	/**
+	 * @brief First loaded feature's scene exposure; false means consumers use exposure 1.
+	 * @return true when a loaded feature applies a scene exposure.
+	 */
+	static bool FindSceneExposure(SceneExposure& a_out);
+
 	virtual void DrawSettings() {}
 
 	/** @brief Opt-in: whether the feature page shows a Debug section (see Util::DebugSection). */

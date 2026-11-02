@@ -214,25 +214,25 @@ namespace globals
 		/** Gets the camera projection matrix. */
 		const Matrix& GetCameraProj() const { return data.CameraProj; }
 		/** Gets the combined camera view-projection matrix. */
-		const Matrix& GetCameraViewProj() const { return data.CameraViewProj; }
+		const Matrix& GetCameraViewProj([[maybe_unused]] uint32_t a_eyeIndex = 0) const { return data.CameraViewProj; }
 		/** Gets the unjittered camera view-projection matrix. */
 		const Matrix& GetCameraViewProjUnjittered() const { return data.CameraViewProjUnjittered; }
 		/** Gets the previous frame's unjittered view-projection matrix. */
 		const Matrix& GetCameraPreviousViewProjUnjittered() const { return data.CameraPreviousViewProjUnjittered; }
 		/** Gets the unjittered camera projection matrix. */
-		const Matrix& GetCameraProjUnjittered() const { return data.CameraProjUnjittered; }
+		const Matrix& GetCameraProjUnjittered([[maybe_unused]] uint32_t a_eyeIndex = 0) const { return data.CameraProjUnjittered; }
 		/** Gets the inverse of the unjittered camera projection matrix. */
 		const Matrix& GetCameraProjUnjitteredInverse() const { return data.CameraProjUnjitteredInverse; }
 		/** Gets the inverse camera view matrix. */
-		const Matrix& GetCameraViewInverse() const { return data.CameraViewInverse; }
+		const Matrix& GetCameraViewInverse([[maybe_unused]] uint32_t a_eyeIndex = 0) const { return data.CameraViewInverse; }
 		/** Gets the inverse camera view-projection matrix. */
-		const Matrix& GetCameraViewProjInverse() const { return data.CameraViewProjInverse; }
+		const Matrix& GetCameraViewProjInverse([[maybe_unused]] uint32_t a_eyeIndex = 0) const { return data.CameraViewProjInverse; }
 		/** Gets the inverse camera projection matrix. */
 		const Matrix& GetCameraProjInverse() const { return data.CameraProjInverse; }
 		/** Gets the camera position adjustment vector. */
-		const float4& GetCameraPosAdjust() const { return data.CameraPosAdjust; }
+		const float4& GetCameraPosAdjust([[maybe_unused]] uint32_t a_eyeIndex = 0) const { return data.CameraPosAdjust; }
 		/** Gets the previous frame's camera position adjustment vector. */
-		const float4& GetCameraPreviousPosAdjust() const { return data.CameraPreviousPosAdjust; }
+		const float4& GetCameraPreviousPosAdjust([[maybe_unused]] uint32_t a_eyeIndex = 0) const { return data.CameraPreviousPosAdjust; }
 		/** Gets the frame parameters (timer, frame count, etc.). */
 		const float4& GetFrameParams() const { return data.FrameParams; }
 		/** Gets the first set of dynamic resolution parameters. */

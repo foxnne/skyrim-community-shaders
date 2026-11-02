@@ -164,6 +164,13 @@ void State::UpdateSkyShaderPermutation(RE::BSRenderPass* a_pass)
 	}
 }
 
+void State::BindSharedDataCS(ID3D11DeviceContext* a_context, bool a_withFeatureData) const
+{
+	constexpr UINT kSharedDataRegister = 5;
+	ID3D11Buffer* buffers[]{ sharedDataCB->CB(), featureDataCB->CB() };
+	a_context->CSSetConstantBuffers(kSharedDataRegister, a_withFeatureData ? ARRAYSIZE(buffers) : 1, buffers);
+}
+
 void State::Draw()
 {
 	ZoneScoped;
@@ -402,6 +409,7 @@ void State::Reset()
 	lastVertexDescriptor = 0;
 	std::memset(&permutationDataPrevious, 0xFF, sizeof(PermutationCB));
 	frameCount++;
+	worldRenderedThisFrame = false;
 	tonemapOwner.reset();
 	// Publish for off-thread readers (e.g. the MCP listener thread).
 	frameCountAtomic.store(frameCount, std::memory_order_relaxed);

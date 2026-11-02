@@ -9,6 +9,17 @@
 namespace Util
 {
 	/**
+	 * @brief Returns the D3D interface pointer behind a CommonLib render-target field.
+	 *        This CommonLib already exposes real D3D11 types, so it is the identity; it exists
+	 *        so code written against newer CommonLib (REX::W32 wrapper types) compiles unchanged.
+	 */
+	template <class T>
+	[[nodiscard]] constexpr T* AsReal(T* a_ptr) noexcept
+	{
+		return a_ptr;
+	}
+
+	/**
 	 * @brief ID3DInclude handler resolving #include paths under Data\Shaders,
 	 *        shared by every HLSL compile call site in this codebase.
 	 */

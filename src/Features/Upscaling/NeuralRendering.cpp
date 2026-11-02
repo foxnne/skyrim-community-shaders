@@ -2434,6 +2434,10 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 			work.prepareToneData.Reset();
 			work.compositeColor.Reset();
 			work.materialAlphaShader.Reset();
+			work.storeGain.Reset();
+			work.reuseGain.Reset();
+			work.downsampleLow.Reset();
+			work.expandLow.Reset();
 		}
 		auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
 		auto* color = Util::AsReal(targets[RE::RENDER_TARGETS::kMAIN].texture);

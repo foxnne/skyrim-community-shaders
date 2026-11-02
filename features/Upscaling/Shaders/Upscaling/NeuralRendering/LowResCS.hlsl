@@ -1,3 +1,4 @@
+#include "Upscaling/NeuralRendering/ColorCompat.hlsli"
 #include "Upscaling/NeuralRendering/ColorTransfer.hlsli"
 
 Texture2D<float4> ProxyInput : register(t0);
@@ -40,7 +41,7 @@ cbuffer LowRes : register(b1)
 
 float LowLogLuma(float3 proxy)
 {
-	return log2(max(Color::RGBToLuminance(ProxySrgbToLinear(proxy), Luma), kLumaEpsilon));
+	return log2(max(NRColor::RGBToLuminance(ProxySrgbToLinear(proxy), Luma), kLumaEpsilon));
 }
 
 // The composite takes only the model's luminance ratio, so the low-resolution gain is all that has to cross
@@ -49,7 +50,7 @@ float LowLogLuma(float3 proxy)
 	if (id.x >= Width || id.y >= Height)
 		return;
 	const float3 currentLinear = ProxySrgbToLinear(ProxyInput[id.xy].rgb);
-	const float currentLogLuma = log2(max(Color::RGBToLuminance(currentLinear, Luma), kLumaEpsilon));
+	const float currentLogLuma = log2(max(NRColor::RGBToLuminance(currentLinear, Luma), kLumaEpsilon));
 	const float2 lowPosition = (float2(id.xy) + 0.5) / float2(Width, Height) * float2(LowWidth, LowHeight) - 0.5;
 	const int2 base = int2(floor(lowPosition));
 	const float2 fraction = lowPosition - float2(base);

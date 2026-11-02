@@ -1,3 +1,4 @@
+#include "Upscaling/NeuralRendering/ColorCompat.hlsli"
 #include "Common/Color.hlsli"
 #include "Common/NeuralRenderingCategory.hlsli"
 #include "Common/RegionFeather.hlsli"
@@ -66,14 +67,14 @@ float3 NeutwoEncode(float3 value)
 
 float3 ProductionToLinear(float3 nativeColor)
 {
-	float3 linearColor = ENABLE_LL ? nativeColor : Color::SkyrimGammaToLinear(nativeColor);
-	return (ENABLE_LL && ENABLE_ACEScg) ? AP1TosRGB(linearColor) : linearColor;
+	float3 linearColor = NR_LINEAR_LIGHTING ? nativeColor : NRColor::SkyrimGammaToLinear(nativeColor);
+	return (NR_LINEAR_LIGHTING && NR_ACESCG) ? AP1TosRGB(linearColor) : linearColor;
 }
 
 float3 ProductionFromLinear(float3 linearColor)
 {
-	float3 working = (ENABLE_LL && ENABLE_ACEScg) ? sRGBToAP1(linearColor) : linearColor;
-	return ENABLE_LL ? working : Color::LinearToSkyrimGamma(max(working, 0.0));
+	float3 working = (NR_LINEAR_LIGHTING && NR_ACESCG) ? sRGBToAP1(linearColor) : linearColor;
+	return NR_LINEAR_LIGHTING ? working : NRColor::LinearToSkyrimGamma(max(working, 0.0));
 }
 
 float3 ToLinear(float3 value)
@@ -92,7 +93,7 @@ float3 ToLinear(float3 value)
 	case NR::kConversionSRGBToGamma22:
 		return ProxySrgbToLinear(value);
 	case NR::kConversionSkyrimGammaToGamma22:
-		return Color::SkyrimGammaToLinear(value);
+		return NRColor::SkyrimGammaToLinear(value);
 	case NR::kConversionLinearToSkyrimGamma:
 		return value;
 	case NR::kConversionLinearToLinear:
@@ -118,7 +119,7 @@ float3 FromLinear(float3 value)
 	case NR::kConversionSkyrimGammaToGamma22:
 		return pow(max(value, 0.0), 1.0 / 2.2);
 	case NR::kConversionLinearToSkyrimGamma:
-		return Color::LinearToSkyrimGamma(max(value, 0.0));
+		return NRColor::LinearToSkyrimGamma(max(value, 0.0));
 	case NR::kConversionLinearToLinear:
 		return value;
 	default:
@@ -161,8 +162,8 @@ float3 MakeDisplayProxy(float3 linearColor)
 	float3 outputSample = RegionStableNeuralSample(int2(id.xy), inputSample, NeuralOutput[id.xy].rgb);
 	float3 input = ProxySrgbToLinear(inputSample);
 	float3 output = ProxySrgbToLinear(outputSample);
-	float inputLuma = max(Color::RGBToLuminance(input, Luma), kLumaEpsilon);
-	float outputLuma = max(Color::RGBToLuminance(output, Luma), kLumaEpsilon);
+	float inputLuma = max(NRColor::RGBToLuminance(input, Luma), kLumaEpsilon);
+	float outputLuma = max(NRColor::RGBToLuminance(output, Luma), kLumaEpsilon);
 	float logInput = log2(inputLuma);
 	ToneDataOutput[id.xy] = float2(logInput, log2(outputLuma) - logInput);
 }
@@ -237,8 +238,8 @@ float ToneLowAt(int2 pixel, float centerDelta)
 	if (ExposureMode == NR::kExposureIgnore || ExposureMode == NR::kExposureForceOne || ExposureMode == NR::kExposureDoNotPass)
 		exposure = 1.0;
 	const float ratioFloor = 1.0 / 512.0;
-	float inputLuminance = Color::RGBToLuminance(inputProxy, Luma);
-	float neuralLuminance = Color::RGBToLuminance(neuralProxy, Luma);
+	float inputLuminance = NRColor::RGBToLuminance(inputProxy, Luma);
+	float neuralLuminance = NRColor::RGBToLuminance(neuralProxy, Luma);
 	float ratio = (neuralLuminance + ratioFloor) / (inputLuminance + ratioFloor);
 	const float ratioLimit = 2.0;
 	float lift = lerp(1.0, ratioLimit, smoothstep(0.0, 8.0 * ratioFloor, inputLuminance));
@@ -256,7 +257,7 @@ float ToneLowAt(int2 pixel, float centerDelta)
 	                                                   toneLow * ToneLowStrength + toneHigh * ToneHighStrength;
 	tone *= FilteredCategoryStrength(int2(id.xy));
 	float toneGain = exp2(tone);
-	float sceneLuminance = Color::RGBToLuminance(originalLinear, Luma);
+	float sceneLuminance = NRColor::RGBToLuminance(originalLinear, Luma);
 	float logSceneLuminance = log2(max(sceneLuminance, ratioFloor));
 	float shadowWeight = smoothstep(-8.0, -3.0, logSceneLuminance);
 	float highlightWeight = 1.0 - smoothstep(0.0, 2.0, logSceneLuminance);
@@ -273,7 +274,7 @@ float ToneLowAt(int2 pixel, float centerDelta)
 	else if (CompositeMode == NR::kCompositeHalfMaskedLerp)
 		result = lerp(originalLinear, neuralLinear, mask * 0.5);
 	else if (CompositeMode == NR::kCompositePreserveLuminance)
-		result = neuralLinear * (Color::RGBToLuminance(originalLinear, Luma) / max(Color::RGBToLuminance(neuralLinear, Luma), ratioFloor));
+		result = neuralLinear * (NRColor::RGBToLuminance(originalLinear, Luma) / max(NRColor::RGBToLuminance(neuralLinear, Luma), ratioFloor));
 	else if (CompositeMode == NR::kCompositePreserveRatio)
 		result = originalLinear * ratio;
 	else if (CompositeMode == NR::kCompositeResidual)
@@ -292,7 +293,7 @@ float ToneLowAt(int2 pixel, float centerDelta)
 		result = originalLinear;
 	// kVisualPostComposite intentionally has no branch here: result is already the composited value.
 	else if (VisualMode == NR::kVisualLuminanceDifference)
-		result = abs(Color::RGBToLuminance(neuralLinear - inputProxy, Luma)).xxx * DifferenceStrength;
+		result = abs(NRColor::RGBToLuminance(neuralLinear - inputProxy, Luma)).xxx * DifferenceStrength;
 	else if (VisualMode == NR::kVisualChromaDifference)
 		result = abs(neuralLinear - inputProxy).xxx * DifferenceStrength;
 	else if (VisualMode == NR::kVisualMask)
@@ -310,7 +311,7 @@ float ToneLowAt(int2 pixel, float centerDelta)
 	else if (VisualMode == NR::kVisualToneLowGain)
 		result = toneGain.xxx;
 	else if (VisualMode == NR::kVisualFinalLuminanceRatio)
-		result = (Color::RGBToLuminance(result, Luma) / max(sceneLuminance, ratioFloor)).xxx;
+		result = (NRColor::RGBToLuminance(result, Luma) / max(sceneLuminance, ratioFloor)).xxx;
 	else if (VisualMode == NR::kVisualCategory)
 		result = NeuralRenderingCategory::DebugColor(NeuralRenderingCategory::Decode(Masks2Texture[int2(id.xy) + int2(int(EyeOffsetX), 0)].y));
 	else if (VisualMode >= NR::kVisualSplitOriginalOutput) {

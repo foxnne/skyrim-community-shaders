@@ -1,3 +1,4 @@
+#include "Upscaling/NeuralRendering/ColorCompat.hlsli"
 #include "Common/NeuralRenderingReuse.hlsli"
 #include "Upscaling/NeuralRendering/ColorTransfer.hlsli"
 
@@ -33,8 +34,8 @@ cbuffer GainReuse : register(b1)
 	const float3 outputSample = RegionStableNeuralSample(int2(id.xy), inputSample, NeuralOutput[id.xy].rgb);
 	const float3 input = ProxySrgbToLinear(inputSample);
 	const float3 output = ProxySrgbToLinear(outputSample);
-	const float inputLuma = max(Color::RGBToLuminance(input, Luma), kLumaEpsilon);
-	const float outputLuma = max(Color::RGBToLuminance(output, Luma), kLumaEpsilon);
+	const float inputLuma = max(NRColor::RGBToLuminance(input, Luma), kLumaEpsilon);
+	const float outputLuma = max(NRColor::RGBToLuminance(output, Luma), kLumaEpsilon);
 	const float logInput = log2(inputLuma);
 	GainHistoryOutput[id.xy] = float2(logInput, log2(outputLuma) - logInput);
 	DepthHistoryOutput[id.xy] = GuideDepth[id.xy];
@@ -70,7 +71,7 @@ bool SampleGain(Texture2D<float2> gains, Texture2D<float> depths, float2 uv, flo
 		return;
 	const float3 currentProxy = ProxyInput[id.xy].rgb;
 	const float3 currentLinear = ProxySrgbToLinear(currentProxy);
-	const float currentLogLuma = log2(max(Color::RGBToLuminance(currentLinear, Luma), kLumaEpsilon));
+	const float currentLogLuma = log2(max(NRColor::RGBToLuminance(currentLinear, Luma), kLumaEpsilon));
 	const float currentDepth = GuideDepth[id.xy];
 	// The guide holds the engine's per-eye normalized UV displacement, current to previous, so adding it
 	// to the current UV lands on the pixel the gain was stored at.

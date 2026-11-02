@@ -1,3 +1,4 @@
+#include "Upscaling/NeuralRendering/ColorCompat.hlsli"
 #ifndef __NR_COLOR_TRANSFER_HLSLI__
 #define __NR_COLOR_TRANSFER_HLSLI__
 
@@ -48,7 +49,7 @@ cbuffer ColorTransfer : register(b0)
 	float4 MaterialStrengthsB;  // Foliage, Landscape, Cloth, Metal
 };
 
-static const float3 Luma = Color::kRec709LuminanceWeights;
+static const float3 Luma = NRColor::kRec709LuminanceWeights;
 static const float kProxyEpsilon = 1e-8;
 static const float kPeakEpsilon = 1e-6;
 static const float kLumaEpsilon = 1e-5;

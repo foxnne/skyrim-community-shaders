@@ -146,7 +146,8 @@ struct NeuralRendering
 	/** @brief Cumulative NR counters since startup, safe from any thread. */
 	NR::Diagnostics::Counters GetDiagnosticCounters() const { return diagnostics.GetCounters(); }
 	/** @brief Queues one retry for the next world frame; all the Retry action does. */
-	void RequestRetry() { retryRequested = resetHistory = true; }
+	/** @brief Retries NR on the next world frame and recompiles its shaders, so shader fixes apply without a restart. */
+	void RequestRetry() { retryRequested = resetHistory = clearShaders = true; }
 	/** @brief Queues one lossless DDS capture of every NR stage in the next NR frame; see Diagnostics::RequestCapture. */
 	void RequestCapture(bool verifyReuse = false) { diagnostics.RequestCapture(verifyReuse); }
 

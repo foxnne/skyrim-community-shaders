@@ -313,4 +313,6 @@ namespace globals
 	 * @param a_context The D3D11 device context to hook.
 	 */
 	void InstallD3DHooks(ID3D11DeviceContext* a_context);
+	/** @brief Re-installs the PerFrame Map/Unmap hooks if another module has bypassed them; call once per frame. */
+	void CheckD3DHooks();
 }

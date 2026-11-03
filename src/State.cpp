@@ -411,6 +411,7 @@ void State::Reset()
 	std::memset(&permutationDataPrevious, 0xFF, sizeof(PermutationCB));
 	frameCount++;
 	worldRenderedThisFrame = false;
+	globals::CheckD3DHooks();
 	tonemapOwner.reset();
 	// Publish for off-thread readers (e.g. the MCP listener thread).
 	frameCountAtomic.store(frameCount, std::memory_order_relaxed);

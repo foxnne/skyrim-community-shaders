@@ -337,8 +337,11 @@ namespace globals
  */
 	struct ID3D11DeviceContext_Map
 	{
+		static inline std::atomic<uint32_t> calls{ 0 };
+
 		static HRESULT thunk(ID3D11DeviceContext* This, ID3D11Resource* pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags, D3D11_MAPPED_SUBRESOURCE* pMappedResource)
 		{
+			calls.fetch_add(1, std::memory_order_relaxed);
 			HRESULT hr = func(This, pResource, Subresource, MapType, MapFlags, pMappedResource);
 			if (hr == S_OK) {
 				if (*globals::game::perFrame.get() == pResource)
@@ -370,5 +373,32 @@ namespace globals
 	{
 		stl::detour_vfunc<14, ID3D11DeviceContext_Map>(a_context);
 		stl::detour_vfunc<15, ID3D11DeviceContext_Unmap>(a_context);
+	}
+
+	void CheckD3DHooks()
+	{
+		// The PerFrame camera cache depends on the Map/Unmap hooks. Another module (seen with the DLSS
+		// Neural Rendering runtime loaded) can bypass them, freezing the cache; detect that and re-hook.
+		static uint32_t framesWithoutMap = 0;
+		if (ID3D11DeviceContext_Map::calls.exchange(0, std::memory_order_relaxed) != 0) {
+			framesWithoutMap = 0;
+			return;
+		}
+		if (++framesWithoutMap < 30 || !d3d::context)
+			return;
+		framesWithoutMap = 0;
+
+		auto* const* vtable = *reinterpret_cast<void* const* const*>(d3d::context);
+		const auto* target = static_cast<const uint8_t*>(vtable[14]);
+		HMODULE owner = nullptr;
+		wchar_t ownerPath[MAX_PATH]{};
+		if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(target), &owner))
+			GetModuleFileNameW(owner, ownerPath, MAX_PATH);
+		std::string bytes;
+		for (int i = 0; i < 12; ++i)
+			bytes += std::format("{:02X} ", target[i]);
+		logger::warn("[D3D HOOKS] No Map calls reached the PerFrame hook for 30 frames; vtable Map={} in '{}' bytes [{}]. Re-installing Map/Unmap hooks.",
+			static_cast<const void*>(target), Util::WStringToString(ownerPath), bytes);
+		InstallD3DHooks(d3d::context);
 	}
 }

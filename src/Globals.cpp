@@ -399,6 +399,6 @@ namespace globals
 			bytes += std::format("{:02X} ", target[i]);
 		logger::warn("[D3D HOOKS] No Map calls reached the PerFrame hook for 30 frames; vtable Map={} in '{}' bytes [{}]. Re-installing Map/Unmap hooks.",
 			static_cast<const void*>(target), Util::WStringToString(ownerPath), bytes);
-		InstallD3DHooks(d3d::context);
+		::globals::InstallD3DHooks(d3d::context);
 	}
 }

@@ -72,6 +72,8 @@ public:
 	std::mutex shaderDefinesMutex;
 
 	float timer = 0;
+	/** @brief Collect per-shader draw stats until this frame even with the performance overlay hidden (set by remote tools). */
+	std::atomic<uint32_t> drawStatsUntilFrame{ 0 };
 	double smoothDrawCalls[RE::BSShader::Type::Total + 1];
 	int drawCalls[RE::BSShader::Type::Total + 1];
 

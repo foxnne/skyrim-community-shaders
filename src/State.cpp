@@ -251,7 +251,8 @@ void State::Draw()
 			}
 		}
 
-		if (globals::menu->overlayVisible && globals::features::performanceOverlay.loaded && globals::features::performanceOverlay.IsOverlayVisible())
+		if ((globals::menu->overlayVisible && globals::features::performanceOverlay.loaded && globals::features::performanceOverlay.IsOverlayVisible()) ||
+			frameCount < drawStatsUntilFrame.load(std::memory_order_relaxed))
 			Debug();
 
 		// Active Shaders counts draws per frame whether or not the performance overlay is up

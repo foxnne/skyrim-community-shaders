@@ -431,6 +431,35 @@ namespace
 				};
 			});
 		}
+		if (kind == "drawcalls") {
+			// Per-shader draw calls and CPU time as the performance overlay shows them; collection is
+			// kept on for ~60 s after each query so the overlay need not be open.
+			return RunOnMainThread([]() -> json {
+				auto* state = globals::state;
+				if (!state)
+					return json{ { "error", "state unavailable" } };
+				state->drawStatsUntilFrame.store(state->frameCount + 3600, std::memory_order_relaxed);
+				json types = json::object();
+				for (int i = 0; i <= magic_enum::enum_integer(RE::BSShader::Type::Total); ++i) {
+					const auto name = i == magic_enum::enum_integer(RE::BSShader::Type::Total) ? std::string("Total") : std::string(magic_enum::enum_name(static_cast<RE::BSShader::Type>(i)));
+					if (name.empty())
+						continue;
+					types[name] = { { "drawCalls", state->smoothDrawCalls[i] }, { "cpuMs", state->smoothFrameTimePerType[i] } };
+				}
+				json frame = json::object();
+				if (auto* profiler = globals::profiler) {
+					const auto stats = profiler->GetFrameStats();
+					frame = { { "ms", stats.lastMs }, { "avgMs", stats.avgMs }, { "p95Ms", stats.p95Ms } };
+				}
+				return json{
+					{ "frame_count", state->frameCount },
+					{ "frame", frame },
+					{ "frameGeneration", globals::features::upscaling.IsFrameGenerationActive() },
+					{ "neuralRendering", globals::features::upscaling.settings.neuralRenderingEnabled },
+					{ "shaders", types },
+				};
+			});
+		}
 		if (kind == "shadercache") {
 			// Built from thread-safe ShaderCache accessors. Poll completedTasks against a
 			// pre-deploy snapshot to know a hot-reloaded shader finished; a rising
@@ -447,7 +476,7 @@ namespace
 				{ "frame_count", EnqueuedFrame() },
 			};
 		}
-		return json{ { "error", "unknown kind" }, { "kind", kind }, { "supported", json::array({ "state", "shadercache", "profiler" }) } };
+		return json{ { "error", "unknown kind" }, { "kind", kind }, { "supported", json::array({ "state", "shadercache", "profiler", "drawcalls" }) } };
 	}
 
 	/**
@@ -973,7 +1002,7 @@ namespace DevBenchBridge
 		dvb->RegisterTool("communityshaders.feature", featureDesc, &FeatureToolHandler, nullptr);
 
 		static constexpr const char* inspectDesc =
-			R"({"description":"Read non-feature Community Shaders engine state. Kind-dispatched; response is a JSON object. kind=state -> {plugin,frame_count}. kind=shadercache -> {compiling,completedTasks,totalTasks,failedTasks,currentFailedCount,frame_count}. kind=profiler -> {frame:{ms,avgMs,p95Ms,p99Ms,samples,frameGeneration} (engine-frame wall clock; presents run ~2x when frameGeneration),totalGpuMs,totalCpuMs,frame_count,passes:[{name,gpuMs,gpuAvgMs,gpuP95Ms,gpuP99Ms,cpuMs,cpuAvgMs,gpuHistory:[...]}]}; optional filter param to match pass names.","readOnly":true,"inputSchema":{"type":"object","properties":{"kind":{"type":"string","enum":["state","shadercache","profiler"]},"filter":{"type":"string"}},"required":["kind"]}})";
+			R"({"description":"Read non-feature Community Shaders engine state. Kind-dispatched; response is a JSON object. kind=state -> {plugin,frame_count}. kind=shadercache -> {compiling,completedTasks,totalTasks,failedTasks,currentFailedCount,frame_count}. kind=profiler -> {frame:{ms,avgMs,p95Ms,p99Ms,samples,frameGeneration} (engine-frame wall clock; presents run ~2x when frameGeneration),totalGpuMs,totalCpuMs,frame_count,passes:[{name,gpuMs,gpuAvgMs,gpuP95Ms,gpuP99Ms,cpuMs,cpuAvgMs,gpuHistory:[...]}]}; optional filter param to match pass names.","readOnly":true,"inputSchema":{"type":"object","properties":{"kind":{"type":"string","enum":["state","shadercache","profiler","drawcalls"]},"filter":{"type":"string"}},"required":["kind"]}})";
 		dvb->RegisterTool("communityshaders.inspect", inspectDesc, &InspectToolHandler, nullptr);
 
 		static constexpr const char* shadercacheDesc =

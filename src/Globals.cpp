@@ -359,8 +359,10 @@ namespace globals
  */
 	struct ID3D11DeviceContext_Unmap
 	{
+		static inline std::atomic<uint32_t> calls{ 0 };
 		static void thunk(ID3D11DeviceContext* This, ID3D11Resource* pResource, UINT Subresource)
 		{
+			calls.fetch_add(1, std::memory_order_relaxed);
 			if (*globals::game::perFrame.get() == pResource && globals::game::mappedFrameBuffer) {
 				CacheFramebuffer();
 			}
@@ -380,6 +382,26 @@ namespace globals
 		// The PerFrame camera cache depends on the Map/Unmap hooks. Another module (seen with the DLSS
 		// Neural Rendering runtime loaded) can bypass them, freezing the cache; detect that and re-hook.
 		static uint32_t framesWithoutMap = 0;
+		// The NR runtime resets the context's Unmap vtable slot to the stock d3d11 function, so our inline
+		// detour (applied to whatever the slot pointed at when we hooked) is never reached again and the
+		// PerFrame cache freezes while Map keeps working. If the slot now points somewhere other than what
+		// we hooked and Unmap has been silent, hook the new target. Never re-hook an unchanged target: the
+		// slot would then point at our own detour and the trampoline would recurse.
+		if (d3d::context) {
+			static const void* hookedUnmapTarget = nullptr;
+			static uint32_t framesWithoutUnmap = 0;
+			const void* const currentUnmap = (*reinterpret_cast<void* const* const*>(d3d::context))[15];
+			if (ID3D11DeviceContext_Unmap::calls.exchange(0, std::memory_order_relaxed) != 0) {
+				hookedUnmapTarget = currentUnmap;
+				framesWithoutUnmap = 0;
+			} else if (hookedUnmapTarget && currentUnmap != hookedUnmapTarget && ++framesWithoutUnmap >= 30) {
+				logger::warn("[D3D HOOKS] Unmap vtable slot changed from {} to {} and no Unmap calls reached the hook for 30 frames; hooking the new target.",
+					hookedUnmapTarget, currentUnmap);
+				stl::detour_vfunc<15, ID3D11DeviceContext_Unmap>(d3d::context);
+				hookedUnmapTarget = currentUnmap;
+				framesWithoutUnmap = 0;
+			}
+		}
 		if (ID3D11DeviceContext_Map::calls.exchange(0, std::memory_order_relaxed) != 0) {
 			framesWithoutMap = 0;
 			return;

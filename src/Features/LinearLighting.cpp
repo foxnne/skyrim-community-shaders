@@ -259,17 +259,21 @@ LinearLighting::PerFrameData LinearLighting::GetCommonBufferData()
 	data.directionalLightMult = (physicalSkyEnabled ? 1.0f : RE::NI_PI) * settings.directionalLightMult;
 	data.pointLightMult = RE::NI_PI * settings.pointLightMult;
 	data.ambientMult = settings.ambientMult;
-	data.glowmapMult = settings.glowmapMult;
-	data.effectLightingMult = settings.effectLightingMult;
-	data.membraneEffectMult = settings.membraneEffectMult;
-	data.bloodEffectMult = settings.bloodEffectMult;
-	data.projectedEffectMult = settings.projectedEffectMult;
-	data.deferredEffectMult = settings.deferredEffectMult;
-	data.otherEffectMult = settings.otherEffectMult;
-	data.particleEffectMult = settings.particleEffectMult;
-	data.lightSpriteEffectMult = settings.lightSpriteEffectMult;
-	data.fireEffectMult = settings.fireEffectMult;
-	data.fireEffectCurve = settings.fireEffectCurve;
+	// The main and loading menus skip the tonemap and exposure that bring these glow and effect scales back up
+	// in the world, so scaling effects there leaves glowing eyes and smoke grey until the menu closes.
+	if (!data.isMainOrLoadingMenu) {
+		data.glowmapMult = settings.glowmapMult;
+		data.effectLightingMult = settings.effectLightingMult;
+		data.membraneEffectMult = settings.membraneEffectMult;
+		data.bloodEffectMult = settings.bloodEffectMult;
+		data.projectedEffectMult = settings.projectedEffectMult;
+		data.deferredEffectMult = settings.deferredEffectMult;
+		data.otherEffectMult = settings.otherEffectMult;
+		data.particleEffectMult = settings.particleEffectMult;
+		data.lightSpriteEffectMult = settings.lightSpriteEffectMult;
+		data.fireEffectMult = settings.fireEffectMult;
+		data.fireEffectCurve = settings.fireEffectCurve;
+	}
 	return data;
 }
 

@@ -41,7 +41,7 @@ namespace NR::MaterialStrength
 	inline Values Sanitize(Values values)
 	{
 		for (uint32_t i = 0; i < kCount; ++i)
-			values.strength[i] = Util::ClampFinite(values.strength[i], kMinStrength, kMaxStrength, kDefaults[i]);
+			values.strength[i] = Util::ClampFinite(values.strength[i], kDefaults[i], kMinStrength, kMaxStrength);
 		values.edgeSoftness = std::min(values.edgeSoftness, kMaxEdgeSoftness);
 		return values;
 	}

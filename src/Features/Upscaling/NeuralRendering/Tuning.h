@@ -215,8 +215,8 @@ namespace NR
 			regionFit = std::min(regionFit, kMaxRegionFit);
 			for (auto* strength : { &intensity, &localToneStrength, &localStructureStrength,
 					 &skinToneStrength, &hairToneStrength, &eyeToneStrength, &foliageToneStrength, &landscapeToneStrength })
-				*strength = Util::ClampFinite(*strength, kMinStrength, kMaxStrength, kDefaultStrength);
-			skinStructureStrength = Util::ClampFinite(skinStructureStrength, kAutomaticSkinStructure, kMaxStrength, kAutomaticSkinStructure);
+				*strength = Util::ClampFinite(*strength, kDefaultStrength, kMinStrength, kMaxStrength);
+			skinStructureStrength = Util::ClampFinite(skinStructureStrength, kAutomaticSkinStructure, kAutomaticSkinStructure, kMaxStrength);
 			const auto materialStrengths = MaterialStrengths();
 			strengthOther = materialStrengths.strength[MaterialStrength::kNone];
 			strengthSkin = materialStrengths.strength[MaterialStrength::kSkin];
@@ -233,7 +233,7 @@ namespace NR
 			modelPreset = std::min(modelPreset, kMaxModelPreset);
 			if (!IsValidRuntimeVariant(runtimeVariant))
 				runtimeVariant.clear();
-			modelScale = Util::ClampFinite(modelScale, kMinModelScale, kMaxModelScale, kMaxModelScale);
+			modelScale = Util::ClampFinite(modelScale, kMaxModelScale, kMinModelScale, kMaxModelScale);
 			// The crop controls act only through a tracked crop, so none of them can stay set without
 			// it: a retained value reads as active while the pass ignores it, whether it came from a
 			// config file or from switching the crop off in the panel.

@@ -360,6 +360,8 @@ namespace globals
 	struct ID3D11DeviceContext_Unmap
 	{
 		static inline std::atomic<uint32_t> calls{ 0 };
+		// The vtable Unmap target our inline detour was applied to.
+		static inline const void* hookedTarget = nullptr;
 		static void thunk(ID3D11DeviceContext* This, ID3D11Resource* pResource, UINT Subresource)
 		{
 			calls.fetch_add(1, std::memory_order_relaxed);
@@ -374,6 +376,7 @@ namespace globals
 	void InstallD3DHooks(ID3D11DeviceContext* a_context)
 	{
 		stl::detour_vfunc<14, ID3D11DeviceContext_Map>(a_context);
+		ID3D11DeviceContext_Unmap::hookedTarget = (*reinterpret_cast<void* const* const*>(a_context))[15];
 		stl::detour_vfunc<15, ID3D11DeviceContext_Unmap>(a_context);
 	}
 
@@ -388,17 +391,15 @@ namespace globals
 		// we hooked and Unmap has been silent, hook the new target. Never re-hook an unchanged target: the
 		// slot would then point at our own detour and the trampoline would recurse.
 		if (d3d::context) {
-			static const void* hookedUnmapTarget = nullptr;
 			static uint32_t framesWithoutUnmap = 0;
 			const void* const currentUnmap = (*reinterpret_cast<void* const* const*>(d3d::context))[15];
 			if (ID3D11DeviceContext_Unmap::calls.exchange(0, std::memory_order_relaxed) != 0) {
-				hookedUnmapTarget = currentUnmap;
 				framesWithoutUnmap = 0;
-			} else if (hookedUnmapTarget && currentUnmap != hookedUnmapTarget && ++framesWithoutUnmap >= 30) {
+			} else if (ID3D11DeviceContext_Unmap::hookedTarget && currentUnmap != ID3D11DeviceContext_Unmap::hookedTarget && ++framesWithoutUnmap >= 30) {
 				logger::warn("[D3D HOOKS] Unmap vtable slot changed from {} to {} and no Unmap calls reached the hook for 30 frames; hooking the new target.",
-					hookedUnmapTarget, currentUnmap);
+					ID3D11DeviceContext_Unmap::hookedTarget, currentUnmap);
+				ID3D11DeviceContext_Unmap::hookedTarget = currentUnmap;
 				stl::detour_vfunc<15, ID3D11DeviceContext_Unmap>(d3d::context);
-				hookedUnmapTarget = currentUnmap;
 				framesWithoutUnmap = 0;
 			}
 		}

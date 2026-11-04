@@ -2143,6 +2143,7 @@ void NeuralRendering::DrawSettings(bool& enabled, NR::Context::Profiles& context
 	const bool styleChanged = Util::Combo(T(TKEY("style"), "Style"), &tuning.style, styleLabels);
 	changed |= styleChanged;
 	bool recreateTuning = styleChanged;
+	bool applyNow = false;
 	changed |= ImGui::SliderFloat(T(TKEY("intensity"), "Intensity"), &tuning.intensity, NR::Tuning::kMinStrength, NR::Tuning::kMaxStrength, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	recreateTuning |= ImGui::IsItemDeactivatedAfterEdit();
 	changed |= ImGui::SliderFloat(T(TKEY("local_tone"), "Local Tone Strength"), &tuning.localToneStrength, NR::Tuning::kMinStrength, NR::Tuning::kMaxStrength, "%.2f", ImGuiSliderFlags_AlwaysClamp);
@@ -2171,7 +2172,7 @@ void NeuralRendering::DrawSettings(bool& enabled, NR::Context::Profiles& context
 	if (ImGui::Button(T(TKEY("restore_defaults"), "Restore NR Defaults"))) {
 		tuning = {};
 		contexts = {};
-		changed = recreateTuning = true;
+		changed = recreateTuning = applyNow = true;
 	}
 	ImGui::SameLine();
 	if (ImGui::Button(T(TKEY("reset_history"), "Reset NR History")))
@@ -2235,8 +2236,19 @@ void NeuralRendering::DrawSettings(bool& enabled, NR::Context::Profiles& context
 	}
 	if (changed)
 		tuning.Sanitize();
+	// Rebuilding NR resets its history and glitches the picture, so edits only queue a rebuild; one click applies them together.
 	if (recreateTuning)
+		recreatePending = true;
+	if (recreatePending && enabled) {
+		ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s",
+			T(TKEY("apply_pending"), "Changes are saved but not applied to Neural Rendering yet."));
+		if (ImGui::Button(T(TKEY("apply_changes"), "Apply NR Changes")))
+			applyNow = true;
+	}
+	if (applyNow || (recreatePending && !enabled)) {
 		recreate = resetHistory = true;
+		recreatePending = false;
+	}
 	const auto current = GetStatus();
 	ImGui::TextWrapped("%s", current.text.c_str());
 	if (tuning.regionOverlay)

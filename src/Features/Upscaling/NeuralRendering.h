@@ -156,6 +156,8 @@ private:
 	std::unique_ptr<Impl> impl;
 	NR::Diagnostics diagnostics;
 	std::atomic_bool resetHistory = true, recreate = false, clearShaders = false, retryRequested = false;
+	/** @brief Tuning edits waiting for the user to apply them; only touched from the settings UI, which draws on one thread. */
+	bool recreatePending = false;
 	/** @brief The previous hook call's situation; NR::Context::Resolve updates it and flags the transitions that reset history. */
 	NR::Context::ContextState contextState;
 	Status status;

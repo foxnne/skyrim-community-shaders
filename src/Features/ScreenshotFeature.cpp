@@ -437,12 +437,21 @@ namespace
 		}
 	}
 
-	std::filesystem::path BuildScreenshotPath(const std::string& screenshotPath, const char* extension)
+	std::filesystem::path BuildScreenshotPath(const std::string& screenshotPath, const char* extension, const std::string& tag = {})
 	{
 		SYSTEMTIME st;
 		GetLocalTime(&st);
-		char buf[80];
-		snprintf(buf, sizeof(buf), "CS_%04d-%02d-%02d_%02d-%02d-%02d_%03d%s",
+		// Keep only filename-safe characters from a caller-supplied tag.
+		std::string safeTag;
+		for (char c : tag) {
+			if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.')
+				safeTag += c;
+			if (safeTag.size() >= 64)
+				break;
+		}
+		char buf[200];
+		snprintf(buf, sizeof(buf), "CS_%s%s%04d-%02d-%02d_%02d-%02d-%02d_%03d%s",
+			safeTag.c_str(), safeTag.empty() ? "" : "_",
 			st.wYear, st.wMonth, st.wDay,
 			st.wHour, st.wMinute, st.wSecond,
 			st.wMilliseconds,
@@ -1033,6 +1042,13 @@ void ScreenshotFeature::ScreenshotWorkerLoop()
 
 			if (saveOk) {
 				CopySavedPathToClipboard(screenshot.copyToClipboard, screenshot.outputPath);
+				{
+					std::lock_guard<std::mutex> lock(captureInfoMutex);
+					lastSavedPath = PathToUtf8(screenshot.outputPath);
+				}
+				savedCount.fetch_add(1, std::memory_order_release);
+			} else {
+				failedCount.fetch_add(1, std::memory_order_release);
 			}
 
 			if (!saveOk) {
@@ -1143,7 +1159,13 @@ void ScreenshotFeature::Capture()
 	screenshot.saveAsSdrPng = saveAsSdrPng;
 	screenshot.hdrPngBitDepth = static_cast<int>(hdrPngBitDepth);
 	screenshot.fixDiscordHdr = fixDiscordHdr;
-	screenshot.outputPath = BuildScreenshotPath(screenshotPath, saveAsHdrAvif ? ".avif" : (saveAsHdrPng || saveAsSdrPng ? ".png" : ".bmp"));
+	std::string captureTag;
+	{
+		std::lock_guard<std::mutex> lock(captureInfoMutex);
+		captureTag = std::move(pendingTag);
+		pendingTag.clear();
+	}
+	screenshot.outputPath = BuildScreenshotPath(screenshotPath, saveAsHdrAvif ? ".avif" : (saveAsHdrPng || saveAsSdrPng ? ".png" : ".bmp"), captureTag);
 	screenshot.copyToClipboard = copyToClipboard;
 	pendingReadbacks.push_back(std::move(screenshot));
 }

@@ -63,6 +63,14 @@ struct ScreenshotFeature : public Feature
 
 	std::atomic<bool> captureRequested{ false };
 
+	// Remote-control support: an optional filename tag for the next capture, and completion
+	// tracking so a caller can wait for the file to land and learn its path.
+	std::mutex captureInfoMutex;
+	std::string pendingTag;      // guarded by captureInfoMutex; consumed by Capture()
+	std::string lastSavedPath;   // guarded by captureInfoMutex
+	std::atomic<uint32_t> savedCount{ 0 };
+	std::atomic<uint32_t> failedCount{ 0 };
+
 private:
 	struct PendingScreenshot
 	{

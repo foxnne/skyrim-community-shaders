@@ -23,10 +23,13 @@
 #	include "Features/Upscaling.h"
 #	include "Globals.h"
 #	include "Profiler.h"
+#	include "CSEditor/EditorWindow.h"
 #	include "CSEditor/SceneManager/SceneSettingsManager.h"
 #	include "ShaderCache.h"
 #	include "State.h"
+#	include "Utils/Climate.h"
 #	include "Utils/FileSystem.h"
+#	include "Utils/Game.h"
 
 #	include <DevBenchAPI.h>
 #	include <nlohmann/json.hpp>
@@ -41,6 +44,7 @@
 #	include <mutex>
 #	include <optional>
 #	include <stdexcept>
+#	include <thread>
 #	include <unordered_set>
 
 namespace
@@ -580,14 +584,46 @@ namespace
 		}
 
 		if (kind == "screenshot") {
+			const std::string tag = a_args.value("tag", std::string{});
+			const bool wait = a_args.value("wait", true);
+			const int timeoutMs = std::clamp(a_args.value("timeoutMs", 15000), 1000, 60000);
+			auto baseline = std::make_shared<std::pair<uint32_t, uint32_t>>(0u, 0u);
 			// loaded read on the main thread (toggle tasks mutate it); the request flag is atomic.
-			return RunOnMainThread([frame]() -> json {
+			json queued = RunOnMainThread([frame, tag, baseline]() -> json {
 				auto* shot = &globals::features::screenshotFeature;
 				if (!shot->loaded)
 					return json{ { "error", "Screenshot feature is not loaded" } };
+				baseline->first = shot->savedCount.load(std::memory_order_acquire);
+				baseline->second = shot->failedCount.load(std::memory_order_acquire);
+				{
+					std::lock_guard<std::mutex> lock(shot->captureInfoMutex);
+					shot->pendingTag = tag;
+				}
 				shot->captureRequested.store(true, std::memory_order_release);
 				return json{ { "queued", true }, { "kind", "screenshot" }, { "enqueued_at_frame", frame } };
 			});
+			if (!wait || queued.contains("error"))
+				return queued;
+			// Wait on the listener thread for the worker to write the file.
+			auto* shot = &globals::features::screenshotFeature;
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+			while (std::chrono::steady_clock::now() < deadline) {
+				if (shot->savedCount.load(std::memory_order_acquire) != baseline->first) {
+					std::lock_guard<std::mutex> lock(shot->captureInfoMutex);
+					queued["saved"] = true;
+					queued["path"] = shot->lastSavedPath;
+					return queued;
+				}
+				if (shot->failedCount.load(std::memory_order_acquire) != baseline->second) {
+					queued["saved"] = false;
+					queued["error"] = "screenshot failed to save; see the CS log";
+					return queued;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(25));
+			}
+			queued["saved"] = false;
+			queued["error"] = "timed out waiting for the screenshot file";
+			return queued;
 		}
 
 		return json{ { "error", "unknown kind" }, { "kind", kind }, { "supported", json::array({ "renderdoc", "screenshot" }) } };
@@ -973,6 +1009,247 @@ namespace
 	{
 		RunHandler("communityshaders.devflags", &BuildDevFlagsResult, a_argsJson, a_sink, a_write);
 	}
+
+	// ---- world: weather / time / position / console / save control ---------------------------
+	// Lets a remote driver put the game in a known state (weather, hour, place) so look
+	// changes can be compared like for like. All engine access runs on the main thread.
+
+	json WeatherJson(const RE::TESWeather* a_weather)
+	{
+		if (!a_weather)
+			return nullptr;
+		const char* editorID = a_weather->GetFormEditorID();
+		return json{ { "formID", std::format("0x{:08X}", a_weather->GetFormID()) }, { "editorID", editorID ? editorID : "" } };
+	}
+
+	RE::TESWeather* ResolveWeather(const json& a_args, std::string& a_error)
+	{
+		if (a_args.contains("id")) {
+			uint32_t id = 0;
+			try {
+				id = a_args["id"].is_number() ? a_args["id"].get<uint32_t>() : static_cast<uint32_t>(std::stoul(a_args["id"].get<std::string>(), nullptr, 16));
+			} catch (...) {
+				a_error = "could not parse 'id' (use a full form ID such as 0x0010A236)";
+				return nullptr;
+			}
+			if (auto* weather = RE::TESForm::LookupByID<RE::TESWeather>(id))
+				return weather;
+			a_error = "no weather with that form ID";
+			return nullptr;
+		}
+		if (a_args.contains("name") && a_args["name"].is_string()) {
+			const auto name = a_args["name"].get<std::string>();
+			auto* dataHandler = RE::TESDataHandler::GetSingleton();
+			if (!dataHandler) {
+				a_error = "data handler unavailable";
+				return nullptr;
+			}
+			for (auto* weather : dataHandler->GetFormArray<RE::TESWeather>()) {
+				if (!weather)
+					continue;
+				const char* editorID = weather->GetFormEditorID();
+				if (editorID && _stricmp(editorID, name.c_str()) == 0)
+					return weather;
+			}
+			a_error = "no weather with that editor ID";
+			return nullptr;
+		}
+		a_error = "provide 'id' (full form ID) or 'name' (editor ID)";
+		return nullptr;
+	}
+
+	json BuildWorldState()
+	{
+		json out = json::object();
+		if (auto* calendar = Util::Climate::GetCalendar()) {
+			if (calendar->gameHour)
+				out["gameHour"] = calendar->gameHour->value;
+			if (calendar->timeScale)
+				out["timeScale"] = calendar->timeScale->value;
+		}
+		if (auto* sky = globals::game::sky) {
+			out["weather"] = WeatherJson(sky->currentWeather);
+			out["outgoingWeather"] = WeatherJson(sky->lastWeather);
+			out["weatherPct"] = sky->currentWeatherPct;
+		}
+		out["weatherLocked"] = EditorWindow::GetSingleton()->IsWeatherLocked();
+		if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+			const auto pos = player->GetPosition();
+			out["position"] = json{ { "x", pos.x }, { "y", pos.y }, { "z", pos.z } };
+			constexpr float kRadToDeg = 57.29577951f;
+			out["angleDeg"] = json{ { "x", player->GetAngleX() * kRadToDeg }, { "z", player->GetAngleZ() * kRadToDeg } };
+			if (auto* cell = player->GetParentCell()) {
+				const char* editorID = cell->GetFormEditorID();
+				const char* name = cell->GetName();
+				out["cell"] = json{ { "formID", std::format("0x{:08X}", cell->GetFormID()) }, { "editorID", editorID ? editorID : "" }, { "name", name ? name : "" }, { "interior", cell->IsInteriorCell() } };
+			}
+			if (auto* worldspace = player->GetWorldspace()) {
+				const char* editorID = worldspace->GetFormEditorID();
+				out["worldspace"] = json{ { "formID", std::format("0x{:08X}", worldspace->GetFormID()) }, { "editorID", editorID ? editorID : "" } };
+			}
+		}
+		return out;
+	}
+
+	// Console commands a remote driver may run. A prefix allowlist, not a free shell: the bridge
+	// listens on loopback but any local process or web page can reach it.
+	bool ConsoleCommandAllowed(const std::string& a_command)
+	{
+		std::string lower;
+		for (char c : a_command)
+			lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		static constexpr const char* kAllowed[] = {
+			"coc ", "cow ", "player.setpos ", "player.setangle ", "player.moveto ", "tfc", "tcl", "tgm",
+			"tm", "tai", "tcai", "tdetect", "set timescale to ", "set gamehour to ", "sucsm ", "fw ", "sw ",
+			"forceweather ", "setweather "
+		};
+		for (const char* prefix : kAllowed) {
+			const std::string p = prefix;
+			if (lower.compare(0, p.size(), p) == 0 && (p.back() == ' ' || lower.size() == p.size()))
+				return true;
+		}
+		return false;
+	}
+
+	json BuildWorldResult(const json& a_args)
+	{
+		const std::string action = a_args.value("action", std::string{});
+		if (action.empty())
+			return json{ { "error", "missing required parameter 'action'" }, { "supported", json::array({ "state", "list_weathers", "weather", "hour", "timescale", "teleport", "console", "load", "loadMostRecent", "quit" }) } };
+
+		return RunOnMainThread([action, a_args]() -> json {
+			if (action == "state")
+				return BuildWorldState();
+
+			if (action == "list_weathers") {
+				auto* dataHandler = RE::TESDataHandler::GetSingleton();
+				if (!dataHandler)
+					return json{ { "error", "data handler unavailable" } };
+				const std::string filter = a_args.value("filter", std::string{});
+				json list = json::array();
+				for (auto* weather : dataHandler->GetFormArray<RE::TESWeather>()) {
+					if (!weather)
+						continue;
+					const char* editorID = weather->GetFormEditorID();
+					const std::string id = editorID ? editorID : "";
+					if (!filter.empty() && id.find(filter) == std::string::npos)
+						continue;
+					list.push_back(WeatherJson(weather));
+				}
+				return json{ { "count", list.size() }, { "weathers", list } };
+			}
+
+			if (action == "weather") {
+				auto* sky = globals::game::sky;
+				if (!sky)
+					return json{ { "error", "sky unavailable (no world loaded?)" } };
+				std::string error;
+				auto* weather = ResolveWeather(a_args, error);
+				if (!weather)
+					return json{ { "error", error } };
+				const bool instant = a_args.value("instant", true);
+				if (instant)
+					Util::ForceWeather(sky, weather, false);
+				else
+					sky->SetWeather(weather, true, false);
+				auto* editor = EditorWindow::GetSingleton();
+				if (a_args.contains("lock") && a_args["lock"].is_boolean()) {
+					if (a_args["lock"].get<bool>())
+						editor->LockWeatherForUser(weather);
+					else
+						editor->UnlockWeather();
+				} else if (editor->IsWeatherLocked()) {
+					editor->LockWeather(weather);
+				}
+				return json{ { "ok", true }, { "weather", WeatherJson(weather) }, { "instant", instant } };
+			}
+
+			if (action == "hour") {
+				if (!a_args.contains("value") || !a_args["value"].is_number())
+					return json{ { "error", "provide a numeric 'value' (0-24)" } };
+				const float hour = std::clamp(a_args["value"].get<float>(), 0.0f, 23.999f);
+				auto* calendar = Util::Climate::GetCalendar();
+				if (!calendar || !calendar->gameHour)
+					return json{ { "error", "calendar unavailable" } };
+				calendar->gameHour->value = hour;
+				if (auto* sky = globals::game::sky; sky && EditorWindow::GetSingleton()->IsWeatherLocked())
+					sky->lastWeatherUpdate = hour;
+				if (a_args.value("transition", true))
+					Util::RequestTimeJumpTransition();
+				return json{ { "ok", true }, { "gameHour", hour } };
+			}
+
+			if (action == "timescale") {
+				if (!a_args.contains("value") || !a_args["value"].is_number())
+					return json{ { "error", "provide a numeric 'value' (0 freezes time; 20 is the default)" } };
+				const auto cmd = std::format("set timescale to {}", a_args["value"].get<float>());
+				RE::Console::ExecuteCommand(cmd.c_str());
+				return json{ { "ok", true }, { "command", cmd } };
+			}
+
+			if (action == "teleport") {
+				if (!RE::PlayerCharacter::GetSingleton())
+					return json{ { "error", "player unavailable" } };
+				json ran = json::array();
+				auto run = [&](const std::string& cmd) {
+					RE::Console::ExecuteCommand(cmd.c_str());
+					ran.push_back(cmd);
+				};
+				for (const char* axis : { "x", "y", "z" })
+					if (a_args.contains(axis) && a_args[axis].is_number())
+						run(std::format("player.setpos {} {}", axis, a_args[axis].get<float>()));
+				if (a_args.contains("rx") && a_args["rx"].is_number())
+					run(std::format("player.setangle x {}", a_args["rx"].get<float>()));
+				if (a_args.contains("rz") && a_args["rz"].is_number())
+					run(std::format("player.setangle z {}", a_args["rz"].get<float>()));
+				if (ran.empty())
+					return json{ { "error", "provide any of x, y, z (units) and rx, rz (degrees)" } };
+				return json{ { "ok", true }, { "ran", ran } };
+			}
+
+			if (action == "console") {
+				const std::string command = a_args.value("command", std::string{});
+				if (command.empty())
+					return json{ { "error", "provide 'command'" } };
+				if (!ConsoleCommandAllowed(command))
+					return json{ { "error", "console command not allowed by the bridge allowlist" }, { "command", command } };
+				RE::Console::ExecuteCommand(command.c_str());
+				return json{ { "ok", true }, { "command", command } };
+			}
+
+			if (action == "load") {
+				const std::string save = a_args.value("save", std::string{});
+				if (save.empty())
+					return json{ { "error", "provide 'save' (the save file name without extension)" } };
+				auto* manager = RE::BGSSaveLoadManager::GetSingleton();
+				if (!manager)
+					return json{ { "error", "save/load manager unavailable" } };
+				manager->Load(save.c_str());
+				return json{ { "queued", true }, { "save", save }, { "note", "poll world state; loading takes a while" } };
+			}
+
+			if (action == "loadMostRecent") {
+				auto* manager = RE::BGSSaveLoadManager::GetSingleton();
+				if (!manager)
+					return json{ { "error", "save/load manager unavailable" } };
+				return json{ { "queued", manager->LoadMostRecentSaveGame() } };
+			}
+
+			if (action == "quit") {
+				if (!a_args.value("confirm", false))
+					return json{ { "error", "quit ends the game; pass confirm=true" } };
+				RE::Console::ExecuteCommand("qqq");
+				return json{ { "ok", true } };
+			}
+
+			return json{ { "error", "unknown action" }, { "action", action } };
+		});
+	}
+
+	void WorldToolHandler(void*, const char* a_argsJson, void* a_sink, DevBenchAPI::WriteFn a_write)
+	{
+		RunHandler("communityshaders.world", &BuildWorldResult, a_argsJson, a_sink, a_write);
+	}
 }
 
 namespace DevBenchBridge
@@ -1010,7 +1287,7 @@ namespace DevBenchBridge
 		dvb->RegisterTool("communityshaders.shadercache", shadercacheDesc, &ShadercacheToolHandler, nullptr);
 
 		static constexpr const char* captureDesc =
-			R"({"description":"Trigger a frame capture on the next render. Kind-dispatched. kind=renderdoc: RenderDoc multi-frame capture via the in-app API, honors frames (1-120, default 1); RenderDoc must be attached/loaded (check communityshaders.feature list for DeveloperTools.loaded). kind=screenshot: lossless screenshot via the Screenshot feature; frames is ignored. Fire-and-forget — no artifact path is returned synchronously.","inputSchema":{"type":"object","properties":{"kind":{"type":"string","enum":["renderdoc","screenshot"]},"frames":{"type":"number"}},"required":["kind"]}})";
+			R"({"description":"Trigger a frame capture on the next render. Kind-dispatched. kind=renderdoc: RenderDoc multi-frame capture via the in-app API, honors frames (1-120, default 1); RenderDoc must be attached/loaded (check communityshaders.feature list for DeveloperTools.loaded). kind=screenshot: lossless screenshot via the Screenshot feature; frames is ignored. For screenshot, optional tag (filename-safe label added to the file name) and wait (default true: block until the file is written and return its path; timeoutMs 1000-60000, default 15000). RenderDoc captures are fire-and-forget.","inputSchema":{"type":"object","properties":{"kind":{"type":"string","enum":["renderdoc","screenshot"]},"frames":{"type":"number"},"tag":{"type":"string"},"wait":{"type":"boolean"},"timeoutMs":{"type":"number"}},"required":["kind"]}})";
 		dvb->RegisterTool("communityshaders.capture", captureDesc, &CaptureToolHandler, nullptr);
 
 		static constexpr const char* nvperfDesc =
@@ -1034,6 +1311,9 @@ namespace DevBenchBridge
 		static constexpr const char* devflagsDesc =
 			R"({"description":"Named runtime booleans guarding temporary candidate code paths (DEV_FLAG(\"tmp::name\") in C++), for screening a change on and off in one launch. Flags read false until set and reset at every launch. Action-dispatched. set: params flags (object of name -> boolean; all validated before any is applied). list (default): every flag a call site has read or set. reset: every flag false. All return {flags:{name:bool}}.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["set","list","reset"]},"flags":{"type":"object","additionalProperties":{"type":"boolean"}}}}})";
 		dvb->RegisterTool("communityshaders.devflags", devflagsDesc, &DevFlagsToolHandler, nullptr);
+		static constexpr const char* worldDesc =
+			R"({"description":"Put the game in a known state for look comparisons. Action-dispatched, runs on the main thread. state: gameHour, timeScale, weather (current/outgoing/percent/locked), player position and angles, cell, worldspace. list_weathers: weather records (optional filter on editor ID substring). weather: force a weather by full form ID ('id', e.g. 0x0010A236) or editor ID ('name'); instant defaults true; lock true/false pins or releases the weather. hour: set the game hour (0-24) with a sky transition refresh. timescale: set the timescale (0 freezes time). teleport: player.setpos / setangle via x,y,z (units) and rx,rz (degrees). console: an allowlisted console command (coc, cow, player.setpos, tfc, tgm, tcl, set timescale, set gamehour, fw, sw, ...). load: load a save by file name; loadMostRecent. quit: ends the game, requires confirm=true.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["state","list_weathers","weather","hour","timescale","teleport","console","load","loadMostRecent","quit"]},"id":{"type":"string"},"name":{"type":"string"},"instant":{"type":"boolean"},"lock":{"type":"boolean"},"value":{"type":"number"},"transition":{"type":"boolean"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"rx":{"type":"number"},"rz":{"type":"number"},"command":{"type":"string"},"save":{"type":"string"},"filter":{"type":"string"},"confirm":{"type":"boolean"}},"required":["action"]}})";
+		dvb->RegisterTool("communityshaders.world", worldDesc, &WorldToolHandler, nullptr);
 	}
 
 	std::optional<Request> GetLastRequest()

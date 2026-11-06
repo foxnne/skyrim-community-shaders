@@ -26,6 +26,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	ExteriorStrength,
 	ExteriorSunFocus,
 	ExteriorShaftDefinition,
+	ExteriorNightStrength,
+	ExteriorDayHaze,
+	ExteriorNightHaze,
+	InteriorHaze,
 	InteriorEnabled,
 	InteriorQuality,
 	InteriorCustomSize,
@@ -42,6 +46,15 @@ void VolumetricLighting::DrawSettings()
 	if (settings.ExteriorEnabled) {
 		DrawVolumetricLightingSettings(settings.ExteriorQuality, settings.ExteriorCustomSize, false, !inInterior);
 		DrawGodRaySettings(settings.ExteriorStrength, settings.ExteriorSunFocus, settings.ExteriorShaftDefinition, false);
+		ImGui::SliderFloat(T(TKEY("exterior_night_strength"), "Exterior Night God Ray Scale"), &settings.ExteriorNightStrength, 0.0f, 2.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("exterior_night_strength_tooltip"), "Multiplies the exterior god rays while the moon is the main light, so moon rays can stay far fainter than sun rays."));
+		ImGui::SliderFloat(T(TKEY("exterior_day_haze"), "Exterior Day Haze Scale"), &settings.ExteriorDayHaze, 0.0f, 2.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("exterior_day_haze_tooltip"), "Multiplies the whole volumetric haze outdoors while the sun is the main light."));
+		ImGui::SliderFloat(T(TKEY("exterior_night_haze"), "Exterior Night Haze Scale"), &settings.ExteriorNightHaze, 0.0f, 2.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("exterior_night_haze_tooltip"), "Multiplies the whole volumetric haze, not just the rays, while the moon is the main light. Lower it to keep nights dark and clear."));
 	}
 
 	if (ImGui::Checkbox(T(TKEY("enable_interiors"), "Enable Volumetric Lighting in Interiors"), &settings.InteriorEnabled))
@@ -50,6 +63,9 @@ void VolumetricLighting::DrawSettings()
 	if (settings.InteriorEnabled) {
 		DrawVolumetricLightingSettings(settings.InteriorQuality, settings.InteriorCustomSize, true, inInterior);
 		DrawGodRaySettings(settings.InteriorStrength, settings.InteriorSunFocus, settings.InteriorShaftDefinition, true);
+		ImGui::SliderFloat(T(TKEY("interior_haze"), "Interior Haze Scale"), &settings.InteriorHaze, 0.0f, 2.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("interior_haze_tooltip"), "Multiplies the whole volumetric haze indoors."));
 	}
 
 	DrawEffects11PrioritySetting();
@@ -190,6 +206,10 @@ void VolumetricLighting::LoadSettings(json& o_json)
 	settings.ExteriorQuality = std::clamp(settings.ExteriorQuality, 0, static_cast<int32_t>(Quality::Count) - 1);
 	settings.InteriorQuality = std::clamp(settings.InteriorQuality, 0, static_cast<int32_t>(Quality::Count) - 1);
 	settings.ExteriorStrength = std::clamp(settings.ExteriorStrength, 0.0f, MaxGodRayStrength);
+	settings.ExteriorNightStrength = std::clamp(settings.ExteriorNightStrength, 0.0f, 2.0f);
+	settings.ExteriorNightHaze = std::clamp(settings.ExteriorNightHaze, 0.0f, 2.0f);
+	settings.ExteriorDayHaze = std::clamp(settings.ExteriorDayHaze, 0.0f, 2.0f);
+	settings.InteriorHaze = std::clamp(settings.InteriorHaze, 0.0f, 2.0f);
 	settings.InteriorStrength = std::clamp(settings.InteriorStrength, 0.0f, MaxGodRayStrength);
 	settings.ExteriorSunFocus = std::clamp(settings.ExteriorSunFocus, 0.0f, 1.0f);
 	settings.InteriorSunFocus = std::clamp(settings.InteriorSunFocus, 0.0f, 1.0f);
@@ -305,7 +325,9 @@ void VolumetricLighting::ApplyGodRaySettings()
 	const bool effects11Claimed = std::exchange(effects11DroveIntensity, false);
 	const auto priority = static_cast<GodRayPriority>(settings.Effects11Priority);
 
-	const float strength = inInterior ? settings.InteriorStrength : settings.ExteriorStrength;
+	float strength = inInterior ? settings.InteriorStrength : settings.ExteriorStrength;
+	if (!inInterior)
+		strength *= std::lerp(1.0f, settings.ExteriorNightStrength, std::clamp(globals::features::skySync.GetLightNightWeight(), 0.0f, 1.0f));
 	const float sunFocus = inInterior ? settings.InteriorSunFocus : settings.ExteriorSunFocus;
 	const float shaftDefinition = inInterior ? settings.InteriorShaftDefinition : settings.ExteriorShaftDefinition;
 
@@ -322,6 +344,8 @@ void VolumetricLighting::ApplyGodRaySettings()
 		if (uniformStrength > 1e-4f)
 			godRayBufferData.GodRayGain = strength / uniformStrength - 1.0f;
 	}
+
+	renderData.intensity *= inInterior ? settings.InteriorHaze : std::lerp(settings.ExteriorDayHaze, settings.ExteriorNightHaze, std::clamp(globals::features::skySync.GetLightNightWeight(), 0.0f, 1.0f));
 
 	if (shaftDefinition != 0.0f) {
 		const float target = shaftDefinition > 0.0f ? MaxForwardScattering : 0.0f;

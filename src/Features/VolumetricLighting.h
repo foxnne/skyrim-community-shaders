@@ -22,6 +22,10 @@ public:
 		float ExteriorStrength = 1.0f;
 		float ExteriorSunFocus = 1.0f;
 		float ExteriorShaftDefinition = 0.0f;
+		float ExteriorNightStrength = 1.0f;
+		float ExteriorDayHaze = 1.0f;
+		float ExteriorNightHaze = 1.0f;
+		float InteriorHaze = 1.0f;
 		bool InteriorEnabled = true;
 		int32_t InteriorQuality = 2;
 		TextureSize InteriorCustomSize;

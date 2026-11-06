@@ -505,6 +505,13 @@ public:
 		bool SkipRedundantLightAttach = true;
 
 		float LightSourceSize = 1.0f;
+
+		// Realistic falloff: treats ordinary point lights as inverse-square sources, matched to the original brightness at a reference distance.
+		bool RealisticFalloff = false;
+		bool RealisticFalloffInteriorOnly = true;
+		float RealisticFalloffRefFraction = 0.35f;  // fraction of the light radius where brightness matches the original curve
+		float RealisticFalloffIntensity = 1.0f;
+		float RealisticFalloffRadiusScale = 1.0f;
 	};
 
 	uint clusterSize[3] = { 16 };

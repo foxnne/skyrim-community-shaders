@@ -40,7 +40,12 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	LocalShadowFilterScale,
 	LocalShadowUpdatesPerFrame,
 	SkipRedundantLightAttach,
-	LightSourceSize)
+	LightSourceSize,
+	RealisticFalloff,
+	RealisticFalloffInteriorOnly,
+	RealisticFalloffRefFraction,
+	RealisticFalloffIntensity,
+	RealisticFalloffRadiusScale)
 
 static constexpr uint CLUSTER_MAX_LIGHTS = 128;
 
@@ -178,6 +183,17 @@ void LightLimitFix::DrawSettings()
 	ImGui::SliderFloat(T(TKEY("light_source_size"), "Light Source Size"), &settings.LightSourceSize, 0.0f, MaxLightSourceSize, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("light_source_size_tooltip"), "Gives local lights a physical size, so their highlights on polished and wet surfaces have a shape instead of a pinpoint. 0 turns it off."));
+	}
+
+	ImGui::Checkbox("Realistic Falloff (inverse square)", &settings.RealisticFalloff);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("Treats ordinary point lights as inverse-square sources: bright and punchy near the light, falling away quickly, instead of the flat vanilla curve. Brightness is matched to the original at the reference distance below.");
+	}
+	if (settings.RealisticFalloff) {
+		ImGui::Checkbox("Interiors only##realisticfalloff", &settings.RealisticFalloffInteriorOnly);
+		ImGui::SliderFloat("Reference distance (fraction of radius)", &settings.RealisticFalloffRefFraction, 0.1f, 0.8f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderFloat("Falloff intensity", &settings.RealisticFalloffIntensity, 0.2f, 4.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderFloat("Falloff radius scale", &settings.RealisticFalloffRadiusScale, 0.4f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	}
 }
 
@@ -641,6 +657,27 @@ LightLimitFix::LightData LightLimitFix::ProcessLight(RE::BSLight* bsLight, RE::N
 		runtimeData->radius = light.radius;
 		light.fadeZone = 1.f / (light.radius * std::clamp(FadeZoneBase / light.radius, 0.f, 1.f));
 		light.sizeBias = ScaledUnitsSq * runtimeData->size * runtimeData->size * 0.5f;
+	}
+	if (bsLight->pointLight && !isInvSq && settings.RealisticFalloff && light.radius > 1.f) {
+		bool apply = true;
+		if (settings.RealisticFalloffInteriorOnly) {
+			const auto* player = RE::PlayerCharacter::GetSingleton();
+			const auto* cell = player ? player->GetParentCell() : nullptr;
+			apply = cell && cell->IsInteriorCell();
+		}
+		if (apply) {
+			const float ref = std::clamp(settings.RealisticFalloffRefFraction, 0.05f, 0.9f);
+			const float radius = std::max(light.radius * std::clamp(settings.RealisticFalloffRadiusScale, 0.2f, 4.0f), 1.f);
+			const float size = std::clamp(runtimeData->size, 0.01f, 50.0f);
+			const float bias = ScaledUnitsSq * size * size * 0.5f;
+			const float d0 = radius * ref;
+			const float originalAtRef = 1.0f - ref * ref;
+			light.fade *= settings.RealisticFalloffIntensity * originalAtRef * (d0 * d0 + bias) / ScaledUnitsSq;
+			light.lightFlags.set(LightFlags::InverseSquare);
+			light.radius = radius;
+			light.fadeZone = 1.f / (radius * std::clamp(FadeZoneBase / radius, 0.f, 1.f));
+			light.sizeBias = bias;
+		}
 	}
 	light.invRadius = 1.f / light.radius;
 	light.sourceRadius = GetSourceRadius(light.radius);

@@ -14,6 +14,7 @@
 #include "PostProcessing/HistogramAutoExposure.h"
 #include "PostProcessing/ImageSpaceModifiers.h"
 #include "PostProcessing/LUT.h"
+#include "PostProcessing/LookGrade.h"
 #include "PostProcessing/LensFlare.h"
 #include "PostProcessing/LocalExposure.h"
 #include "PostProcessing/MotionBlur.h"
@@ -120,6 +121,7 @@ struct PostProcessing : Feature
 		LensFlare,
 		Composite,
 		ColorGrading,
+		LookGrade,
 		LUT,
 		Camera,
 		Border,

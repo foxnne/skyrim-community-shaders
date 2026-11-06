@@ -1101,7 +1101,7 @@ namespace
 		static constexpr const char* kAllowed[] = {
 			"coc ", "cow ", "player.setpos ", "player.setangle ", "player.moveto ", "tfc", "tcl", "tgm",
 			"tm", "tai", "tcai", "tdetect", "set timescale to ", "set gamehour to ", "sucsm ", "fw ", "sw ",
-			"forceweather ", "setweather "
+			"forceweather ", "setweather ", "player.placeatme "
 		};
 		for (const char* prefix : kAllowed) {
 			const std::string p = prefix;
@@ -1250,6 +1250,199 @@ namespace
 	{
 		RunHandler("communityshaders.world", &BuildWorldResult, a_argsJson, a_sink, a_write);
 	}
+
+	// ---- Test bed: spawn / equip / move / remove objects and drive a free camera, for repeatable material and lighting shots ----
+	std::vector<RE::ObjectRefHandle> g_testbedRefs;  // index = id; main thread only
+
+	RE::TESForm* TestbedResolveForm(const json& a_value)
+	{
+		if (a_value.is_number_integer())
+			return RE::TESForm::LookupByID(static_cast<RE::FormID>(a_value.get<std::uint64_t>()));
+		if (a_value.is_string()) {
+			const auto text = a_value.get<std::string>();
+			try {
+				std::size_t used = 0;
+				const auto id = std::stoul(text, &used, 0);
+				if (used == text.size())
+					return RE::TESForm::LookupByID(static_cast<RE::FormID>(id));
+			} catch (...) {
+			}
+			return RE::TESForm::LookupByEditorID(text);
+		}
+		return nullptr;
+	}
+
+	RE::TESObjectREFR* TestbedGetRef(const json& a_args)
+	{
+		if (!a_args.contains("id") || !a_args["id"].is_number_integer())
+			return nullptr;
+		const auto id = a_args["id"].get<std::int64_t>();
+		if (id < 0 || static_cast<std::size_t>(id) >= g_testbedRefs.size())
+			return nullptr;
+		auto ref = g_testbedRefs[static_cast<std::size_t>(id)].get();
+		return ref.get();
+	}
+
+	json TestbedRefInfo(std::size_t a_id, RE::TESObjectREFR* a_ref)
+	{
+		const auto pos = a_ref->GetPosition();
+		return json{ { "id", a_id }, { "refFormID", std::format("0x{:08X}", a_ref->GetFormID()) }, { "x", pos.x }, { "y", pos.y }, { "z", pos.z },
+			{ "rz", a_ref->GetAngleZ() * 57.29577951f } };
+	}
+
+	void TestbedApplyTransform(RE::TESObjectREFR* a_ref, const json& a_args)
+	{
+		const auto pos = a_ref->GetPosition();
+		const float x = a_args.contains("x") && a_args["x"].is_number() ? a_args["x"].get<float>() : pos.x;
+		const float y = a_args.contains("y") && a_args["y"].is_number() ? a_args["y"].get<float>() : pos.y;
+		const float z = a_args.contains("z") && a_args["z"].is_number() ? a_args["z"].get<float>() : pos.z;
+		a_ref->SetPosition(x, y, z);
+		if (a_args.contains("rz") && a_args["rz"].is_number()) {
+			RE::NiPoint3 angle{ a_ref->GetAngleX(), a_ref->GetAngleY(), a_args["rz"].get<float>() * 0.01745329252f };
+			a_ref->SetAngle(angle);
+		}
+	}
+
+	json TestbedEquip(RE::TESObjectREFR* a_ref, const json& a_items)
+	{
+		auto* actor = a_ref->As<RE::Actor>();
+		if (!actor)
+			return json{ { "error", "reference is not an actor" } };
+		json done = json::array();
+		auto* equipManager = RE::ActorEquipManager::GetSingleton();
+		for (const auto& item : a_items) {
+			auto* form = TestbedResolveForm(item);
+			auto* bound = form ? form->As<RE::TESBoundObject>() : nullptr;
+			if (!bound) {
+				done.push_back(json{ { "item", item }, { "error", "form not found or not an item" } });
+				continue;
+			}
+			actor->AddObjectToContainer(bound, nullptr, 1, nullptr);
+			if (equipManager)
+				equipManager->EquipObject(actor, bound, nullptr, 1, nullptr, false, true, false, true);
+			done.push_back(json{ { "item", item }, { "ok", true } });
+		}
+		return done;
+	}
+
+	json BuildTestbedResult(const json& a_args)
+	{
+		const std::string action = a_args.value("action", std::string{});
+		if (action.empty())
+			return json{ { "error", "missing required parameter 'action'" }, { "supported", json::array({ "spawn", "place", "equip", "remove", "clear", "list", "camera", "camera_get" }) } };
+
+		return RunOnMainThread([action, a_args]() -> json {
+			auto* player = RE::PlayerCharacter::GetSingleton();
+			if (!player)
+				return json{ { "error", "player unavailable" } };
+
+			if (action == "spawn") {
+				if (!a_args.contains("form"))
+					return json{ { "error", "provide 'form' (form ID number, hex string or editor ID)" } };
+				auto* form = TestbedResolveForm(a_args["form"]);
+				auto* bound = form ? form->As<RE::TESBoundObject>() : nullptr;
+				if (!bound)
+					return json{ { "error", "form not found or not placeable" }, { "form", a_args["form"] } };
+				auto ref = player->PlaceObjectAtMe(bound, false);
+				if (!ref)
+					return json{ { "error", "PlaceObjectAtMe failed" } };
+				TestbedApplyTransform(ref.get(), a_args);
+				g_testbedRefs.push_back(ref->GetHandle());
+				json out = TestbedRefInfo(g_testbedRefs.size() - 1, ref.get());
+				if (a_args.contains("equip") && a_args["equip"].is_array())
+					out["equip"] = TestbedEquip(ref.get(), a_args["equip"]);
+				return out;
+			}
+
+			if (action == "place" || action == "equip" || action == "remove") {
+				auto* ref = TestbedGetRef(a_args);
+				if (!ref)
+					return json{ { "error", "unknown or expired 'id'" } };
+				if (action == "place") {
+					TestbedApplyTransform(ref, a_args);
+					return TestbedRefInfo(static_cast<std::size_t>(a_args["id"].get<std::int64_t>()), ref);
+				}
+				if (action == "equip") {
+					if (!a_args.contains("items") || !a_args["items"].is_array())
+						return json{ { "error", "provide 'items' (array of forms)" } };
+					return json{ { "ok", true }, { "items", TestbedEquip(ref, a_args["items"]) } };
+				}
+				ref->Disable();
+				ref->SetDelete(true);
+				g_testbedRefs[static_cast<std::size_t>(a_args["id"].get<std::int64_t>())] = {};
+				return json{ { "ok", true } };
+			}
+
+			if (action == "clear") {
+				std::size_t removed = 0;
+				for (auto& handle : g_testbedRefs) {
+					auto ref = handle.get();
+					if (ref) {
+						ref->Disable();
+						ref->SetDelete(true);
+						++removed;
+					}
+				}
+				g_testbedRefs.clear();
+				return json{ { "ok", true }, { "removed", removed } };
+			}
+
+			if (action == "list") {
+				json arr = json::array();
+				for (std::size_t i = 0; i < g_testbedRefs.size(); ++i) {
+					auto ref = g_testbedRefs[i].get();
+					if (ref)
+						arr.push_back(TestbedRefInfo(i, ref.get()));
+				}
+				return json{ { "refs", arr } };
+			}
+
+			if (action == "camera" || action == "camera_get") {
+				auto* camera = RE::PlayerCamera::GetSingleton();
+				if (!camera)
+					return json{ { "error", "player camera unavailable" } };
+				const std::string mode = a_args.value("mode", std::string{ "free" });
+				if (action == "camera" && mode == "player") {
+					camera->ForceThirdPerson();
+					return json{ { "ok", true }, { "mode", "player-third" } };
+				}
+				if (action == "camera" && mode == "first") {
+					camera->ForceFirstPerson();
+					return json{ { "ok", true }, { "mode", "player-first" } };
+				}
+				auto* freeState = camera->GetRuntimeData().cameraStates[RE::CameraState::kFree].get();
+				if (!freeState)
+					return json{ { "error", "free camera state unavailable" } };
+				if (camera->currentState.get() != freeState)
+					camera->SetState(freeState);
+				auto* free = static_cast<RE::FreeCameraState*>(freeState);
+				if (action == "camera") {
+					if (a_args.contains("x") && a_args["x"].is_number())
+						free->translation.x = a_args["x"].get<float>();
+					if (a_args.contains("y") && a_args["y"].is_number())
+						free->translation.y = a_args["y"].get<float>();
+					if (a_args.contains("z") && a_args["z"].is_number())
+						free->translation.z = a_args["z"].get<float>();
+					// rotation.x = pitch, rotation.y = yaw (radians); verify with camera_get against the player's own angles
+					if (a_args.contains("pitch") && a_args["pitch"].is_number())
+						free->rotation.x = a_args["pitch"].get<float>() * 0.01745329252f;
+					if (a_args.contains("yaw") && a_args["yaw"].is_number())
+						free->rotation.y = a_args["yaw"].get<float>() * 0.01745329252f;
+					if (a_args.contains("fov") && a_args["fov"].is_number())
+						camera->GetRuntimeData2().worldFOV = a_args["fov"].get<float>();
+				}
+				return json{ { "ok", true }, { "mode", "free" }, { "x", free->translation.x }, { "y", free->translation.y }, { "z", free->translation.z },
+					{ "rotX", free->rotation.x }, { "rotY", free->rotation.y }, { "fov", camera->GetRuntimeData2().worldFOV } };
+			}
+
+			return json{ { "error", "unknown action" }, { "action", action } };
+		});
+	}
+
+	void TestbedToolHandler(void*, const char* a_argsJson, void* a_sink, DevBenchAPI::WriteFn a_write)
+	{
+		RunHandler("communityshaders.testbed", &BuildTestbedResult, a_argsJson, a_sink, a_write);
+	}
 }
 
 namespace DevBenchBridge
@@ -1314,6 +1507,10 @@ namespace DevBenchBridge
 		static constexpr const char* worldDesc =
 			R"({"description":"Put the game in a known state for look comparisons. Action-dispatched, runs on the main thread. state: gameHour, timeScale, weather (current/outgoing/percent/locked), player position and angles, cell, worldspace. list_weathers: weather records (optional filter on editor ID substring). weather: force a weather by full form ID ('id', e.g. 0x0010A236) or editor ID ('name'); instant defaults true; lock true/false pins or releases the weather. hour: set the game hour (0-24) with a sky transition refresh. timescale: set the timescale (0 freezes time). teleport: player.setpos / setangle via x,y,z (units) and rx,rz (degrees). console: an allowlisted console command (coc, cow, player.setpos, tfc, tgm, tcl, set timescale, set gamehour, fw, sw, ...). load: load a save by file name; loadMostRecent. quit: ends the game, requires confirm=true.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["state","list_weathers","weather","hour","timescale","teleport","console","load","loadMostRecent","quit"]},"id":{"type":"string"},"name":{"type":"string"},"instant":{"type":"boolean"},"lock":{"type":"boolean"},"value":{"type":"number"},"transition":{"type":"boolean"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"rx":{"type":"number"},"rz":{"type":"number"},"command":{"type":"string"},"save":{"type":"string"},"filter":{"type":"string"},"confirm":{"type":"boolean"}},"required":["action"]}})";
 		dvb->RegisterTool("communityshaders.world", worldDesc, &WorldToolHandler, nullptr);
+
+		static constexpr const char* testbedDesc =
+			R"({"description":"Test bed for repeatable material/lighting shots. Action-dispatched on the main thread. spawn: place any form at the player (form = form ID number, hex string like '0x000A2C8E' or editor ID) then move it with x,y,z (units) and rz (yaw degrees); optional equip = array of item forms for actors; returns an id. place: move/rotate a spawned object by id. equip: add and equip items on a spawned actor by id (items array). remove: delete one spawned object by id. clear: delete everything spawned. list: spawned objects. camera: mode free (default; free camera at x,y,z with pitch and yaw degrees and optional fov), player (third person) or first (first person). camera_get: current free-camera position/rotation in radians, to calibrate angles.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["spawn","place","equip","remove","clear","list","camera","camera_get"]},"form":{},"id":{"type":"number"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"rz":{"type":"number"},"equip":{"type":"array","items":{}},"items":{"type":"array","items":{}},"mode":{"type":"string"},"pitch":{"type":"number"},"yaw":{"type":"number"},"fov":{"type":"number"}},"required":["action"]}})";
+		dvb->RegisterTool("communityshaders.testbed", testbedDesc, &TestbedToolHandler, nullptr);
 	}
 
 	std::optional<Request> GetLastRequest()

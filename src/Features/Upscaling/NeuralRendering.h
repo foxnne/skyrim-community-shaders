@@ -107,7 +107,7 @@ struct NeuralRendering
 	/** @brief Draws the runtime DLL's verdict and how to fix it, under Upscaling's DLL tables. */
 	void DrawRuntimeDiagnostics() const;
 	/** @brief Replaces active kMAIN eye regions before upscaling and frame-generation capture. */
-	void DrawBeforeUpscaling(bool enabled, const NR::Context::Profiles& contexts, const NR::Tuning& tuning, uint32_t target, float2 renderSize);
+	void DrawBeforeUpscaling(bool enabled, const NR::Context::Profiles& contexts, const NR::Tuning& tuning, uint32_t target, float2 renderSize, bool postUpscale = false, float2 guideScale = { 1.0f, 1.0f }, bool finalImage = false);
 	/** @brief Draws the bounded scheduling diagnostics overlay. */
 	void DrawDiagnosticsOverlay();
 	/** @brief True while the developer has switched the diagnostics overlay on. */

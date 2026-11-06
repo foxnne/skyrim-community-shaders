@@ -538,16 +538,17 @@ namespace NR
 			writer.SetUInt("DLSSNR.Upscaling", 0u);
 			writer.SetUInt("DLSSNR.Hint.Render.Preset", state.modelPresets ? kRuntimeModelPreset[std::min(tuning.modelPreset, Tuning::kMaxModelPreset)] : 0u);
 			const auto flags = static_cast<unsigned int>(
-				NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_DoSharpening | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure);
+				(tuning.modelHdr ? NVSDK_NGX_DLSS_Feature_Flags_IsHDR : 0) | (tuning.modelSharpening ? NVSDK_NGX_DLSS_Feature_Flags_DoSharpening : 0) |
+				(tuning.modelAutoExposure ? NVSDK_NGX_DLSS_Feature_Flags_AutoExposure : 0));
 			writer.SetUInt("Feature_Flags", flags);
 			writer.SetUInt("NVSDK_NGX_Parameter_Feature_Flags", flags);
 			writer.SetFloat("InPreExposure", 1.0f);
 			writer.SetFloat("InExposureScale", 1.0f);
 			writer.SetFloat("NVSDK_NGX_Parameter_PreExposure", 1.0f);
 			writer.SetFloat("NVSDK_NGX_Parameter_ExposureScale", 1.0f);
-			writer.SetUInt("DLSSNR.AutoExposure", 1u);
-			writer.SetUInt("DLSSNR.Hdr", 1u);
-			writer.SetUInt("DLSSNR.SDR", 0u);
+			writer.SetUInt("DLSSNR.AutoExposure", tuning.modelAutoExposure ? 1u : 0u);
+			writer.SetUInt("DLSSNR.Hdr", tuning.modelHdr ? 1u : 0u);
+			writer.SetUInt("DLSSNR.SDR", tuning.modelHdr ? 0u : 1u);
 			WriteTuning(writer, tuning, protection);
 			writer.SetUInt("DLSSNR.UICorrection", 1u);
 			NVSDK_NGX_Handle* handle = nullptr;

@@ -210,7 +210,9 @@ float ToneLowAt(int2 pixel, float centerDelta)
 		exposure = ManualExposure;
 	exposure = isfinite(exposure) && exposure > 0.0 ? exposure : 1.0;
 	// MakeDisplayProxy's saturate() bounds this to [0, 1] regardless of upstream NaN/Inf.
-	float3 proxy = MakeDisplayProxy(max(ToLinear(source), 0.0) * exposure);
+	// Raw is the final-image path: the source is already display encoded, so the model gets it unchanged.
+	// Encoding it again would lift every black and flatten the image.
+	float3 proxy = ConversionMode == NR::kConversionRaw ? saturate(source) : MakeDisplayProxy(max(ToLinear(source), 0.0) * exposure);
 	Output[id.xy] = float4(proxy, 1.0);
 }
 

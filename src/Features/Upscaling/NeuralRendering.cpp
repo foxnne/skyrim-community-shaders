@@ -223,7 +223,9 @@ struct NeuralRendering::Impl
 	winrt::com_ptr<ID3D11DeviceContext1> context;
 	winrt::com_ptr<ID3DDeviceContextState> isolated;
 	winrt::com_ptr<ID3D11SamplerState> linearSampler;
-	Util::LazyShader<ID3D11ComputeShader> prepareColor, prepareToneData, compositeColor, materialAlphaShader, storeGain, reuseGain, downsampleLow, expandLow;
+	Util::LazyShader<ID3D11ComputeShader> prepareColor, prepareToneData, compositeColor, materialAlphaShader, storeGain, reuseGain, downsampleLow, expandLow, encodeRescaled;
+	/** @brief Render-size over display-size when NR runs after upscaling, else 1: how the encoder maps an output pixel into the guides. */
+	float2 guideScale{ 1.0f, 1.0f };
 	/** @brief Cbuffer CategoryAlphaCS.hlsl reads: the eye extent, the stereo offset, the softness radius and the eight strengths. */
 	struct alignas(16) CategoryAlphaData
 	{
@@ -355,6 +357,7 @@ struct NeuralRendering::Impl
 	std::string runtimeVariant;
 	uint32_t lastDiagnosticOptions = 0;
 	uint32_t lastModelPreset = 0;
+	uint32_t lastModelFlags = 7;
 	uint32_t debugOptions = 0;
 	NR::Diagnostics::ColorConversion conversionMode = NR::Diagnostics::ColorConversion::Production;
 	NR::Diagnostics::ExposureMode exposureMode = NR::Diagnostics::ExposureMode::Production;
@@ -568,7 +571,8 @@ struct NeuralRendering::Impl
 		eye.frame.jitterY = NR::SanitizeJitter(-jitter.y);
 		eye.frame.frameTimeMs = NR::SanitizeFrameTimeMs(*globals::game::deltaTime * 1000.0f);
 		eye.frame.feedCameraData = (diagnostic.options & NR::Diagnostics::FeedCameraData) != 0;
-		if (diagnostic.options & NR::Diagnostics::ZeroJitter)
+		// The final-image and after-upscale colour is already unjittered, so telling the model it is jittered shifts its samples every frame.
+		if ((diagnostic.options | debugOptions) & NR::Diagnostics::ZeroJitter)
 			eye.frame.jitterX = eye.frame.jitterY = 0;
 		sample.jitterX = eye.frame.jitterX;
 		sample.jitterY = eye.frame.jitterY;
@@ -1165,7 +1169,7 @@ struct NeuralRendering::Impl
 				auto& eye = eyes[i];
 				diagnostic.reset[i] = UpdateFrame(i, reset, diagnostic);
 				// Flat only (no stereo offset in this tree's UpscalingDataCB).
-				Upscaling::UpscalingDataCB data{ { float(guideWidth), float(guideHeight) }, {} };
+				Upscaling::UpscalingDataCB data{ { float(guideWidth), float(guideHeight) }, guideScale };
 				encodeBuffer->Update(data);
 				auto buffer = encodeBuffer->CB();
 				context->CSSetConstantBuffers(0, 1, &buffer);
@@ -2061,6 +2065,42 @@ void NeuralRendering::DrawSettings(bool& enabled, NR::Context::Profiles& context
 	ImGui::TextWrapped("%s", T(TKEY("description"),
 								 "One display-referred NR proxy pass at eye render resolution, composed back into scene-linear HDR before DLSS/FSR and frame-generation capture. Requires an NR-capable NVIDIA GPU and a validated 310.8 or 310.9 runtime build."));
 	bool changed = false;
+	if (ImGui::Checkbox(T(TKEY("after_upscale"), "Run After Upscaling (full-resolution input)"), &tuning.afterUpscale)) {
+		changed = true;
+		resetHistory = recreate = true;
+	}
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::TextUnformatted(T(TKEY("after_upscale_tooltip"),
+			"Runs Neural Rendering on the upscaler's full-resolution output, so the model sees the clean native-size image instead of the lower-resolution frame. Depth and motion guides are resampled from render resolution. Experimental; costs about as much as NR at native resolution."));
+	if (ImGui::Button(T(TKEY("match_old_setup"), "Apply Old NGVO Setup"))) {
+		// The configuration that gave realistic faces with the same runtime: NR on the finished SDR image, its output
+		// used directly, the model told the input is not HDR, no auto mask, style 1 and every strength at 1.
+		tuning.finalImage = true;
+		tuning.afterUpscale = false;
+		tuning.replaceComposite = true;
+		tuning.modelHdr = false;
+		tuning.useAutoMask = false;
+		tuning.style = 1;
+		tuning.intensity = tuning.localToneStrength = tuning.localStructureStrength = NR::Tuning::kDefaultStrength;
+		tuning.skinStructureStrength = NR::Tuning::kDefaultStrength;
+		changed = true;
+		resetHistory = recreate = true;
+	}
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::TextUnformatted(T(TKEY("match_old_setup_tooltip"),
+			"Sets Run On Final Image, Use NR Output Directly, SDR model input, no auto mask, style 1 and all strengths to 1.0, the combination used by the earlier PureDark setup."));
+	if (ImGui::Checkbox(T(TKEY("replace_composite"), "Use NR Output Directly"), &tuning.replaceComposite))
+		changed = true;
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::TextUnformatted(T(TKEY("replace_composite_tooltip"),
+			"Uses the model's picture as the result. Off applies only its brightness change to the original as a bounded gain, which drops the colour and skin changes the model makes."));
+	if (ImGui::Checkbox(T(TKEY("final_image"), "Run On Final Image (after tone mapping and grade)"), &tuning.finalImage)) {
+		changed = true;
+		resetHistory = recreate = true;
+	}
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::TextUnformatted(T(TKEY("final_image_tooltip"),
+			"Runs Neural Rendering on the finished image the display shows, after tone mapping, your colour grade and the upscaler, just before the UI. The model sees exactly the final picture, with no exposure or colour transform guess. SDR only; with HDR output it falls back to the normal placement. Experimental."));
 	if (const auto builds = GetRuntimeBuilds(); builds.size() > 1) {
 		size_t selected = 0;
 		for (size_t i = 0; i < builds.size(); ++i) {
@@ -2327,7 +2367,7 @@ void NeuralRendering::CaptureAfterUpscaling()
 	diagnostics.FinishCapture(globals::state->frameCount);
 }
 
-void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profiles& contexts, const NR::Tuning& tuning, uint32_t target, float2 renderSize)
+void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profiles& contexts, const NR::Tuning& tuning, uint32_t target, float2 renderSize, bool postUpscale, float2 guideScale, bool finalImage)
 {
 	using Outcome = NR::Diagnostics::Outcome;
 	const auto context = NR::Context::Resolve(contexts, DialogueOpen(), contextState);
@@ -2417,6 +2457,14 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 			}
 			work.lastDiagnosticOptions = diagnostic.options;
 		}
+		const uint32_t modelFlagsKey = (effective.modelHdr ? 1u : 0u) | (effective.modelSharpening ? 2u : 0u) | (effective.modelAutoExposure ? 4u : 0u);
+		if (modelFlagsKey != work.lastModelFlags) {
+			// The creation flags are fixed when a feature is created, so a change needs new features.
+			work.interop.Drain();
+			work.runtime.ResetFeatures();
+			resetHistory = true;
+			work.lastModelFlags = modelFlagsKey;
+		}
 		if (effective.modelPreset != work.lastModelPreset) {
 			// The network is chosen when a feature is created, so a new choice needs new features.
 			work.interop.Drain();
@@ -2450,9 +2498,28 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 			work.reuseGain.Reset();
 			work.downsampleLow.Reset();
 			work.expandLow.Reset();
+			work.encodeRescaled.Reset();
 		}
 		auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
-		auto* color = Util::AsReal(targets[RE::RENDER_TARGETS::kMAIN].texture);
+		// The finished image is the framebuffer slot. With the swap-chain proxy the slot can have no texture pointer,
+		// so it is resolved through its views, as the screenshot path does. The holder keeps that reference alive.
+		winrt::com_ptr<ID3D11Texture2D> framebufferHolder;
+		auto* color = [&]() -> ID3D11Texture2D* {
+			if (!finalImage)
+				return Util::AsReal(targets[RE::RENDER_TARGETS::kMAIN].texture);
+			auto& slot = targets[RE::RENDER_TARGET::kFRAMEBUFFER];
+			if (slot.texture)
+				return Util::AsReal(slot.texture);
+			for (ID3D11View* view : { static_cast<ID3D11View*>(slot.RTV), static_cast<ID3D11View*>(slot.SRV) }) {
+				if (!view)
+					continue;
+				winrt::com_ptr<ID3D11Resource> resource;
+				view->GetResource(resource.put());
+				if (resource && SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D), framebufferHolder.put_void())))
+					return Util::AsReal(framebufferHolder.get());
+			}
+			return nullptr;
+		}();
 		Upscaling::EncodeInputViews inputs{};
 		const char* missingInput = nullptr;
 		if (!globals::features::upscaling.GetEncodeInputs(inputs, missingInput))
@@ -2471,6 +2538,16 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 		diagnostic.format = desc.Format;
 		diagnostic.proxyFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 		diagnostic.source = reinterpret_cast<uintptr_t>(color);
+		if (finalImage && !NR::IsSupportedOutput(desc, w, h, count)) {
+			// The final image is not a format the model takes: skip the frame rather than failing NR for the session.
+			static bool warned = false;
+			if (!warned) {
+				warned = true;
+				logger::warn("[NeuralRendering] final-image placement skipped: framebuffer is {}x{}, DXGI format {}", desc.Width, desc.Height, static_cast<uint32_t>(desc.Format));
+			}
+			diagnostic.outcome = Outcome::Disabled;
+			return;
+		}
 		if (!NR::IsSupportedOutput(desc, w, h, count))
 			throw std::runtime_error(std::format("Unsupported NR output: {}x{}, DXGI format {}, array {}, samples {}, guides {}x{}",
 				desc.Width, desc.Height, static_cast<uint32_t>(desc.Format), desc.ArraySize, desc.SampleDesc.Count, gw, gh));
@@ -2493,19 +2570,26 @@ void NeuralRendering::DrawBeforeUpscaling(bool enabled, const NR::Context::Profi
 		work.EnsureResources(w, h, gw, gh, count, desc.Format, forceRecreate, lowExtent.first, lowExtent.second);
 		if (diagnostic.recreated)
 			PublishResources();
-		const bool dilateMotion = (diagnostic.options & NR::Diagnostics::DilateMotion) != 0;
-		auto* shader = globals::features::upscaling.GetEncodeTexturesCS(dilateMotion ? Upscaling::UpscaleMethod::kDLSS : Upscaling::UpscaleMethod::kNONE,
-			Upscaling::EncodeOutput::kTypedDepth);
+		// The NONE encoder variant never writes the motion texture, so without this NR evaluated with zero motion.
+		// Always use the DLSS variant, which writes the dilated vectors NR needs; the diagnostic toggle is now redundant.
+		const bool dilateMotion = true;
+		work.guideScale = postUpscale ? guideScale : float2{ 1.0f, 1.0f };
+		// After upscaling the colour is display sized but the guides are not, so a variant that resamples them is used.
+		auto* shader = postUpscale ?
+		                   work.encodeRescaled.Get(L"Data/Shaders/Upscaling/EncodeTexturesCS.hlsl", { { "NR_RESCALE", "" }, { "DEPTH_OUTPUT", "" } }, "cs_5_0", "main", "NeuralRendering::EncodeRescaled CS") :
+		                   globals::features::upscaling.GetEncodeTexturesCS(dilateMotion ? Upscaling::UpscaleMethod::kDLSS : Upscaling::UpscaleMethod::kNONE,
+							   Upscaling::EncodeOutput::kTypedDepth);
 		auto* prepare = work.prepareColor.Get(L"Data/Shaders/Upscaling/NeuralRendering/ColorTransferCS.hlsl",
 			{}, "cs_5_0", "Prepare", "NeuralRendering::PrepareColor CS");
 		auto* composite = work.compositeColor.Get(L"Data/Shaders/Upscaling/NeuralRendering/ColorTransferCS.hlsl",
 			{}, "cs_5_0", "Composite", "NeuralRendering::CompositeHDR CS");
 		if (!shader || !prepare || !composite)
 			throw std::runtime_error("NR encoder or color-transfer shader unavailable");
-		work.debugOptions = diagnostic.options;
+		// The final image is already display-referred, so the proxy takes it as is: no transfer curve and no exposure.
+		work.debugOptions = diagnostic.options | (finalImage ? (NR::Diagnostics::DisableColorTransform | NR::Diagnostics::DisableExposure) : 0u) | ((finalImage || postUpscale) ? NR::Diagnostics::ZeroJitter : 0u);
 		work.conversionMode = selected.conversion;
 		work.exposureMode = selected.exposure;
-		work.compositeMode = selected.composite;
+		work.compositeMode = effective.replaceComposite ? NR::Diagnostics::CompositeMode::Replacement : selected.composite;
 		work.visualMode = selected.visual;
 		work.manualExposure = selected.manualExposure;
 		work.differenceStrength = selected.differenceStrength;

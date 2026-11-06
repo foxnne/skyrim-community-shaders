@@ -29,7 +29,7 @@ namespace NR
 {
 	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(NR::Tuning, intensity, localToneStrength, localStructureStrength, skinStructureStrength,
 		skinToneStrength, hairToneStrength, eyeToneStrength, foliageToneStrength, landscapeToneStrength,
-		style, useAutoMask, regionOfInterest, regionOverlay, regionFit, regionGroup, regionFollowFoveation,
+		style, useAutoMask, afterUpscale, finalImage, replaceComposite, modelHdr, modelSharpening, modelAutoExposure, regionOfInterest, regionOverlay, regionFit, regionGroup, regionFollowFoveation,
 		parallelEyes, allowUnverifiedRuntime, runtimeVariant, materialStrength, strengthSkin, strengthHair, strengthEyes, strengthFoliage, strengthLandscape, strengthCloth, strengthMetal,
 		strengthOther, strengthEdgeSoftness, showMaterialMap, materialMapMode, materialMapFilter,
 		skipFrameReuse, skipFrameGapMode, modelPreset, modelScale, modelGuidedUpsample, sbsEvaluate, modelVerify, mirrorEyes, crossEyeGain);
@@ -1950,8 +1950,16 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 
 	auto& upscaling = globals::features::upscaling;
 	auto upscaleMethod = upscaling.GetUpscaleMethod();
-	const auto nrRenderSize = Util::ConvertToDynamic(float2{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight });
-	upscaling.neuralRendering.DrawBeforeUpscaling(upscaling.loaded && upscaling.settings.neuralRenderingEnabled, upscaling.settings.neuralRenderingContexts, upscaling.settings.neuralRenderingTuning, uint32_t(a_target), nrRenderSize);
+	const float2 nrDisplaySize{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
+	const auto nrRenderSize = Util::ConvertToDynamic(nrDisplaySize);
+	// Optionally run NR on the upscaler's full-resolution output instead (it needs a real upscaler to have run).
+	const bool realUpscaler = upscaleMethod != UpscaleMethod::kNONE && upscaleMethod != UpscaleMethod::kTAA;
+	// Final-image placement is SDR only: with HDR output the finished image lives in a float texture NR does not take.
+	const bool nrFinalImage = upscaling.settings.neuralRenderingTuning.finalImage && realUpscaler &&
+	                          !(globals::features::hdrDisplay.loaded && globals::features::hdrDisplay.settings.enableHDR);
+	const bool nrAfterUpscale = !nrFinalImage && upscaling.settings.neuralRenderingTuning.afterUpscale && realUpscaler;
+	if (!nrAfterUpscale && !nrFinalImage)
+		upscaling.neuralRendering.DrawBeforeUpscaling(upscaling.loaded && upscaling.settings.neuralRenderingEnabled, upscaling.settings.neuralRenderingContexts, upscaling.settings.neuralRenderingTuning, uint32_t(a_target), nrRenderSize);
 	upscaling.neuralRendering.CaptureBeforeUpscaling();
 
 	const bool prepareFrameGeneration = upscaling.ShouldPrepareFrameGeneration();
@@ -1965,6 +1973,10 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 
 	if (upscaleMethod == UpscaleMethod::kDLSS)
 		upscaling.ApplySharpening();
+
+	if (nrAfterUpscale)
+		upscaling.neuralRendering.DrawBeforeUpscaling(upscaling.loaded && upscaling.settings.neuralRenderingEnabled, upscaling.settings.neuralRenderingContexts, upscaling.settings.neuralRenderingTuning, uint32_t(a_target), nrDisplaySize, true,
+			float2{ nrRenderSize.x / nrDisplaySize.x, nrRenderSize.y / nrDisplaySize.y });
 
 	upscaling.neuralRendering.RecordStage(false);
 	Util::SetTemporal(upscaleMethod == UpscaleMethod::kTAA);
@@ -1980,6 +1992,11 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	// Restore kFRAMEBUFFER after ISHDR — hdrTexture now has the HDR scene
 	if (hdrLoaded)
 		globals::features::hdrDisplay.RestoreFramebuffer();
+
+	// The image is final here (tone mapped, graded, upscaled) and the UI has not been drawn yet.
+	if (nrFinalImage)
+		upscaling.neuralRendering.DrawBeforeUpscaling(upscaling.loaded && upscaling.settings.neuralRenderingEnabled, upscaling.settings.neuralRenderingContexts, upscaling.settings.neuralRenderingTuning, uint32_t(a_target), nrDisplaySize, true,
+			float2{ nrRenderSize.x / nrDisplaySize.x, nrRenderSize.y / nrDisplaySize.y }, true);
 
 	upscaling.neuralRendering.RecordStage(true);
 	Util::SetTemporal(false);

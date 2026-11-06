@@ -59,6 +59,23 @@ namespace NR
 		float landscapeToneStrength = kDefaultStrength;
 		bool useAutoMask = true;
 		/**
+		 * @brief Runs NR on the upscaler's full-resolution output instead of the render-resolution frame before it.
+		 *        The depth, motion and mask guides stay render resolution and are resampled to display size.
+		 */
+		bool afterUpscale = false;
+		/**
+		 * @brief Runs NR on the finished display image (after tone mapping, grading and the upscaler), just before the UI,
+		 *        with no colour transform or exposure: the model sees exactly what is shown. SDR only; takes precedence
+		 *        over afterUpscale. Falls back to the normal placement when HDR output is on.
+		 */
+		bool finalImage = false;
+		/** @brief Flags the model is created with. The defaults are the long-standing HDR-proxy setup; changing one rebuilds the model. */
+		/** @brief Uses the model's output as the result instead of applying its brightness change to the original as a bounded gain. */
+		bool replaceComposite = false;
+		bool modelHdr = true;
+		bool modelSharpening = true;
+		bool modelAutoExposure = true;
+		/**
 		 * @brief Restricts NR's evaluation to a crop around the most prominent visible actor.
 		 *        Off by default: it trades full-frame NR quality for GPU time, and the
 		 *        periphery falls back to pre-NR content. The published crop is always

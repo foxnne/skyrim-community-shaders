@@ -40,8 +40,15 @@ groupshared float2 TileMotion[DILATE_TILE * DILATE_TILE];
 	if (any(dispatchID.xy >= uint2(TrueSamplingDim)))
 		return;
 
-	float2 taaMask = TAAMask[dispatchID.xy];
-	float transparencyCompositionMask = NormalsWaterMask[dispatchID.xy].z;
+	// With NR_RESCALE the output is display sized while the guides are render sized (pad0 = render / display).
+	uint2 srcPos = dispatchID.xy;
+#if defined(NR_RESCALE)
+	srcPos = min(uint2((float2(dispatchID.xy) + 0.5) * pad0), uint2(max(TrueSamplingDim * pad0, 1.0)) - 1);
+	MotionVectorOutput[dispatchID.xy] = MotionVectorMask[srcPos];
+#endif
+
+	float2 taaMask = TAAMask[srcPos];
+	float transparencyCompositionMask = NormalsWaterMask[srcPos].z;
 
 #if defined(DLSS)
 	const uint centerIndex = (groupThreadID.y + 2) * DILATE_TILE + groupThreadID.x + 2;
@@ -89,9 +96,8 @@ groupshared float2 TileMotion[DILATE_TILE * DILATE_TILE];
 #endif
 
 #if defined(DEPTH_OUTPUT)
-	// Copy depth as R32_FLOAT so FSR DX11 backend receives a typed format.
-	// The raw depth resource is R24G8_TYPELESS which maps to FFX_SURFACE_FORMAT_UNKNOWN.
-	DepthOutput[dispatchID.xy] = DepthMask[dispatchID.xy];
+	// FSR and the D3D11/D3D12 runtime bridge require a typed depth format.
+	DepthOutput[dispatchID.xy] = DepthMask[srcPos];
 #endif
 
 	float reactiveMask = taaMask.x * 0.1 + taaMask.y;

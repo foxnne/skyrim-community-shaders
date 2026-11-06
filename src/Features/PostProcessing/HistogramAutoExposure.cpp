@@ -13,6 +13,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	AdaptationRange,
 	AdaptArea,
 	AdaptSpeed,
+	NightAdaptationRange,
+	NightExposureCompensation,
+	InteriorAdaptationRange,
+	InteriorExposureCompensation,
 	HighlightProtection,
 	HighlightLimitEV,
 	PurkinjeStartEV,
@@ -49,9 +53,26 @@ float HistogramAutoExposure::GetPreExposure()
 
 HistogramAutoExposure::ExposureParameters HistogramAutoExposure::GetExposureParameters() const
 {
+	// blend the exterior day profile toward night by game hour, then toward interior by cell
+	auto smooth = [](float a, float b, float x) {
+		const float t = std::clamp((x - a) / (b - a), 0.f, 1.f);
+		return t * t * (3.f - 2.f * t);
+	};
+	float night = 0.f, interior = 0.f;
+	if (const auto* sky = RE::Sky::GetSingleton()) {
+		const float hour = sky->currentGameHour;
+		night = hour < 5.f ? 1.f : hour < 7.f ? 1.f - smooth(5.f, 7.f, hour) : hour < 19.f ? 0.f : hour < 21.f ? smooth(19.f, 21.f, hour) : 1.f;
+	}
+	if (const auto* player = RE::PlayerCharacter::GetSingleton()) {
+		if (const auto* cell = player->GetParentCell())
+			interior = cell->IsInteriorCell() ? 1.f : 0.f;
+	}
+	auto mix = [](float2 a, float2 b, float t) { return float2{ a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t }; };
+	float2 range = mix(mix(settings.AdaptationRange, settings.NightAdaptationRange, night), settings.InteriorAdaptationRange, interior);
+	float compensation = std::lerp(std::lerp(settings.ExposureCompensation, settings.NightExposureCompensation, night), settings.InteriorExposureCompensation, interior);
 	ExposureParameters parameters{
-		.LuminanceRange = { exp2(settings.AdaptationRange.x - 3.0f), exp2(settings.AdaptationRange.y - 3.0f) },
-		.CompensationEV = settings.ExposureCompensation,
+		.LuminanceRange = { exp2(range.x - 3.0f), exp2(range.y - 3.0f) },
+		.CompensationEV = compensation,
 	};
 	if (const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr) {
 		const float exposureDeltaEV = CinematicCamera::kReferenceEV100 - cam->EV100;
@@ -143,6 +164,12 @@ void HistogramAutoExposure::DrawSettings()
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::TextUnformatted(T("feature.post_processing.histogram_auto_exposure.highlight_limit_tooltip",
 			"Stops above middle grey that the 90th percentile of the metering area may reach before Highlight Protection lowers exposure. Lower values keep snow and bright cloud darker."));
+	ImGui::SeparatorText("Night and interiors (the values above are the exterior day profile)");
+	ImGui::SliderFloat2("Night Adaptation Range", &settings.NightAdaptationRange.x, -10.f, 21.f, "%.2f EV100");
+	ImGui::SliderFloat("Night Exposure Compensation", &settings.NightExposureCompensation, -5.f, 5.f, "%+.2f EV");
+	ImGui::SliderFloat2("Interior Adaptation Range", &settings.InteriorAdaptationRange.x, -10.f, 21.f, "%.2f EV100");
+	ImGui::SliderFloat("Interior Exposure Compensation", &settings.InteriorExposureCompensation, -5.f, 5.f, "%+.2f EV");
+
 
 	ImGui::SeparatorText(T("feature.post_processing.histogram_auto_exposure.purkinje_effect", "Purkinje Effect"));
 	Util::SettingHint(

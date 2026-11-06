@@ -32,6 +32,11 @@ struct HistogramAutoExposure : public PostProcessFeature
 
 		float HighlightProtection = 0.f;
 		float HighlightLimitEV = 2.5f;
+		// per-context overrides: the base values above are the exterior day profile
+		float2 NightAdaptationRange = { -1.65f, 4.5f };
+		float NightExposureCompensation = 0.f;
+		float2 InteriorAdaptationRange = { -1.65f, 4.5f };
+		float InteriorExposureCompensation = 0.f;
 
 		// purkinje
 		float PurkinjeStartEV = 1.5f;  // Scene EV100 before exposure, same calibration as AdaptationRange.

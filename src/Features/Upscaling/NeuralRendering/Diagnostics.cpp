@@ -343,7 +343,7 @@ namespace NR
 		history[next] = current;
 		next = (next + 1) % kHistorySize;
 		count = std::min(count + 1, kHistorySize);
-		if (suite && world && !paused && !globals::menu->IsEnabled) {
+		if (suite && world && !paused && !globals::menu->IsOpen()) {
 			WriteCameraTrace(current);
 			if (suiteFrames % kHistorySize == 0)
 				traceFile.flush();
@@ -527,7 +527,7 @@ namespace NR
 		const auto padding = ImGui::GetStyle().WindowPadding;
 		ImGui::SetNextWindowPos({ viewport->WorkPos.x + padding.x, viewport->WorkPos.y + viewport->WorkSize.y - padding.y }, ImGuiCond_FirstUseEver, { 0, 1 });
 		auto flags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
-		if (!globals::menu->IsEnabled)
+		if (!globals::menu->IsOpen())
 			flags |= ImGuiWindowFlags_NoInputs;
 		if (ImGui::Begin("NR Diagnostics v2###NeuralRenderingDiagnostics", nullptr, flags)) {
 			ImGui::TextUnformatted(suiteStatus.c_str());

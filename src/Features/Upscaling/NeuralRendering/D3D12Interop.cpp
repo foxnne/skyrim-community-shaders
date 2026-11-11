@@ -2,8 +2,60 @@
 
 #include "../Streamline.h"
 #include "Globals.h"
+#include "Utils/D3D.h"
 
 #include <format>
+
+
+
+
+void SharedFence::Create(ID3D12Device* a_device12, ID3D11Device5* a_device11, const char* a_name)
+{
+	DX::ThrowIfFailed(a_device12->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence12)));
+	winrt::handle sharedHandle;
+	DX::ThrowIfFailed(a_device12->CreateSharedHandle(fence12.get(), nullptr, GENERIC_ALL, nullptr, sharedHandle.put()));
+	DX::ThrowIfFailed(a_device11->OpenSharedFence(sharedHandle.get(), IID_PPV_ARGS(&fence11)));
+
+	fence12->SetName(winrt::to_hstring(a_name).c_str());
+	Util::SetResourceName(fence11.get(), "%s", a_name);
+}
+
+SharedFence::WaitOutcome SharedFence::CpuWaitOutcome(uint64_t a_value, DWORD a_timeoutMs, DWORD* a_error) const
+{
+	const auto failed = [a_error](DWORD a_lastError) {
+		if (a_error)
+			*a_error = a_lastError;
+		return WaitOutcome::kFailed;
+	};
+	if (!fence12 || a_value == 0)
+		return WaitOutcome::kComplete;
+	if (fence12->GetCompletedValue() >= a_value)
+		return WaitOutcome::kComplete;
+
+	winrt::handle fenceEvent(CreateEventW(nullptr, FALSE, FALSE, nullptr));
+	if (!fenceEvent)
+		return failed(GetLastError());
+	if (const HRESULT registration = fence12->SetEventOnCompletion(a_value, fenceEvent.get()); FAILED(registration))
+		return failed(static_cast<DWORD>(registration));
+
+	winrt::com_ptr<ID3D12Device> device12;
+	DWORD waitedMs = 0;
+	while (waitedMs < a_timeoutMs) {
+		const DWORD sliceMs = std::min<DWORD>(kRemovalPollMs, a_timeoutMs - waitedMs);
+		const DWORD waitResult = WaitForSingleObject(fenceEvent.get(), sliceMs);
+		if (waitResult == WAIT_OBJECT_0)
+			return WaitOutcome::kComplete;
+		if (waitResult != WAIT_TIMEOUT)
+			return failed(GetLastError());
+		waitedMs += sliceMs;
+		if (!device12)
+			fence12->GetDevice(IID_PPV_ARGS(&device12));
+		if (device12 && FAILED(device12->GetDeviceRemovedReason()))
+			return WaitOutcome::kFailed;
+	}
+
+	return WaitOutcome::kTimeout;
+}
 
 namespace NR
 {
@@ -20,7 +72,7 @@ namespace NR
 			DX::ThrowIfFailed(dxgi->GetAdapter(adapter.put()));
 			DXGI_ADAPTER_DESC desc{};
 			DX::ThrowIfFailed(adapter->GetDesc(&desc));
-			if (desc.VendorId != Streamline::kNvidiaVendorId)
+			if (desc.VendorId != 0x10DEu)
 				throw std::runtime_error("requires an NVIDIA RTX GPU");
 			// The level is a minimum: the runtime hands back the adapter's existing device.
 			DX::ThrowIfFailed(D3D12CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.put())));
@@ -73,7 +125,18 @@ namespace NR
 		desc.Format = format;
 		desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
 		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-		return std::make_unique<WrappedResource>(desc, device11.get(), device.get(), name);
+		auto wrapped = std::make_unique<WrappedResource>(desc, device11.get(), device.get());
+		if (!name.empty()) {
+			// WrappedResource no longer names itself; name the D3D11 and D3D12 sides for RenderDoc here.
+			Util::SetResourceName(wrapped->resource11, "%s", name.c_str());
+			if (wrapped->srv)
+				Util::SetResourceName(wrapped->srv, "%s SRV", name.c_str());
+			if (wrapped->uav)
+				Util::SetResourceName(wrapped->uav, "%s UAV", name.c_str());
+			if (wrapped->resource)
+				wrapped->resource->SetName(winrt::to_hstring(name).c_str());
+		}
+		return wrapped;
 	}
 
 	void D3D12Interop::Wait(SharedFence& target, uint64_t completion)

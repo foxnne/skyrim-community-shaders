@@ -448,6 +448,7 @@ void Menu::Load(json& o_json)
 	};
 
 	migrateKey(o_json, "ToggleKey", settings.ToggleKey);
+	migrateKey(o_json, "ToggleKeyAlt", settings.ToggleKeyAlt);
 	migrateKey(o_json, "SkipCompilationKey", settings.SkipCompilationKey);
 	migrateKey(o_json, "EffectToggleKey", settings.EffectToggleKey);
 	migrateKey(o_json, "OverlayToggleKey", settings.OverlayToggleKey);
@@ -471,6 +472,7 @@ void Menu::Load(json& o_json)
 	};
 
 	loadComboList(o_json, "ToggleKey", settings.ToggleKey);
+	loadComboList(o_json, "ToggleKeyAlt", settings.ToggleKeyAlt);
 	loadComboList(o_json, "SkipCompilationKey", settings.SkipCompilationKey);
 	loadComboList(o_json, "EffectToggleKey", settings.EffectToggleKey);
 	loadComboList(o_json, "OverlayToggleKey", settings.OverlayToggleKey);
@@ -546,6 +548,7 @@ void Menu::Save(json& o_json)
 
 	// Manually save input combos using the smart serializer
 	InputCombo::ComboList::to_json(o_json["ToggleKey"], settings.ToggleKey);
+	InputCombo::ComboList::to_json(o_json["ToggleKeyAlt"], settings.ToggleKeyAlt);
 	InputCombo::ComboList::to_json(o_json["SkipCompilationKey"], settings.SkipCompilationKey);
 	InputCombo::ComboList::to_json(o_json["EffectToggleKey"], settings.EffectToggleKey);
 	InputCombo::ComboList::to_json(o_json["OverlayToggleKey"], settings.OverlayToggleKey);
@@ -1310,8 +1313,7 @@ void Menu::ProcessInputEventQueue()
 					std::function<void()> action;
 				};
 				auto shaderCache = globals::shaderCache;
-				KeyAction keyActions[] = {
-					{ settings.ToggleKey, [this]() {
+				auto toggleMenu = [this]() {
 						 if (!SetupRenderer::ShouldShowFirstTimeSetup() && !EditorWindow::GetSingleton()->open) {
 							 suppressNextEscape = false;
 							 if (open) {
@@ -1323,7 +1325,10 @@ void Menu::ProcessInputEventQueue()
 						 } else if (SetupRenderer::ShouldShowFirstTimeSetup()) {
 							 SetupRenderer::MarkFirstTimeSetupComplete();
 						 }
-					 } },
+					 };
+				KeyAction keyActions[] = {
+					{ settings.ToggleKey, toggleMenu },
+					{ settings.ToggleKeyAlt, toggleMenu },
 					{ settings.SkipCompilationKey, [this, shaderCache]() { if (!ShouldSwallowInput() && shaderCache->IsCompiling()) shaderCache->SetBackgroundCompilation(true); } },
 					{ settings.EffectToggleKey, [shaderCache]() { shaderCache->SetEnabled(!shaderCache->IsEnabled()); } },
 					{ settings.ShaderBlockPrevKey, [this, shaderCache]() { if (settings.EnableShaderBlocking) shaderCache->IterateShaderBlock(); } },

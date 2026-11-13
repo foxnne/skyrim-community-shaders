@@ -14,7 +14,7 @@
     "FoliageHeightOffset": -4000.0,
     "LogMicrofacetDensity": 4.627999782562256,
     "MainSpec": 0.019999999552965164,
-    "MainTexture": "textures/pbr/landscape/snow01",
+    "MainTexture": "textures/pbr/landscape/snowbds",
     "MainTint": [
         1.0,
         1.0,

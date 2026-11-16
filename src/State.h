@@ -77,6 +77,15 @@ public:
 	double smoothDrawCalls[RE::BSShader::Type::Total + 1];
 	int drawCalls[RE::BSShader::Type::Total + 1];
 
+	/** @brief Utility-shader draws per pixel descriptor since the last reset; read and cleared by the remote draw-call breakdown. */
+	struct UtilityDrawStat
+	{
+		uint64_t draws = 0;
+		std::string defines;
+	};
+	std::unordered_map<uint64_t, UtilityDrawStat> utilityDrawStats;  ///< Key: pixel descriptor | (bound depth target index << 32).
+	uint64_t utilityStatFrames = 0;
+
 	// Frame time tracking per shader type (in milliseconds)
 	float frameTimePerType[RE::BSShader::Type::Total + 1];        ///< Per-type frame time in milliseconds.
 	float smoothFrameTimePerType[RE::BSShader::Type::Total + 1];  ///< EMA-smoothed per-type frame time in milliseconds.

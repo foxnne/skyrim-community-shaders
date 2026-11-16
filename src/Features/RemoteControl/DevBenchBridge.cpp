@@ -455,11 +455,23 @@ namespace
 					const auto stats = profiler->GetFrameStats();
 					frame = { { "ms", stats.lastMs }, { "avgMs", stats.avgMs }, { "p95Ms", stats.p95Ms } };
 				}
+				// Utility draws by pixel descriptor, averaged over the frames since the previous query, then cleared.
+				json utility = json::array();
+				{
+					std::vector<std::pair<uint64_t, State::UtilityDrawStat>> rows(state->utilityDrawStats.begin(), state->utilityDrawStats.end());
+					const double frames = static_cast<double>(std::max<uint64_t>(state->utilityStatFrames, 1));
+					std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.second.draws > b.second.draws; });
+					for (size_t i = 0; i < rows.size() && i < 20; ++i)
+						utility.push_back({ { "descriptor", std::format("{:#x}", rows[i].first & 0xFFFFFFFFull) }, { "depthTarget", std::string(magic_enum::enum_name(static_cast<decltype(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN)>(rows[i].first >> 32))) }, { "drawsPerFrame", static_cast<double>(rows[i].second.draws) / frames }, { "defines", rows[i].second.defines } });
+					state->utilityDrawStats.clear();
+					state->utilityStatFrames = 0;
+				}
 				return json{
 					{ "frame_count", state->frameCount },
 					{ "frame", frame },
 					{ "frameGeneration", globals::features::upscaling.IsFrameGenerationActive() },
 					{ "neuralRendering", globals::features::upscaling.settings.neuralRenderingEnabled },
+					{ "utility", utility },
 					{ "shaders", types },
 				};
 			});

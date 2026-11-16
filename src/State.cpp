@@ -271,6 +271,7 @@ void State::Debug()
 			smoothDrawCalls[i] = smoothDrawCalls[i] * static_cast<float>(0.95) + drawCalls[i] * static_cast<float>(0.05);
 			smoothFrameTimePerType[i] = smoothFrameTimePerType[i] * static_cast<float>(0.95) + frameTimePerType[i] * static_cast<float>(0.05);
 		}
+		++utilityStatFrames;
 		// Reset counters for next frame
 		for (auto& c : drawCalls)
 			c = 0;
@@ -304,6 +305,13 @@ void State::Debug()
 	if (currentShader) {
 		drawCalls[magic_enum::enum_integer(currentShader->shaderType.get())]++;
 		drawCalls[magic_enum::enum_integer(RE::BSShader::Type::Total)]++;
+		if (currentShader->shaderType.get() == RE::BSShader::Type::Utility) {
+			const uint64_t depthTarget = globals::game::shadowState ? static_cast<uint64_t>(globals::game::shadowState->GetRuntimeData().depthStencil & 0xFFFF) : 0xFFFFull;
+			auto& stat = utilityDrawStats[static_cast<uint64_t>(currentPixelDescriptor) | (depthTarget << 32)];
+			if (stat.defines.empty())
+				stat.defines = SIE::ShaderCache::GetDefinesString(*currentShader, currentPixelDescriptor);
+			++stat.draws;
+		}
 	}
 
 	if (currentShader && updateShader && AnnotateDraws()) {

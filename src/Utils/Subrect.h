@@ -47,7 +47,6 @@ namespace Util::Subrect
 	};
 
 	/** @brief Converts a UV region to a pixel region of a width x height source, clamped to the source. Both sizes must be at least 1. */
-	PixelRegion UVToPixelRegion(const UVRegion& uv, uint32_t width, uint32_t height);
 
 	/** @brief A named crop preset storing a UV region and its display name. */
 	struct Preset

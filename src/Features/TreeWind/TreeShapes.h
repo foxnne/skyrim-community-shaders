@@ -52,7 +52,7 @@ namespace TreeShapes
 		{
 			std::vector<TrunkCard> cards;
 			std::unordered_map<int64_t, std::vector<int>> grid;  // cell -> card indices
-			std::unordered_set<const void*> trunkShapes;
+			std::unordered_set<uint64_t> trunkShapes;            // signatures of the trunk shapes that registered their cards
 			uint32_t generation = 0;  // bumped when cards are added, so tree-mod crowns built before rebuild
 		};
 
@@ -65,11 +65,24 @@ namespace TreeShapes
 			float firstVertex[3]{};
 			uint lastFrame = 0;
 			uint64_t blockKey = 0;
+			uint64_t signature = 0;
 			uint32_t generation = 0;
 			bool crown = false;
 		};
 
+		// Bend data by shape content. The game re-creates the render data of object LOD shapes (new vertex buffer,
+		// same vertices) whenever the loaded cell grid moves, so the data built for the old buffer is reused.
+		struct Shared
+		{
+			winrt::com_ptr<ID3D11Buffer> buffer;
+			winrt::com_ptr<ID3D11ShaderResourceView> srv;  // nullptr for a shape left still
+			uint32_t generation = 0;
+			uint lastFrame = 0;
+		};
+
 		std::unordered_map<uint64_t, Block> blocks;      // key = the block's world translate
 		std::unordered_map<const void*, Entry> entries;  // key = the shape's vertex buffer
+		std::unordered_map<uint64_t, Shared> shared;     // key = the shape's content signature
+		uint64_t builtCount = 0, reusedCount = 0, loggedBuilt = 0, loggedReused = 0;
 	};
 }

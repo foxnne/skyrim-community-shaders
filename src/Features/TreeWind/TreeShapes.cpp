@@ -2,6 +2,7 @@
 
 #include <DirectXPackedVector.h>
 #include <cfloat>
+#include <cstring>
 #include <numeric>
 
 #include "Globals.h"
@@ -99,6 +100,29 @@ namespace TreeShapes
 
 			a_out = { rendererData->rawVertexData, stride, triShape->GetTrishapeRuntimeData().vertexCount, rendererData->vertexBuffer };
 			return a_out.count > 0;
+		}
+
+		// Identity of a shape by content, stable when the game re-creates its buffers: block, kind, counts and three positions
+		uint64_t ShapeSignature(uint64_t a_blockKey, Kind a_kind, const VertexView& a_vertices, uint32_t a_triangleCount)
+		{
+			uint64_t h = 0xcbf29ce484222325ull;
+			const auto mix = [&h](uint64_t a_value) {
+				h ^= a_value;
+				h *= 0x100000001b3ull;
+				h ^= h >> 29;
+			};
+			mix(a_blockKey);
+			mix(static_cast<uint64_t>(a_kind));
+			mix(a_vertices.count);
+			mix(a_triangleCount);
+			for (const uint32_t index : { 0u, a_vertices.count / 2, a_vertices.count - 1 }) {
+				const auto p = a_vertices(index);
+				uint32_t bits[3];
+				std::memcpy(bits, &p, sizeof(bits));
+				mix((static_cast<uint64_t>(bits[0]) << 32) | bits[1]);
+				mix(bits[2]);
+			}
+			return h;
 		}
 
 		// Connected pieces of a shape from its CPU index copy: the root vertex of each vertex's piece.
@@ -299,13 +323,39 @@ namespace TreeShapes
 			entries.erase(it);
 		}
 
-		ZoneScopedN("TreeWind::BuildBendWeights");
 		const uint64_t blockKey = BlockKey(a_geometry);
 		auto& block = blocks[blockKey];
+		const uint32_t triangleCount = a_geometry->AsTriShape()->GetTrishapeRuntimeData().triangleCount;
+		const uint64_t signature = ShapeSignature(blockKey, a_kind, vertices, triangleCount);
+
+		// Same shape with re-created buffers: reuse its bend data instead of scanning the vertices again
+		if (const auto sharedIt = shared.find(signature); sharedIt != shared.end()) {
+			auto& record = sharedIt->second;
+			const bool crownStale = a_treeModSupport && a_kind == Kind::Crown && record.generation != block.generation;
+			if (!crownStale) {
+				Entry reused;
+				reused.buffer = record.buffer;
+				reused.srv = record.srv;
+				reused.vertexCount = vertices.count;
+				reused.firstVertex[0] = firstVertex.x;
+				reused.firstVertex[1] = firstVertex.y;
+				reused.firstVertex[2] = firstVertex.z;
+				reused.lastFrame = a_frame;
+				reused.blockKey = blockKey;
+				reused.signature = signature;
+				reused.generation = record.generation;
+				reused.crown = a_kind == Kind::Crown;
+				record.lastFrame = a_frame;
+				++reusedCount;
+				return entries.insert_or_assign(vertices.vertexBuffer, std::move(reused)).first->second.srv.get();
+			}
+		}
+
+		ZoneScopedN("TreeWind::BuildBendWeights");
+		++builtCount;
 		const float worldScale = a_geometry->world.scale;
 		const bool allQuads = IsAllQuads(a_geometry);
 		const auto indices = a_geometry->GetGeometryRuntimeData().rendererData->rawIndexData;
-		const uint32_t triangleCount = a_geometry->AsTriShape()->GetTrishapeRuntimeData().triangleCount;
 
 		Entry entry;
 		entry.vertexCount = vertices.count;
@@ -314,11 +364,13 @@ namespace TreeShapes
 		entry.firstVertex[2] = firstVertex.z;
 		entry.lastFrame = a_frame;
 		entry.blockKey = blockKey;
+		entry.signature = signature;
 		entry.crown = a_kind == Kind::Crown;
 
 		// Remembers a shape with nothing to sway, so it is not scanned again
 		const auto keepStill = [&]() -> ID3D11ShaderResourceView* {
 			entry.generation = block.generation;
+			shared.insert_or_assign(signature, Shared{ nullptr, nullptr, block.generation, a_frame });
 			entries.insert_or_assign(vertices.vertexBuffer, std::move(entry));
 			return nullptr;
 		};
@@ -407,7 +459,7 @@ namespace TreeShapes
 			}
 
 			// Each trunk registers its tree for the crowns of this block, once per shape
-			if (block.trunkShapes.insert(vertices.vertexBuffer).second && (!cardStarts.empty() || !trunks.empty())) {
+			if (block.trunkShapes.insert(signature).second && (!cardStarts.empty() || !trunks.empty())) {
 				++block.generation;
 				for (const auto& trunk : trunks)
 					AddCard(block, trunk, worldScale);
@@ -583,6 +635,7 @@ namespace TreeShapes
 		Util::SetResourceName(entry.srv.get(), "TreeWind::BendWeights SRV");
 
 		entry.generation = block.generation;
+		shared.insert_or_assign(signature, Shared{ entry.buffer, entry.srv, block.generation, a_frame });
 		return entries.insert_or_assign(vertices.vertexBuffer, std::move(entry)).first->second.srv.get();
 	}
 
@@ -590,11 +643,23 @@ namespace TreeShapes
 	{
 		entries.clear();
 		blocks.clear();
+		shared.clear();
 	}
 
 	void BendWeights::Evict(uint a_frame)
 	{
 		std::erase_if(entries, [a_frame](const auto& a_entry) { return a_frame - a_entry.second.lastFrame > kEvictFrames; });
+		// A shared record lives while a shape using it is drawn
+		for (const auto& [vertexBuffer, entry] : entries)
+			if (const auto it = shared.find(entry.signature); it != shared.end())
+				it->second.lastFrame = std::max(it->second.lastFrame, entry.lastFrame);
+		std::erase_if(shared, [a_frame](const auto& a_record) { return a_frame - a_record.second.lastFrame > kEvictFrames; });
+		if (builtCount != loggedBuilt || reusedCount != loggedReused) {
+			logger::info("[TreeWind] bend weights: {} built (+{}), {} reused (+{}), {} shapes, {} shared, {} blocks",
+				builtCount, builtCount - loggedBuilt, reusedCount, reusedCount - loggedReused, entries.size(), shared.size(), blocks.size());
+			loggedBuilt = builtCount;
+			loggedReused = reusedCount;
+		}
 		// A block lives only while one of its shapes does, so its cards do not pile up
 		std::unordered_set<uint64_t> liveBlocks;
 		for (const auto& [vertexBuffer, entry] : entries)

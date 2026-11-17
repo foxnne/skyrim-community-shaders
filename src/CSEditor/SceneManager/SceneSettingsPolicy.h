@@ -53,6 +53,15 @@ namespace SceneSettingsPolicy
 		// Debug visualisation, never a look
 		{ "LightLimitFix", "EnableLightsVisualisation" },
 		{ "LightLimitFix", "LightsVisualisationMode" },
+		// Panel layout and debug views, never a look
+		{ "NeuralRendering", "showAdvanced" },
+		{ "NeuralRendering", "debugCategoryView" },
+		{ "NeuralRendering", "rawModelOutput" },
+		// Size the model raster: every 2-pixel step of a blend reallocates the shared textures.
+		{ "NeuralRendering", "resolutionMode" },
+		{ "NeuralRendering", "resolutionScale" },
+		{ "NeuralRendering", "resolutionScaleX" },
+		{ "NeuralRendering", "resolutionScaleY" },
 		{ "LinearLighting", "enableACEScg" },
 		{ "LinearLighting", "useWithEffects11" },
 		{ "PostProcessing", "Border" },
@@ -83,6 +92,7 @@ namespace SceneSettingsPolicy
 		{ "ExponentialHeightFog" },
 		{ "HorizonFix" },
 		{ "ImageBasedLighting" },
+		{ "NeuralRendering" },
 		{ "LinearLighting" },
 		{ "PhysicalSky" },
 		{ "PostProcessing" },
@@ -97,6 +107,7 @@ namespace SceneSettingsPolicy
 		{ "ExponentialHeightFog" },
 		{ "GrassLighting" },
 		{ "ImageBasedLighting" },
+		{ "NeuralRendering" },
 		{ "PhysicalSky" },
 		{ "PostProcessing" },
 		{ "ScreenSpaceGI" },

@@ -2,6 +2,7 @@
 
 #include <DirectXPackedVector.h>
 #include <cfloat>
+#include <chrono>
 #include <cstring>
 #include <numeric>
 
@@ -20,6 +21,11 @@ namespace TreeShapes
 		constexpr float kCellSize = 128.0f;
 		// Bend data of a shape not drawn for this many frames is freed
 		constexpr uint kEvictFrames = 600;
+		// Render-thread time spent building bend data per frame; a build that has started always finishes
+		constexpr int64_t kBuildBudgetNs = 1500000;
+		// A tree-mod crown waits this many frames after its block last gained trunk cards, so it is built once
+		// with all of them instead of once per trunk shape
+		constexpr uint kSettleFrames = 20;
 
 		bool IsTreeShapeName(const RE::BSGeometry* a_geometry)
 		{
@@ -148,6 +154,19 @@ namespace TreeShapes
 			for (uint32_t i = 0; i < a_vertexCount; ++i)
 				parent[i] = find(i);
 			return parent;
+		}
+
+		// Renumbers the piece roots to 0..n-1 in place and returns n, so per-piece data sits in a plain array
+		uint32_t CompactPieces(std::vector<uint32_t>& a_roots)
+		{
+			std::vector<uint32_t> id(a_roots.size(), UINT32_MAX);
+			uint32_t count = 0;
+			for (auto& root : a_roots) {
+				if (id[root] == UINT32_MAX)
+					id[root] = count++;
+				root = id[root];
+			}
+			return count;
 		}
 
 		void AddCard(BendWeights::Block& a_block, BendWeights::TrunkCard a_card, float a_worldScale)
@@ -308,6 +327,9 @@ namespace TreeShapes
 			return nullptr;
 
 		const auto firstVertex = vertices(0);
+		// Data to keep drawing with while a rebuild waits for its turn
+		ID3D11ShaderResourceView* previous = nullptr;
+		Entry* staleEntry = nullptr;
 		if (auto it = entries.find(vertices.vertexBuffer); it != entries.end()) {
 			auto& entry = it->second;
 			// Tree-mod crowns rebuild when their block gains trunk cards
@@ -315,12 +337,19 @@ namespace TreeShapes
 				const auto blockIt = blocks.find(entry.blockKey);
 				return blockIt != blocks.end() && blockIt->second.generation != entry.generation;
 			}();
-			if (!stale && entry.vertexCount == vertices.count && entry.firstVertex[0] == firstVertex.x && entry.firstVertex[1] == firstVertex.y && entry.firstVertex[2] == firstVertex.z) {
+			const bool sameShape = entry.vertexCount == vertices.count && entry.firstVertex[0] == firstVertex.x && entry.firstVertex[1] == firstVertex.y && entry.firstVertex[2] == firstVertex.z;
+			if (!stale && sameShape) {
 				entry.lastFrame = a_frame;
 				return entry.srv.get();
 			}
-			// Stale, or the vertex buffer address was reused by another shape
-			entries.erase(it);
+			if (sameShape) {
+				// Stale: the old data stays in use until the rebuild
+				staleEntry = &entry;
+				previous = entry.srv.get();
+			} else {
+				// The vertex buffer address was reused by another shape
+				entries.erase(it);
+			}
 		}
 
 		const uint64_t blockKey = BlockKey(a_geometry);
@@ -349,10 +378,44 @@ namespace TreeShapes
 				++reusedCount;
 				return entries.insert_or_assign(vertices.vertexBuffer, std::move(reused)).first->second.srv.get();
 			}
+			record.lastFrame = a_frame;
+			if (!previous)
+				previous = record.srv.get();
+		}
+
+		// A crown that follows trunk cards has nothing to build from until its block's trunks are drawn
+		if (a_kind == Kind::Crown && block.cards.empty() && !IsAllQuads(a_geometry) && !IsTreeShapeName(a_geometry) && !(a_treeModSupport && a_geometry->world.scale >= 6.0f))
+			return previous;
+
+		// Out of time this frame, or the block is still gaining trunk cards: draw with the previous data (or still)
+		// and build in a later frame
+		if (a_frame != budgetFrame) {
+			worstFrameNs = std::max(worstFrameNs, budgetSpentNs);
+			budgetFrame = a_frame;
+			budgetSpentNs = 0;
+		}
+		const bool settling = a_treeModSupport && a_kind == Kind::Crown && !block.cards.empty() && a_frame - block.changedFrame < kSettleFrames;
+		if (settling || budgetSpentNs >= kBuildBudgetNs) {
+			++deferredCount;
+			if (staleEntry)
+				staleEntry->lastFrame = a_frame;
+			return previous;
 		}
 
 		ZoneScopedN("TreeWind::BuildBendWeights");
 		++builtCount;
+		staleBuiltCount += previous != nullptr;
+		struct BuildTimer
+		{
+			BendWeights& owner;
+			std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+			~BuildTimer()
+			{
+				const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+				owner.budgetSpentNs += ns;
+				owner.buildNs += ns;
+			}
+		} buildTimer{ *this };
 		const float worldScale = a_geometry->world.scale;
 		const bool allQuads = IsAllQuads(a_geometry);
 		const auto indices = a_geometry->GetGeometryRuntimeData().rendererData->rawIndexData;
@@ -427,13 +490,14 @@ namespace TreeShapes
 					for (uint32_t k = 0; k < 4; ++k)
 						onCard[c + k] = true;
 				roots = PieceRoots(indices, triangleCount, vertices.count);
+				const uint32_t pieceCount = CompactPieces(roots);
 				struct Box
 				{
 					float sumX = 0.0f, sumY = 0.0f, minX = FLT_MAX, maxX = -FLT_MAX, minY = FLT_MAX, maxY = -FLT_MAX, minZ = FLT_MAX, maxZ = -FLT_MAX;
 					int count = 0;
 					bool card = false;
 				};
-				std::unordered_map<uint32_t, Box> boxes;
+				std::vector<Box> boxes(pieceCount);
 				for (uint32_t i = 0; i < vertices.count; ++i) {
 					const auto p = vertices(i);
 					auto& box = boxes[roots[i]];
@@ -448,7 +512,8 @@ namespace TreeShapes
 					box.card = box.card || onCard[i];
 					++box.count;
 				}
-				for (const auto& [root, box] : boxes) {
+				for (uint32_t root = 0; root < pieceCount; ++root) {
+					const auto& box = boxes[root];
 					const float width = std::max(box.maxX - box.minX, box.maxY - box.minY);
 					const float height = box.maxZ - box.minZ;
 					if (!box.card && box.count >= 6 && width < 0.6f * crownRadius && height > 64.0f && height > 3.0f * width) {
@@ -460,7 +525,9 @@ namespace TreeShapes
 
 			// Each trunk registers its tree for the crowns of this block, once per shape
 			if (block.trunkShapes.insert(signature).second && (!cardStarts.empty() || !trunks.empty())) {
-				++block.generation;
+				// Order-independent, so a block that comes back with the same trunk shapes gets the same generation
+				block.generation ^= static_cast<uint32_t>(signature ^ (signature >> 32)) | 1u;
+				block.changedFrame = a_frame;
 				for (const auto& trunk : trunks)
 					AddCard(block, trunk, worldScale);
 				for (const auto c : cardStarts) {
@@ -504,13 +571,14 @@ namespace TreeShapes
 			// piece bends from its own foot, and the pieces of one tree share the random through their rounded centre
 			if (!indices)
 				return keepStill();
-			const auto roots = PieceRoots(indices, triangleCount, vertices.count);
+			auto roots = PieceRoots(indices, triangleCount, vertices.count);
+			const uint32_t pieceCount = CompactPieces(roots);
 			struct Piece
 			{
 				float sumX = 0.0f, sumY = 0.0f, base = FLT_MAX, top = -FLT_MAX, random = 0.5f, scale = 1.0f;
 				int count = 0;
 			};
-			std::unordered_map<uint32_t, Piece> pieces;
+			std::vector<Piece> pieces(pieceCount);
 			for (uint32_t i = 0; i < vertices.count; ++i) {
 				const auto p = vertices(i);
 				auto& piece = pieces[roots[i]];
@@ -520,7 +588,7 @@ namespace TreeShapes
 				piece.top = std::max(piece.top, p.z);
 				++piece.count;
 			}
-			for (auto& [root, piece] : pieces) {
+			for (auto& piece : pieces) {
 				const float rx = std::round(piece.sumX / piece.count / 8.0f), ry = std::round(piece.sumY / piece.count / 8.0f);
 				piece.random = Hash01(rx, ry);
 				piece.scale = TreeScale(std::max(piece.top - piece.base, 1.0f), worldScale, Hash01(ry * 1.37f + 11.0f, rx * 0.71f - 5.0f));
@@ -541,7 +609,8 @@ namespace TreeShapes
 				return nullptr;
 			const float crownRadius = kCrownRadius * 4.0f / std::max(worldScale, 0.01f);
 			const float maxDistance = 1.2f * crownRadius;
-			const auto roots = PieceRoots(indices, triangleCount, vertices.count);
+			auto roots = PieceRoots(indices, triangleCount, vertices.count);
+			const uint32_t pieceCount = CompactPieces(roots);
 			struct Piece
 			{
 				float sumX = 0.0f, sumY = 0.0f, minX = FLT_MAX, maxX = -FLT_MAX, minY = FLT_MAX, maxY = -FLT_MAX, minZ = FLT_MAX, maxZ = -FLT_MAX;
@@ -550,7 +619,7 @@ namespace TreeShapes
 				bool perVertex = false;  // one piece spans several trees: nearest card per vertex
 				const BendWeights::TrunkCard* card = nullptr;
 			};
-			std::unordered_map<uint32_t, Piece> pieces;
+			std::vector<Piece> pieces(pieceCount);
 			for (uint32_t i = 0; i < vertices.count; ++i) {
 				const auto p = vertices(i);
 				auto& piece = pieces[roots[i]];
@@ -565,7 +634,7 @@ namespace TreeShapes
 				++piece.count;
 			}
 			uint64_t matched = 0;
-			for (auto& [root, piece] : pieces) {
+			for (auto& piece : pieces) {
 				const float cx = piece.sumX / piece.count, cy = piece.sumY / piece.count;
 				if (farRing) {
 					piece.card = block.cards.empty() ? nullptr : NearestCardWithin(block, cx, cy, maxDistance);
@@ -655,10 +724,15 @@ namespace TreeShapes
 				it->second.lastFrame = std::max(it->second.lastFrame, entry.lastFrame);
 		std::erase_if(shared, [a_frame](const auto& a_record) { return a_frame - a_record.second.lastFrame > kEvictFrames; });
 		if (builtCount != loggedBuilt || reusedCount != loggedReused) {
-			logger::info("[TreeWind] bend weights: {} built (+{}), {} reused (+{}), {} shapes, {} shared, {} blocks",
-				builtCount, builtCount - loggedBuilt, reusedCount, reusedCount - loggedReused, entries.size(), shared.size(), blocks.size());
+			logger::info("[TreeWind] bend weights: {} built (+{}, {} of them rebuilds, {:.1f} ms, worst frame {:.1f} ms), {} reused (+{}), {} waits (+{}), {} shapes, {} shared, {} blocks",
+				builtCount, builtCount - loggedBuilt, staleBuiltCount - loggedStaleBuilt, (buildNs - loggedBuildNs) / 1e6, worstFrameNs / 1e6,
+				reusedCount, reusedCount - loggedReused, deferredCount, deferredCount - loggedDeferred, entries.size(), shared.size(), blocks.size());
 			loggedBuilt = builtCount;
 			loggedReused = reusedCount;
+			loggedDeferred = deferredCount;
+			loggedStaleBuilt = staleBuiltCount;
+			loggedBuildNs = buildNs;
+			worstFrameNs = 0;
 		}
 		// A block lives only while one of its shapes does, so its cards do not pile up
 		std::unordered_set<uint64_t> liveBlocks;

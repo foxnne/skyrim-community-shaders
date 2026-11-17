@@ -53,7 +53,8 @@ namespace TreeShapes
 			std::vector<TrunkCard> cards;
 			std::unordered_map<int64_t, std::vector<int>> grid;  // cell -> card indices
 			std::unordered_set<uint64_t> trunkShapes;            // signatures of the trunk shapes that registered their cards
-			uint32_t generation = 0;  // bumped when cards are added, so tree-mod crowns built before rebuild
+			uint32_t generation = 0;  // changes when cards are added, so tree-mod crowns built before rebuild
+			uint changedFrame = 0;    // frame of the last card change: crowns wait for the block to settle
 		};
 
 	private:
@@ -84,5 +85,12 @@ namespace TreeShapes
 		std::unordered_map<const void*, Entry> entries;  // key = the shape's vertex buffer
 		std::unordered_map<uint64_t, Shared> shared;     // key = the shape's content signature
 		uint64_t builtCount = 0, reusedCount = 0, loggedBuilt = 0, loggedReused = 0;
+		// Builds scan every vertex of a merged LOD shape on the render thread. When the LOD grid moves, hundreds of
+		// shapes arrive in one frame, so only a few milliseconds of builds run per frame and the rest wait
+		// (drawn with their previous data, or still) for the following frames.
+		uint budgetFrame = 0;
+		int64_t budgetSpentNs = 0;
+		uint64_t deferredCount = 0, loggedDeferred = 0, staleBuiltCount = 0, loggedStaleBuilt = 0;
+		int64_t buildNs = 0, loggedBuildNs = 0, worstFrameNs = 0;
 	};
 }

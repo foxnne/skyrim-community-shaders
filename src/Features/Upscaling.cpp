@@ -26,22 +26,6 @@
 
 #define I18N_KEY_PREFIX "feature.upscaling."
 
-namespace NR
-{
-	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(NR::Tuning, intensity, localToneStrength, localStructureStrength, skinStructureStrength,
-		skinToneStrength, hairToneStrength, eyeToneStrength, foliageToneStrength, landscapeToneStrength,
-		style, useAutoMask, afterUpscale, finalImage, replaceComposite, modelHdr, modelSharpening, modelAutoExposure, regionOfInterest, regionOverlay, regionFit, regionGroup, regionFollowFoveation,
-		parallelEyes, allowUnverifiedRuntime, runtimeVariant, materialStrength, strengthSkin, strengthHair, strengthEyes, strengthFoliage, strengthLandscape, strengthCloth, strengthMetal,
-		strengthOther, strengthEdgeSoftness, showMaterialMap, materialMapMode, materialMapFilter,
-		skipFrameReuse, skipFrameGapMode, modelPreset, modelScale, modelGuidedUpsample, sbsEvaluate, modelVerify, mirrorEyes, crossEyeGain);
-}
-
-namespace NR::Context
-{
-	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(NR::Context::ContextProfile, run, scope, region);
-	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(NR::Context::Profiles, normal, dialogue);
-}
-
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Upscaling::Settings,
 	upscaleMethod,
@@ -56,9 +40,6 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	sharpnessEnabledDLSS,
 	sharpnessDLSS,
 	presetDLSS,
-	neuralRenderingEnabled,
-	neuralRenderingContexts,
-	neuralRenderingTuning,
 	reflexLowLatencyMode,
 	reflexLowLatencyBoost,
 	reflexUseMarkersToOptimize,
@@ -523,12 +504,6 @@ void Upscaling::DrawDebugSection()
 	ImGui::Separator();
 	Util::DrawDllVersionTable(T(TKEY("amd_dlls_title"), "AMD FidelityFX DLLs (click to open folder)"), FidelityFX::PluginDir, FidelityFX::dllVersions, "ffx_dll_versions");
 	Util::DrawDllVersionTable(T(TKEY("nvidia_dlls_title"), "NVIDIA Streamline DLLs (click to open folder)"), Streamline::PluginDir, Streamline::dllVersions, "sl_dll_versions");
-	neuralRendering.DrawRuntimeDiagnostics();
-
-	if (ImGui::TreeNodeEx(T(TKEY("tab_neural_rendering"), "Neural Rendering"))) {
-		neuralRendering.DrawSettings(settings.neuralRenderingEnabled, settings.neuralRenderingContexts, settings.neuralRenderingTuning);
-		ImGui::TreePop();
-	}
 }
 
 void Upscaling::SaveSettings(json& o_json)
@@ -555,9 +530,6 @@ void Upscaling::LoadSettings(json& o_json)
 	// detect absence explicitly so a pre-existing config still runs the migration.
 	const bool hadFsr4SchemaVersion = o_json.contains("fsr4RuntimeSelectionSchemaVersion");
 	settings = o_json;
-	settings.neuralRenderingTuning.Sanitize();
-	settings.neuralRenderingContexts.Sanitize();
-	neuralRendering.ResetHistory();
 	if (!hadFsr4SchemaVersion)
 		settings.fsr4RuntimeSelectionSchemaVersion = 0;
 	ApplyLegacyFsr4RuntimeSelectionMigration(settings, fidelityFX.GetFsr4AdapterSupport());
@@ -614,7 +586,6 @@ void Upscaling::LoadSettings(json& o_json)
 void Upscaling::RestoreDefaultSettings()
 {
 	settings = {};
-	neuralRendering.ResetHistory();
 }
 
 void Upscaling::DataLoaded()
@@ -690,8 +661,6 @@ struct FaceGen_CopyRenderTarget
 
 void Upscaling::PostPostLoad()
 {
-	neuralRendering.InstallHooks();
-
 	bool isGOG = !GetModuleHandle(L"steam_api64.dll");
 	stl::detour_thunk<MenuManagerDrawInterfaceStartHook>(REL::RelocationID(79947, 82084));
 
@@ -969,58 +938,6 @@ ID3D11ComputeShader* Upscaling::GetEncodeTexturesCS()
 	return encodeTexturesCS[methodIndex].get();
 }
 
-ID3D11ComputeShader* Upscaling::GetEncodeTexturesCS(UpscaleMethod a_method, EncodeOutput a_output)
-{
-	const auto methodIndex = static_cast<uint>(a_method);
-	auto& cache = a_output == EncodeOutput::kTypedDepth ? encodeTexturesCSTypedDepth[methodIndex] : encodeTexturesCS[methodIndex];
-	if (!cache) {
-		std::vector<std::pair<const char*, const char*>> defines;
-		switch (a_method) {
-		case UpscaleMethod::kDLSS:
-			defines.push_back({ "DLSS", "" });
-			break;
-		case UpscaleMethod::kFSR:
-			defines.push_back({ "FSR", "" });
-			break;
-		default:
-			break;
-		}
-		if (a_output == EncodeOutput::kTypedDepth)
-			defines.push_back({ "DEPTH_OUTPUT", "" });
-		cache.attach((ID3D11ComputeShader*)Util::CompileShader(L"Data/Shaders/Upscaling/EncodeTexturesCS.hlsl", defines, "cs_5_0"));
-	}
-	return cache.get();
-}
-
-bool Upscaling::GetEncodeInputs(EncodeInputViews& a_views, const char*& a_missing) const
-{
-	auto renderer = globals::game::renderer;
-	auto& temporalAAMask = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kTEMPORAL_AA_MASK];
-	auto& normals = renderer->GetRuntimeData().renderTargets[globals::deferred->forwardRenderTargets[2]];
-	auto& motionVector = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
-	auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
-
-	a_missing = nullptr;
-	if (!temporalAAMask.SRV)
-		a_missing = "TAA mask";
-	else if (!normals.SRV)
-		a_missing = "normals";
-	else if (!motionVector.SRV)
-		a_missing = "motion vectors";
-	else if (!depth.depthSRV)
-		a_missing = "depth";
-	if (a_missing)
-		return false;
-
-	a_views = { temporalAAMask.SRV, normals.SRV, motionVector.SRV, depth.depthSRV };
-	return true;
-}
-
-bool Upscaling::FrameGenerationActive()
-{
-	return globals::features::upscaling.IsFrameGenerationActive();
-}
-
 ID3D11PixelShader* Upscaling::GetDepthRefractionUpscalePS()
 {
 	if (!depthRefractionUpscalePS) {
@@ -1190,7 +1107,6 @@ void Upscaling::ConfigureUpscaling(RE::BSGraphics::State* a_viewport)
 void Upscaling::SetupResources()
 {
 	QueryPerformanceFrequency(&qpf);
-	neuralRendering.SetupResources();
 
 	// Latch the restart-gated runtime-FSR4 opt-in here, not in LoadSettings: LoadSettings can
 	// run before the D3D11 device hook, so the adapter probe would report Unsupported and the
@@ -1270,9 +1186,6 @@ void Upscaling::ClearShaderCache()
 		encodeTexturesCS[i] = nullptr;  // com_ptr automatically releases
 	}
 	encodeTexturesCSDepthOutput = nullptr;  // com_ptr automatically releases
-	for (auto& shader : encodeTexturesCSTypedDepth)
-		shader = nullptr;
-	neuralRendering.ClearShaderCache();
 
 	depthRefractionUpscalePS = nullptr;  // com_ptr automatically releases
 	underwaterMaskUpscalePS = nullptr;   // com_ptr automatically releases
@@ -1954,17 +1867,6 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 
 	auto& upscaling = globals::features::upscaling;
 	auto upscaleMethod = upscaling.GetUpscaleMethod();
-	const float2 nrDisplaySize{ (float)globals::game::graphicsState->screenWidth, (float)globals::game::graphicsState->screenHeight };
-	const auto nrRenderSize = Util::ConvertToDynamic(nrDisplaySize);
-	// Optionally run NR on the upscaler's full-resolution output instead (it needs a real upscaler to have run).
-	const bool realUpscaler = upscaleMethod != UpscaleMethod::kNONE && upscaleMethod != UpscaleMethod::kTAA;
-	// Final-image placement is SDR only: with HDR output the finished image lives in a float texture NR does not take.
-	const bool nrFinalImage = upscaling.settings.neuralRenderingTuning.finalImage && realUpscaler &&
-	                          !(globals::features::hdrDisplay.loaded && globals::features::hdrDisplay.settings.enableHDR);
-	const bool nrAfterUpscale = !nrFinalImage && upscaling.settings.neuralRenderingTuning.afterUpscale && realUpscaler;
-	if (!nrAfterUpscale && !nrFinalImage)
-		upscaling.neuralRendering.DrawBeforeUpscaling(upscaling.loaded && upscaling.settings.neuralRenderingEnabled, upscaling.settings.neuralRenderingContexts, upscaling.settings.neuralRenderingTuning, uint32_t(a_target), nrRenderSize);
-	upscaling.neuralRendering.CaptureBeforeUpscaling();
 
 	const bool prepareFrameGeneration = upscaling.ShouldPrepareFrameGeneration();
 	if (prepareFrameGeneration && postProcessing.loaded)
@@ -1973,16 +1875,10 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 
 	if (upscaleMethod != UpscaleMethod::kNONE && upscaleMethod != UpscaleMethod::kTAA)
 		upscaling.PerformUpscaling();
-	upscaling.neuralRendering.CaptureAfterUpscaling();
 
 	if (upscaleMethod == UpscaleMethod::kDLSS)
 		upscaling.ApplySharpening();
 
-	if (nrAfterUpscale)
-		upscaling.neuralRendering.DrawBeforeUpscaling(upscaling.loaded && upscaling.settings.neuralRenderingEnabled, upscaling.settings.neuralRenderingContexts, upscaling.settings.neuralRenderingTuning, uint32_t(a_target), nrDisplaySize, true,
-			float2{ nrRenderSize.x / nrDisplaySize.x, nrRenderSize.y / nrDisplaySize.y });
-
-	upscaling.neuralRendering.RecordStage(false);
 	Util::SetTemporal(upscaleMethod == UpscaleMethod::kTAA);
 
 	// Redirect kFRAMEBUFFER to float texture before ISHDR runs so HDR values >1.0 survive
@@ -1997,12 +1893,6 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 	if (hdrLoaded)
 		globals::features::hdrDisplay.RestoreFramebuffer();
 
-	// The image is final here (tone mapped, graded, upscaled) and the UI has not been drawn yet.
-	if (nrFinalImage)
-		upscaling.neuralRendering.DrawBeforeUpscaling(upscaling.loaded && upscaling.settings.neuralRenderingEnabled, upscaling.settings.neuralRenderingContexts, upscaling.settings.neuralRenderingTuning, uint32_t(a_target), nrDisplaySize, true,
-			float2{ nrRenderSize.x / nrDisplaySize.x, nrRenderSize.y / nrDisplaySize.y }, true);
-
-	upscaling.neuralRendering.RecordStage(true);
 	Util::SetTemporal(false);
 }
 

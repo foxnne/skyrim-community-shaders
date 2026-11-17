@@ -3,7 +3,6 @@
 #include "Feature.h"
 #include "Upscaling/DX12SwapChain.h"
 #include "Upscaling/FidelityFX.h"
-#include "Upscaling/NeuralRendering.h"
 #include "Upscaling/RCAS/RCAS.h"
 #include "Upscaling/Streamline.h"
 #include <d3d11_4.h>
@@ -65,9 +64,6 @@ public:
 		bool sharpnessEnabledDLSS = false;
 		float sharpnessDLSS = 0.0f;
 		uint presetDLSS = 0;  // 0=Default, 1=J, 2=K, 3=L, 4=M
-		bool neuralRenderingEnabled = false;
-		NR::Context::Profiles neuralRenderingContexts;
-		NR::Tuning neuralRenderingTuning;
 		bool reflexLowLatencyMode = false;
 		bool reflexLowLatencyBoost = false;
 		bool reflexUseMarkersToOptimize = false;
@@ -125,8 +121,6 @@ public:
 	// FG FPS Measurement for Overlay
 	bool IsFrameGenerationDx12PathActive() const;
 	bool IsFrameGenerationActive() const;
-	/** @brief Frame generation state, forwarded so Neural Rendering never reaches into this feature. */
-	static bool FrameGenerationActive();
 	/** @brief Returns whether settings and menu state permit preparing frame-generation inputs this frame. */
 	bool ShouldPrepareFrameGeneration() const;
 	/** @brief Returns the frame-generation decision made in post-processing, held until the frame is presented. */
@@ -162,28 +156,6 @@ public:
 	winrt::com_ptr<ID3D11ComputeShader> encodeTexturesCSDepthOutput;  // FSR: converts R24G8_TYPELESS depth to R32_FLOAT
 	ID3D11ComputeShader* GetEncodeTexturesCS();
 
-	/** @brief Encoder outputs a caller binds; selects the permutation. */
-	enum class EncodeOutput : uint8_t
-	{
-		kMasksOnly,
-		kTypedDepth,  // converts R24G8_TYPELESS depth to R32_FLOAT
-		kCount
-	};
-
-	winrt::com_ptr<ID3D11ComputeShader> encodeTexturesCSTypedDepth[4];  // DEPTH_OUTPUT permutation per UpscaleMethod
-
-	/** @brief EncodeTextures CS for a method and output set; nullptr on compile failure. */
-	ID3D11ComputeShader* GetEncodeTexturesCS(UpscaleMethod a_method, EncodeOutput a_output);
-
-	using EncodeInputViews = std::array<ID3D11ShaderResourceView*, 4>;
-
-	/** @brief Current-frame encoder inputs (TAA mask, normals, motion, depth). Returns false if
-	 *         any is missing, naming the first missing one in a_missing. */
-	bool GetEncodeInputs(EncodeInputViews& a_views, const char*& a_missing) const;
-
-	/** @brief DLSS Neural Rendering ("DLSS 5"), evaluated at render resolution before upscaling. */
-	NeuralRendering neuralRendering;
-
 	winrt::com_ptr<ID3D11PixelShader> depthRefractionUpscalePS;
 	ID3D11PixelShader* GetDepthRefractionUpscalePS();
 
@@ -213,9 +185,6 @@ public:
 	Texture2D* runtimeFsrDepthTexture = nullptr;
 
 	virtual void ClearShaderCache() override;
-
-	/** @brief Propagates frame inactivity to Neural Rendering temporal history. */
-	void Reset() override { neuralRendering.Reset(settings.neuralRenderingEnabled, settings.neuralRenderingTuning.regionOfInterest, settings.neuralRenderingTuning.regionFit, settings.neuralRenderingTuning.regionGroup, settings.neuralRenderingTuning.allowUnverifiedRuntime, settings.neuralRenderingTuning.runtimeVariant); }
 
 	// Static instances instead of singletons
 	static inline Streamline streamline;

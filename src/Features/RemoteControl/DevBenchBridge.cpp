@@ -1,3 +1,4 @@
+#include "Features/NeuralRendering.h"
 #include "Features/RemoteControl/DevBenchBridge.h"
 
 // Registers our tools into the devbench test bench over its C-ABI. Gated by
@@ -470,7 +471,7 @@ namespace
 					{ "frame_count", state->frameCount },
 					{ "frame", frame },
 					{ "frameGeneration", globals::features::upscaling.IsFrameGenerationActive() },
-					{ "neuralRendering", globals::features::upscaling.settings.neuralRenderingEnabled },
+					{ "neuralRendering", globals::features::neuralRendering.loaded && globals::features::neuralRendering.settings.enabled },
 					{ "utility", utility },
 					{ "shaders", types },
 				};

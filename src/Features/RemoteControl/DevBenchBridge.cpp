@@ -1200,6 +1200,16 @@ namespace
 				return json{ { "ok", true }, { "command", cmd } };
 			}
 
+			// Stops the world (animation, physics, wind, weather) while rendering continues: identical frames for A/B shots.
+			if (action == "freeze") {
+				auto* main = RE::Main::GetSingleton();
+				if (!main)
+					return json{ { "error", "main unavailable" } };
+				if (a_args.contains("on") && a_args["on"].is_boolean())
+					main->GetRuntimeData().freezeTime = a_args["on"].get<bool>();
+				return json{ { "ok", true }, { "frozen", main->GetRuntimeData().freezeTime } };
+			}
+
 			if (action == "teleport") {
 				if (!RE::PlayerCharacter::GetSingleton())
 					return json{ { "error", "player unavailable" } };

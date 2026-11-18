@@ -179,6 +179,16 @@ public:
 	{
 		bool IgnorePresetParticles = true;
 		float PBRColorPowStrength = 0.0f;
+		// Sun and moon rays without an Effects 11 preset (the passes otherwise only run when Effects 11 is the
+		// active pipeline). Used with the Post Processing pipeline; strengths are plain multipliers.
+		bool StandaloneRays = false;
+		bool StandaloneSunRays = true;
+		bool StandaloneMoonRays = true;
+		float StandaloneSunMultiplier = 0.1f;
+		float StandaloneMoonMultiplier = 0.1f;
+		float StandaloneSkyColorAmount = 0.0f;
+		int StandaloneType = 3;      // 0..4, ray length profile (same as RAYS Type)
+		int StandaloneQuality = 0;   // -2..2 (same as RAYS Quality)
 	} settings;
 
 	bool enableEffect = false;

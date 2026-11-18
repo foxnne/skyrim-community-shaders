@@ -143,16 +143,22 @@ namespace
 		return true;
 	}
 
-	float3 GetSunRaysColor(const SunRaysLight& a_light, float a_lightPeak, const float3& a_skyColor)
+	/// Standalone-rays strengths (no Effects 11 preset); null when the preset drives the rays.
+	struct StandaloneRaysValues
+	{
+		float sunMultiplier, moonMultiplier, skyColorAmount;
+	};
+
+	float3 GetSunRaysColor(const SunRaysLight& a_light, float a_lightPeak, const float3& a_skyColor, const StandaloneRaysValues* a_standalone)
 	{
 		auto& settingManager = SettingManager::GetSingleton();
 		if (!a_light.isSun)
-			return a_light.color * settingManager.GetInterpolatedTimeOfDayValue("MoonRaysMultiplier", "RAYS");
+			return a_light.color * (a_standalone ? a_standalone->moonMultiplier : settingManager.GetInterpolatedTimeOfDayValue("MoonRaysMultiplier", "RAYS"));
 
 		const float3 tint = (a_light.color + float3(1e-5f)) / a_lightPeak;
-		const float multiplier = settingManager.GetInterpolatedTimeOfDayValue("SunRaysMultiplier", "RAYS");
-		const float skyAmount = settingManager.GetInterpolatedTimeOfDayValue("SkyColorAmount", "RAYS") * multiplier;
-		if (settingManager.GetValue<bool>("UseLinearMath", "RAYS"))
+		const float multiplier = a_standalone ? a_standalone->sunMultiplier : settingManager.GetInterpolatedTimeOfDayValue("SunRaysMultiplier", "RAYS");
+		const float skyAmount = (a_standalone ? a_standalone->skyColorAmount : settingManager.GetInterpolatedTimeOfDayValue("SkyColorAmount", "RAYS")) * multiplier;
+		if (!a_standalone && settingManager.GetValue<bool>("UseLinearMath", "RAYS"))
 			return tint * multiplier + a_skyColor * skyAmount;
 
 		const float sunAmount = std::clamp((a_light.color.x + a_light.color.y + a_light.color.z) * 3.0f, 0.0f, 1.0f);
@@ -360,7 +366,15 @@ Effects11::PerFrame Effects11::GetCommonBufferData()
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Effects11::Settings,
 	IgnorePresetParticles,
-	PBRColorPowStrength)
+	PBRColorPowStrength,
+	StandaloneRays,
+	StandaloneSunRays,
+	StandaloneMoonRays,
+	StandaloneSunMultiplier,
+	StandaloneMoonMultiplier,
+	StandaloneSkyColorAmount,
+	StandaloneType,
+	StandaloneQuality)
 
 void Effects11::DrawSettings()
 {
@@ -1353,43 +1367,66 @@ bool Effects11::EnsureSunRaysResources(uint32_t a_width, uint32_t a_height)
 
 void Effects11::DrawSunRays()
 {
-	if (!enableEffect || Util::IsInterior())
+	const bool standalone = !enableEffect && settings.StandaloneRays;
+	// Standalone diagnostics: say (once every ~10 s) why nothing was drawn
+	static uint32_t skipLogCounter = 0;
+	auto skip = [&](const char* a_reason) {
+		if (standalone && (skipLogCounter++ % 600) == 0)
+			logger::info("[Effects11] standalone rays skipped: {}", a_reason);
+	};
+	if ((!enableEffect && !standalone) || Util::IsInterior())
 		return;
 
 	auto sky = globals::game::sky;
-	if (!sky || sky->flags.any(RE::Sky::Flags::kHideSky))
+	if (!sky || sky->flags.any(RE::Sky::Flags::kHideSky)) {
+		skip("no sky or sky hidden");
 		return;
+	}
 
 	if (globals::state->IsFullScreenMenuOpen() || globals::state->isMapMenuOpen)
 		return;
 
 	auto& settingManager = SettingManager::GetSingleton();
-	const bool sunRays = settingManager.GetValue<bool>("EnableSunRays", "EFFECT");
-	const bool moonRays = settingManager.GetValue<bool>("EnableMoonRays", "EFFECT");
-	if (!sunRays && !moonRays)
+	const bool sunRays = standalone ? settings.StandaloneSunRays : settingManager.GetValue<bool>("EnableSunRays", "EFFECT");
+	const bool moonRays = standalone ? settings.StandaloneMoonRays : settingManager.GetValue<bool>("EnableMoonRays", "EFFECT");
+	const StandaloneRaysValues standaloneValues{ settings.StandaloneSunMultiplier, settings.StandaloneMoonMultiplier, settings.StandaloneSkyColorAmount };
+	if (!sunRays && !moonRays) {
+		skip("sun and moon rays both off");
 		return;
+	}
 
 	auto& effectManager = EffectManager::GetSingleton();
-	if (!effectManager.IsInitialized() || !effectManager.copyVertexShader)
+	if (!effectManager.IsInitialized() || !effectManager.copyVertexShader) {
+		skip("effect manager not initialised (no copy vertex shader)");
 		return;
+	}
 
 	const PerFrame perFrame = GetCommonBufferData();
 	SunRaysLight light;
-	if (!SelectSunRaysLight(sky, perFrame, sunRays, moonRays, light))
+	if (!SelectSunRaysLight(sky, perFrame, sunRays, moonRays, light)) {
+		skip("no light selected (sun not visible / no sun sprite / no moon caster)");
 		return;
+	}
 
 	const float lightPeak = std::max({ light.color.x, light.color.y, light.color.z });
-	if (lightPeak <= 1e-4f || light.billboardTan <= 0.0f)
+	if (lightPeak <= 1e-4f || light.billboardTan <= 0.0f) {
+		if (standalone && (skipLogCounter++ % 600) == 0)
+			logger::info("[Effects11] standalone rays skipped: light colour peak {} billboard tan {}", lightPeak, light.billboardTan);
 		return;
+	}
 
 	const auto viewProj = globals::game::frameBufferCached.GetCameraViewProj().Transpose();
 	const auto clip = DirectX::SimpleMath::Vector4::Transform(DirectX::SimpleMath::Vector4(light.direction.x, light.direction.y, light.direction.z, 0.0f), viewProj);
-	if (clip.w <= 1e-6f)
+	if (clip.w <= 1e-6f) {
+		skip("light behind the camera");
 		return;
+	}
 
 	const float2 lightNdc = { clip.x / clip.w, clip.y / clip.w };
-	if (std::max(std::abs(lightNdc.x), std::abs(lightNdc.y)) * 0.4f >= 0.99999f)
+	if (std::max(std::abs(lightNdc.x), std::abs(lightNdc.y)) * 0.4f >= 0.99999f) {
+		skip("light too far off screen");
 		return;
+	}
 
 	auto context = globals::d3d::context;
 	auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
@@ -1409,8 +1446,8 @@ void Effects11::DrawSunRays()
 	static constexpr uint32_t compositeSteps[5] = { 8, 8, 7, 6, 4 };
 	static constexpr float shortBlur[5] = { 0.15f, 0.3f, 0.6f, 0.3f, 0.9f };
 	static constexpr float longBlur[5] = { 0.4f, 0.7f, 0.6f, 1.0f, 0.9f };
-	const int qualityIndex = std::clamp(static_cast<int>(std::lround(settingManager.GetValue<float>("Quality", "RAYS"))) + 2, 0, 4);
-	const int type = std::clamp(static_cast<int>(std::lround(settingManager.GetValue<float>(light.isSun ? "Type" : "MoonType", "RAYS"))), 0, 4);
+	const int qualityIndex = std::clamp((standalone ? settings.StandaloneQuality : static_cast<int>(std::lround(settingManager.GetValue<float>("Quality", "RAYS")))) + 2, 0, 4);
+	const int type = std::clamp(standalone ? settings.StandaloneType : static_cast<int>(std::lround(settingManager.GetValue<float>(light.isSun ? "Type" : "MoonType", "RAYS"))), 0, 4);
 
 	SunRaysData data{};
 	data.lightUV = { lightNdc.x * 0.5f + 0.5f, 0.5f - lightNdc.y * 0.5f };
@@ -1418,9 +1455,13 @@ void Effects11::DrawSunRays()
 	data.uvMax = { (halfDynWidth - 0.5f) / halfTexWidth, (halfDynHeight - 0.5f) / halfTexHeight };
 	data.lightDirection = { light.direction.x, light.direction.y, light.direction.z };
 	data.lightBillboardTan = light.billboardTan;
-	data.raysColor = GetSunRaysColor(light, lightPeak, perFrame.VolumetricRaysSkyColor);
-	if (data.raysColor.x == 0.0f && data.raysColor.y == 0.0f && data.raysColor.z == 0.0f)
+	data.raysColor = GetSunRaysColor(light, lightPeak, perFrame.VolumetricRaysSkyColor, standalone ? &standaloneValues : nullptr);
+	if (data.raysColor.x == 0.0f && data.raysColor.y == 0.0f && data.raysColor.z == 0.0f) {
+		skip("rays colour is zero");
 		return;
+	}
+	if (standalone && (skipLogCounter++ % 600) == 0)
+		logger::info("[Effects11] standalone rays drawing: colour {:.3f} {:.3f} {:.3f}, light peak {:.3f}, uv {:.2f} {:.2f}", data.raysColor.x, data.raysColor.y, data.raysColor.z, lightPeak, data.lightUV.x, data.lightUV.y);
 	data.maskBrightness = lightPeak;
 	data.maskExponent = light.maskExponent;
 	data.invScreenWidth = 1.0f / std::max(resolution.x, 1.0f);

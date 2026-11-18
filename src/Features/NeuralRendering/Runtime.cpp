@@ -550,7 +550,18 @@ namespace NeuralRenderingNGX
 
 			// The render preset is creation-time state. Initial tuning is also supplied for compatibility
 			// with the private Feature 18 interface; evaluation writes below are the live tuning path.
-			parameters->Set("DLSSNR.Hint.Render.Preset", 0u);
+			// Model preset test switch: a file NRModelPreset.txt (containing 1 or 2) in the CommunityShaders plugin
+			// directory selects the model preset on 310.9+ runtimes; absent or anything else keeps 0 (runtime default).
+			unsigned int modelPreset = 0u;
+			try {
+				std::ifstream presetFile(Util::PathHelpers::GetCommunityShaderPath() / "NRModelPreset.txt");
+				int value = 0;
+				if (presetFile && (presetFile >> value) && value >= 0 && value <= 4)
+					modelPreset = static_cast<unsigned int>(value);
+			} catch (...) {
+			}
+			logger::info("[NeuralRendering] model preset hint {}", modelPreset);
+			parameters->Set("DLSSNR.Hint.Render.Preset", modelPreset);
 			parameters->Set("DLSSNR.Intensity", tuning.intensity);
 			parameters->Set("DLSSNR.Style", tuning.style);
 			parameters->Set("DLSSNR.LocalToneStrength", tuning.localToneStrength);

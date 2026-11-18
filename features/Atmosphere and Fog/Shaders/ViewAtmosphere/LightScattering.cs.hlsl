@@ -28,6 +28,34 @@ StructuredBuffer<DirectionalShadowLightData> DirectionalShadowLights : register(
 #	include "TerrainShadows/TerrainShadows.hlsli"
 #endif
 
+#ifdef TERRAIN_SHADOWS
+// Terrain shadow for the medium. The surface version is a hard height test with a small blur, which in haze shows the
+// shadow-height map's steps as terraces behind distant mountains at low sun. Haze does not need a sharp edge, so this
+// widens the transition in height and averages a few height-map texels, both growing with distance from the camera.
+float MediumTerrainShadow(float3 worldPos, float viewDistance)
+{
+	if (!SharedData::terraOccSettings.EnableTerrainShadow)
+		return 1.0;
+	const float2 uv = TerrainShadows::GetTerrainShadowUV(worldPos.xy);
+	if (any(uv < 0.0) || any(uv > 1.0))
+		return 1.0;
+	uint width, height;
+	TerrainShadows::ShadowHeightTexture.GetDimensions(width, height);
+	const float2 texel = 1.0 / float2(width, height);
+	const float radius = clamp(viewDistance / 6000.0, 1.0, 8.0);  // texels (128 units each on Tamriel)
+	const float zBlur = max(SharedData::terraOccSettings.ZBlur, clamp(viewDistance * 0.05, 256.0, 4000.0));
+	static const float2 taps[5] = { float2(0, 0), float2(1, 0.5), float2(-0.5, 1), float2(-1, -0.5), float2(0.5, -1) };
+	float shadow = 0.0;
+	[unroll] for (uint i = 0; i < 5; ++i)
+	{
+		const float2 heights = TerrainShadows::GetTerrainZ(TerrainShadows::ShadowHeightTexture.SampleLevel(LinearSampler, uv + taps[i] * radius * texel, 0));
+		const float lower = heights.y - zBlur;
+		shadow += saturate((worldPos.z - lower) / max(heights.x + zBlur - lower, 1.0));
+	}
+	return shadow * 0.2;
+}
+#endif
+
 float MediumVisibility(float3 position, out float atmosphereVisibility, out float3 diffuseVisibility)
 {
 	float visibility = 1.0;
@@ -45,7 +73,7 @@ float MediumVisibility(float3 position, out float atmosphereVisibility, out floa
 	}
 #ifdef TERRAIN_SHADOWS
 	if (ViewAtmosphere::Data[0].flags.z & 256u)
-		visibility *= TerrainShadows::GetTerrainShadow(position + FrameBuffer::CameraPosAdjust.xyz, LinearSampler);
+		visibility *= MediumTerrainShadow(position + FrameBuffer::CameraPosAdjust.xyz, length(position));
 #endif
 	atmosphereVisibility = visibility;
 	float layerShadow = 1.0;

@@ -306,6 +306,33 @@ float3 ShadeCloudLighting(float3 pos, NDFInfo ndf, float extinction, float viewD
 	return info.cloudLightingScale * sunlight * externalSunTransmission * (directional * scatterAmount + multiple * viewOpacity);
 }
 
+#ifdef CLOUD_AP_SHADOW
+// Terrain shadow on cloud. The surface test is a nearly hard height edge; on clouds, which are traced sparsely and sit
+// kilometres from the mountain casting the shadow, that edge shows as terraces. A real penumbra at that range is
+// hundreds of metres wide (the sun is half a degree across), so average a few texels and widen the height transition.
+float CloudTerrainShadow(float3 worldPos)
+{
+	if (!SharedData::terraOccSettings.EnableTerrainShadow)
+		return 1.0;
+	const float2 uv = TerrainShadows::GetTerrainShadowUV(worldPos.xy);
+	if (any(uv < 0.0) || any(uv > 1.0))
+		return 1.0;
+	uint width, height;
+	TerrainShadows::ShadowHeightTexture.GetDimensions(width, height);
+	const float2 texel = 6.0 / float2(width, height);  // about 770 game units on Tamriel
+	const float zBlur = max(SharedData::terraOccSettings.ZBlur, 3000.0);
+	static const float2 taps[5] = { float2(0, 0), float2(1, 0.5), float2(-0.5, 1), float2(-1, -0.5), float2(0.5, -1) };
+	float shadow = 0.0;
+	[unroll] for (uint i = 0; i < 5; ++i)
+	{
+		const float2 heights = TerrainShadows::GetTerrainZ(TerrainShadows::ShadowHeightTexture.SampleLevel(TransmittanceSampler, uv + taps[i] * texel, 0));
+		const float lower = heights.y - zBlur;
+		shadow += saturate((worldPos.z - lower) / max(heights.x + zBlur - lower, 1.0));
+	}
+	return shadow * 0.2;
+}
+#endif
+
 float3 ShadeCloudLighting(float3 pos, NDFInfo ndf, float extinction, float viewDepth, float viewOpacity, float phase, float opticalDepth, float multipleScattering)
 {
 	float sunTransmission = UpperSunTransmission(pos);
@@ -316,7 +343,7 @@ float3 ShadeCloudLighting(float3 pos, NDFInfo ndf, float extinction, float viewD
 	{
 		// Cloud-space z is relative to bottomZ; the heightmap is in world z.
 		const float3 worldPos = pos + float3(0, 0, VolumetricCloudBuffer[0].bottomZ);
-		sunTransmission *= TerrainShadows::GetTerrainShadow(worldPos, TransmittanceSampler);
+		sunTransmission *= CloudTerrainShadow(worldPos);
 		[branch] if (sunTransmission > 0.0)
 			sunTransmission *= AtmosphereShadow::SampleCascadeShadow(worldPos - FrameBuffer::CameraPosAdjust.xyz);
 	}

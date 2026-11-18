@@ -4,6 +4,7 @@
 #include "ShaderTools/LegacyGraphicsCompatibility.h"
 #include "Utils/ExternalEmittance.h"
 #include "Utils/VersionedRelocation.h"
+#include "Utils/HitchSampler.h"
 #include "Utils/VramTracker.h"
 
 #include "EngineFix.h"
@@ -573,6 +574,8 @@ struct IDXGISwapChain_Present
 
 		VramTracker::OnPresent();
 
+		HitchSampler::OnPresent();
+
 		NvPerf::OnPresentEnd();
 
 		TracyD3D11Collect(globals::state->tracyCtx);
@@ -845,6 +848,7 @@ namespace Hooks
 			stl::detour_vfunc<23, ID3D11Device_CreateSamplerState>(globals::d3d::device);
 
 			VramTracker::Install(globals::d3d::device);
+			HitchSampler::Install();
 
 			if (RenderDoc::IsLoaded())
 				stl::detour_vfunc<3, ID3D11Device_CreateBuffer>(globals::d3d::device);

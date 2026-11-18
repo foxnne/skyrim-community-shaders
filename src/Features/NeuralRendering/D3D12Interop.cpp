@@ -134,6 +134,7 @@ namespace NeuralRenderingNGX
 
 	bool D3D12Interop::BeginD3D12(ID3D12GraphicsCommandList** commandList)
 	{
+		ZoneScopedN("NeuralRendering::BeginD3D12");
 		if (!initialized_ || recording_ || !commandList) return RecordFailure(E_UNEXPECTED);
 
 		const std::uint64_t completedValue = fence12_->GetCompletedValue();
@@ -176,6 +177,7 @@ namespace NeuralRenderingNGX
 
 	bool D3D12Interop::EndD3D12()
 	{
+		ZoneScopedN("NeuralRendering::EndD3D12");
 		if (!initialized_ || !recording_ || recordingContext_ >= kCommandContextCount)
 			return RecordFailure(E_UNEXPECTED);
 		recording_ = false;
@@ -202,6 +204,7 @@ namespace NeuralRenderingNGX
 	{
 		if (!value || fence12_->GetCompletedValue() >= value)
 			return true;
+		ZoneScopedN("NeuralRendering::WaitForFence (CPU blocked)");
 		const HRESULT result = fence12_->SetEventOnCompletion(value, fenceEvent_);
 		if (FAILED(result)) return RecordFailure(result);
 		const DWORD waitResult = WaitForSingleObject(fenceEvent_, timeoutMs);

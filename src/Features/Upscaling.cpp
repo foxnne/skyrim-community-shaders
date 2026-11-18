@@ -1327,13 +1327,17 @@ void Upscaling::TimerSleepQPC(int64_t targetQPC, int64_t frequency)
 void Upscaling::FrameLimiter()
 {
 	if (d3d12SwapChainActive) {
+		ZoneScopedN("Upscaling::FrameLimiter (waits for present slot)");
 		// Use frame latency waitable object if available for better frame pacing
 		HANDLE waitableObject = GetFrameLatencyWaitableObject();
 
 		// Wait for the next frame presentation slot
 		// (bounded so a lost swapchain cannot block the render thread forever)
 		static constexpr DWORD kFrameLatencyWaitTimeoutMs = 1000;
-		WaitForSingleObject(waitableObject, kFrameLatencyWaitTimeoutMs);
+		{
+			ZoneScopedN("FrameLimiter - frame latency wait");
+			WaitForSingleObject(waitableObject, kFrameLatencyWaitTimeoutMs);
+		}
 
 		if (settings.frameLimitMode) {
 			static constexpr int64_t kNanosecondsPerSecond = 1000000000LL;

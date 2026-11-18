@@ -217,9 +217,33 @@ namespace SceneSettingsInternal
 		return Util::ToLower(std::move(normalized));
 	}
 
+	namespace
+	{
+		struct TokenHash
+		{
+			using is_transparent = void;
+			size_t operator()(std::string_view value) const noexcept { return std::hash<std::string_view>{}(value); }
+		};
+
+		// Loading the weather user settings compares every entry's address against every policy prefix, and
+		// normalizing both sides each time (two allocations per token) cost a 280 ms frame after a load.
+		// The set of distinct tokens is small (feature names, setting keys), so the result is memoized per thread.
+		const std::string& NormalizedSceneSettingAddressTokenCached(std::string_view token)
+		{
+			thread_local std::unordered_map<std::string, std::string, TokenHash, std::equal_to<>> cache;
+			if (const auto it = cache.find(token); it != cache.end())
+				return it->second;
+			if (cache.size() >= 8192)
+				cache.clear();
+			return cache.emplace(std::string(token), NormalizeSceneSettingAddressToken(token)).first->second;
+		}
+	}
+
 	bool SceneSettingAddressTokensEqual(std::string_view lhs, std::string_view rhs)
 	{
-		return NormalizeSceneSettingAddressToken(lhs) == NormalizeSceneSettingAddressToken(rhs);
+		// Copy the first result: the second lookup may clear the cache
+		const std::string left = NormalizedSceneSettingAddressTokenCached(lhs);
+		return left == NormalizedSceneSettingAddressTokenCached(rhs);
 	}
 
 	bool IsSceneSettingPolicyPrefix(

@@ -6,9 +6,12 @@
 #include "Utils/FileSystem.h"
 #include <DDSTextureLoader.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <thread>
 #include <string.h>
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
@@ -319,10 +322,9 @@ SnowCover::PerFrame SnowCover::GetCommonBufferData()
 {
 	Reload();
 
-	if (wsettings.EnableSnowCover && !snowMapCpuPath.empty()) {
+	if (wsettings.EnableSnowCover && !snowMapCpuPath.empty())
 		LoadSnowMapCpu();
-		BuildSnowMapMax();
-	}
+	PollSnowMapJob();
 
 	bool snowing = false;
 	bool raining = false;
@@ -423,6 +425,7 @@ void SnowCover::ResetWorldConfig()
 	snowMapCpu.Release();
 	snowMapCpuPath.clear();
 	snowMapMax.clear();
+	snowMapJob.reset();  // a running worker keeps its own reference and its result is dropped
 }
 
 void SnowCover::UpdateMapTransform()
@@ -936,12 +939,12 @@ void SnowCover::Hooks::BSLightingShader_SetupGeometry::thunk(RE::BSShader* This,
 	func(This, Pass, RenderFlags);
 }
 
-void SnowCover::BuildSnowMapMax()
+std::vector<SnowCover::SnowMapLevel> SnowCover::BuildSnowMapMax(const DirectX::ScratchImage& a_source)
 {
-	snowMapMax.clear();
-	const auto* image = snowMapCpu.GetImage(0, 0, 0);
+	std::vector<SnowMapLevel> snowMapMax;
+	const auto* image = a_source.GetImage(0, 0, 0);
 	if (!image || image->format != DXGI_FORMAT_R8_UNORM || image->width == 0 || image->height == 0)
-		return;
+		return snowMapMax;
 
 	SnowMapLevel base;
 	base.width = static_cast<uint32_t>(image->width);
@@ -970,6 +973,7 @@ void SnowCover::BuildSnowMapMax()
 		}
 		snowMapMax.push_back(std::move(next));
 	}
+	return snowMapMax;
 }
 
 bool SnowCover::GetSnowMapMax(float a_u0, float a_v0, float a_u1, float a_v1, float& a_value) const
@@ -1222,17 +1226,34 @@ void SnowCover::UpdateSurvival()
 
 void SnowCover::LoadSnowMapCpu()
 {
-	DirectX::ScratchImage source;
-	if (SUCCEEDED(DirectX::LoadFromDDSFile(snowMapCpuPath.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, source))) {
-		const auto& image = *source.GetImage(0, 0, 0);
-		if (image.format == DXGI_FORMAT_R8_UNORM)
-			snowMapCpu = std::move(source);
-		else if (DirectX::IsCompressed(image.format))
-			DirectX::Decompress(image, DXGI_FORMAT_R8_UNORM, snowMapCpu);
-		else
-			DirectX::Convert(image, DXGI_FORMAT_R8_UNORM, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, snowMapCpu);
-	}
-	if (!snowMapCpu.GetImageCount())
-		logger::warn("[Snow Cover] Could not read {} on the CPU, Survival Mode ground snow ignores the altitude map here", snowMapCpuPath.generic_string());
+	// Reading and decompressing the map takes over 100 ms, so it runs on a worker; until it finishes the
+	// previous state applies (no map: the altitude-only fallback), and PollSnowMapJob swaps the result in.
+	auto job = std::make_shared<SnowMapJob>();
+	snowMapJob = job;
+	std::thread([job, path = snowMapCpuPath]() {
+		DirectX::ScratchImage source;
+		if (SUCCEEDED(DirectX::LoadFromDDSFile(path.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, source))) {
+			const auto& image = *source.GetImage(0, 0, 0);
+			if (image.format == DXGI_FORMAT_R8_UNORM)
+				job->image = std::move(source);
+			else if (DirectX::IsCompressed(image.format))
+				DirectX::Decompress(image, DXGI_FORMAT_R8_UNORM, job->image);
+			else
+				DirectX::Convert(image, DXGI_FORMAT_R8_UNORM, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, job->image);
+		}
+		if (!job->image.GetImageCount())
+			logger::warn("[Snow Cover] Could not read {} on the CPU, Survival Mode ground snow ignores the altitude map here", path.generic_string());
+		job->levels = BuildSnowMapMax(job->image);
+		job->done.store(true, std::memory_order_release);
+	}).detach();
 	snowMapCpuPath.clear();
+}
+
+void SnowCover::PollSnowMapJob()
+{
+	if (!snowMapJob || !snowMapJob->done.load(std::memory_order_acquire))
+		return;
+	snowMapCpu = std::move(snowMapJob->image);
+	snowMapMax = std::move(snowMapJob->levels);
+	snowMapJob.reset();
 }

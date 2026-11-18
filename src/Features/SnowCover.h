@@ -218,7 +218,18 @@ public:
 	};
 	std::vector<SnowMapLevel> snowMapMax;
 
-	void BuildSnowMapMax();
+	/// Snow map read, decompressed and reduced on a worker thread: decoding it on the render thread stalled a frame (~140 ms).
+	struct SnowMapJob
+	{
+		std::atomic<bool> done{ false };
+		DirectX::ScratchImage image;
+		std::vector<SnowMapLevel> levels;
+	};
+	std::shared_ptr<SnowMapJob> snowMapJob;
+
+	/// Moves a finished worker result into snowMapCpu / snowMapMax. Render thread only.
+	void PollSnowMapJob();
+	static std::vector<SnowMapLevel> BuildSnowMapMax(const DirectX::ScratchImage& a_source);
 	bool GetSnowMapMax(float a_u0, float a_v0, float a_u1, float a_v1, float& a_value) const;
 	bool IsSnowFree(RE::BSRenderPass* a_pass, uint32_t a_descriptor, uint32_t a_vanillaDescriptor) const;
 

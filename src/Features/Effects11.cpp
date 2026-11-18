@@ -1408,6 +1408,11 @@ void Effects11::DrawSunRays()
 		return;
 	}
 
+	// With the simulated sky's own sun the game's sun sprite has no size, which made the pass exit. Standalone
+	// mode falls back to the vanilla sprite proportions (sun) or a small disc (moon) for the mask.
+	if (standalone && light.billboardTan <= 0.0f)
+		light.billboardTan = light.isSun ? 425.0f / 400.0f : 0.25f;
+
 	const float lightPeak = std::max({ light.color.x, light.color.y, light.color.z });
 	if (lightPeak <= 1e-4f || light.billboardTan <= 0.0f) {
 		if (standalone && (skipLogCounter++ % 600) == 0)

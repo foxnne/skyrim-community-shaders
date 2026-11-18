@@ -1309,8 +1309,14 @@ namespace
 	json TestbedRefInfo(std::size_t a_id, RE::TESObjectREFR* a_ref)
 	{
 		const auto pos = a_ref->GetPosition();
-		return json{ { "id", a_id }, { "refFormID", std::format("0x{:08X}", a_ref->GetFormID()) }, { "x", pos.x }, { "y", pos.y }, { "z", pos.z },
-			{ "rz", a_ref->GetAngleZ() * 57.29577951f } };
+		json info{ { "id", a_id }, { "refFormID", std::format("0x{:08X}", a_ref->GetFormID()) }, { "x", pos.x }, { "y", pos.y }, { "z", pos.z },
+			{ "rz", a_ref->GetAngleZ() * 57.29577951f }, { "loaded3D", a_ref->Is3DLoaded() } };
+		if (auto* actor = a_ref->As<RE::Actor>()) {
+			// Eye position, so a camera can frame the face whatever the actor's height or pose
+			const auto eye = actor->GetLookingAtLocation();
+			info["eye"] = json{ { "x", eye.x }, { "y", eye.y }, { "z", eye.z } };
+		}
+		return info;
 	}
 
 	void TestbedApplyTransform(RE::TESObjectREFR* a_ref, const json& a_args)
@@ -1352,26 +1358,58 @@ namespace
 	{
 		const std::string action = a_args.value("action", std::string{});
 		if (action.empty())
-			return json{ { "error", "missing required parameter 'action'" }, { "supported", json::array({ "spawn", "place", "equip", "remove", "clear", "list", "camera", "camera_get" }) } };
+			return json{ { "error", "missing required parameter 'action'" }, { "supported", json::array({ "spawn", "talk", "place", "equip", "remove", "clear", "list", "camera", "camera_get" }) } };
 
 		return RunOnMainThread([action, a_args]() -> json {
 			auto* player = RE::PlayerCharacter::GetSingleton();
 			if (!player)
 				return json{ { "error", "player unavailable" } };
 
+			if (action == "talk") {
+				// Starts dialogue with a spawned actor, as if the player had activated them
+				auto* ref = TestbedGetRef(a_args);
+				auto* actor = ref ? ref->As<RE::Actor>() : nullptr;
+				if (!actor)
+					return json{ { "error", "unknown or expired 'id', or not an actor" } };
+				const bool ok = actor->ActivateRef(player, 0, nullptr, 0, false);
+				return json{ { "ok", ok } };
+			}
+
 			if (action == "spawn") {
-				if (!a_args.contains("form"))
-					return json{ { "error", "provide 'form' (form ID number, hex string or editor ID)" } };
-				auto* form = TestbedResolveForm(a_args["form"]);
+				RE::TESForm* form = nullptr;
+				if (a_args.contains("npc") && a_args["npc"].is_string()) {
+					// By display name: the unique NPC of that name, else the first match (the spawned copy shares its face)
+					const std::string wanted = a_args["npc"].get<std::string>();
+					if (auto* data = RE::TESDataHandler::GetSingleton()) {
+						for (auto* npc : data->GetFormArray<RE::TESNPC>()) {
+							if (!npc || _stricmp(npc->GetName(), wanted.c_str()) != 0)
+								continue;
+							if (!form || npc->IsUnique()) {
+								form = npc;
+								if (npc->IsUnique())
+									break;
+							}
+						}
+					}
+					if (!form)
+						return json{ { "error", "no NPC with that name" }, { "npc", wanted } };
+				} else {
+					if (!a_args.contains("form"))
+						return json{ { "error", "provide 'form' (form ID number, hex string or editor ID) or 'npc' (display name)" } };
+					form = TestbedResolveForm(a_args["form"]);
+				}
 				auto* bound = form ? form->As<RE::TESBoundObject>() : nullptr;
 				if (!bound)
-					return json{ { "error", "form not found or not placeable" }, { "form", a_args["form"] } };
+					return json{ { "error", "form not found or not placeable" }, { "form", a_args.value("form", json()) } };
 				auto ref = player->PlaceObjectAtMe(bound, false);
 				if (!ref)
 					return json{ { "error", "PlaceObjectAtMe failed" } };
 				TestbedApplyTransform(ref.get(), a_args);
+				if (auto* spawned = ref->As<RE::Actor>(); spawned && a_args.contains("ai") && a_args["ai"].is_boolean())
+					spawned->EnableAI(a_args["ai"].get<bool>());  // ai=false: stands where placed (no packages, no walking home)
 				g_testbedRefs.push_back(ref->GetHandle());
 				json out = TestbedRefInfo(g_testbedRefs.size() - 1, ref.get());
+				out["baseFormID"] = std::format("0x{:08X}", form->GetFormID());
 				if (a_args.contains("equip") && a_args["equip"].is_array())
 					out["equip"] = TestbedEquip(ref.get(), a_args["equip"]);
 				return out;

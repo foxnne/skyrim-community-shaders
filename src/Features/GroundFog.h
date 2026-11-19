@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Buffer.h"
+#include "Features/TerrainShadows.h"
 
 /**
  * @brief Fog that follows the terrain: a soft body of it around the camera, a thin sheet beyond, pools in far valleys.
@@ -44,7 +45,9 @@ struct GroundFog : Feature
 		float WindDriftSpeed = 1.5f;  // meters per second in a full wind
 		float WindResponse = 0.7f;
 		float BasinStrength = 0.5f;
-		float WaterPreference = 1.5f;
+		float WaterPreference = 1.5f;  // how much more fog over water than over land
+		float ShoreSoftness = 0.6f;    // water depth over which the fog over water comes in at a shore, meters
+		float WaterPatchiness = 0.7f;  // how uneven the fog over water is
 		float Albedo = 0.97f;
 		float SunScale = 1.0f;
 		float SkyAmbientScale = 1.0f;
@@ -64,7 +67,7 @@ struct GroundFog : Feature
 		float DriftStrength = 0.7f;  // how uneven the density is
 		float Breathing = 0.15f;     // share by which the near volume's top rises and falls
 		// Burn-off: amount by time of day, and fog kept where terrain shadow holds the sun off.
-		float BurnOffStrength = 1.0f;  // 0 = the time of day and the sun change nothing
+		float BurnOffStrength = 1.0f;   // 0 = the time of day and the sun change nothing
 		float ShadowRetention = 0.45f;  // share of the morning amount that ground in terrain shadow keeps by day
 		float MorningAmount = 1.4f;
 		float MiddayAmount = 0.1f;
@@ -78,7 +81,7 @@ struct GroundFog : Feature
 		// The valley layer: deeper fog in hollows and over water, beyond the sheet.
 		float FarAmount = 1.0f;
 		float FarDensity = 0.012f;     // extinction at the ground per meter, at FarAmount 1
-		float FarThickness = 6.0f;    // meters
+		float FarThickness = 6.0f;     // meters
 		float FarEnd = 6000.0f;        // meters
 		float CloudDarkening = 0.75f;  // how much cloud overhead dims the sky light the fog takes
 		bool VolumeInjection = false;  // draw through the shared atmosphere volume instead of per pixel
@@ -143,7 +146,9 @@ struct GroundFog : Feature
 		float BurnSunlitFar;
 		float BurnShaded;
 		float BurnRetention;
-		float3 Reserved;
+		float InvShoreDepth;
+		float WaterPatchiness;
+		float WaterTexel;
 		float4 FlowWindow;
 	};
 	static_assert(sizeof(VolumeData) == 288);
@@ -167,6 +172,7 @@ struct GroundFog : Feature
 	static_assert(offsetof(VolumeData, FloorAnchor) == 224);
 	static_assert(offsetof(VolumeData, SoftLength) == 240);
 	static_assert(offsetof(VolumeData, BurnRetention) == 256);
+	static_assert(offsetof(VolumeData, InvShoreDepth) == 260);
 	static_assert(offsetof(VolumeData, FlowWindow) == 272);
 
 	/** One thing that moves the fog this frame. Mirrors Emitter in GroundFog/FlowSim.cs.hlsl. */
@@ -256,12 +262,20 @@ struct GroundFog : Feature
 	/** Further slots of GroundFog/GroundFogPixel.cs.hlsl and of the fog in ViewAtmosphere/Composite.cs.hlsl. */
 	static constexpr uint32_t kHeightPyramidSlot = 7;
 	static constexpr uint32_t kFlowMapSlot = 8;
+	static constexpr uint32_t kWaterMapSlot = 9;
 	static constexpr uint32_t kFlowConstantSlot = 3;
 	static constexpr uint32_t kCompositeFogSlot = 42;
 	static constexpr uint32_t kCompositeDepthSlot = 43;
 
 private:
-	Status Update(VolumeData& a_data, ID3D11ShaderResourceView*& a_heightMap);
+	Status Update(VolumeData& a_data, ID3D11ShaderResourceView*& a_heightMap, ID3D11ShaderResourceView*& a_waterMap);
+	/** Lists the baked water maps in Data\\textures\\GroundFog\\WaterMaps (<Worldspace>.WaterMap.<minX>.<minY>.<maxX>.<maxY>.dds). */
+	void FindWaterMaps();
+	/**
+	 * @brief The water map of the worldspace the height map belongs to, loaded on first use.
+	 * @return Null when there is none or it does not fit the height map; the engine's per-cell water is used then.
+	 */
+	ID3D11ShaderResourceView* EnsureWaterMap(const TerrainShadows::HeightMapBinding& a_map);
 	/** How far the floor under the player lies above the fog's ground there, smoothed over time. */
 	void UpdateFloorOffset(float a_deltaTime);
 	/** Amount by time of day for sunlit ground, from the Morning / Midday / Evening settings. */
@@ -276,7 +290,7 @@ private:
 	uint32_t GatherFlowEmitters(FlowEmitter* a_emitters, double a_originX, double a_originY, float a_deltaTime);
 	bool EnsureShaders();
 	/** Builds the coarse copies of the height map when it changes. */
-	bool EnsureHeightPyramid(ID3D11DeviceContext* a_context, ID3D11ShaderResourceView* a_heightMap);
+	bool EnsureHeightPyramid(ID3D11DeviceContext* a_context, ID3D11ShaderResourceView* a_heightMap, ID3D11ShaderResourceView* a_waterMap);
 	bool EnsureTargets(uint32_t a_width, uint32_t a_height);
 
 	winrt::com_ptr<ID3D11ComputeShader> pixelCS;
@@ -309,11 +323,26 @@ private:
 	eastl::unique_ptr<Texture2D> fogAuxTexture;  // near and far view depth of each fog pixel, transmittance to the near depth
 	eastl::unique_ptr<Texture2D> heightPyramid;
 	winrt::com_ptr<ID3D11ShaderResourceView> heightPyramidSource;
+	winrt::com_ptr<ID3D11ShaderResourceView> heightPyramidWater;  // the water map whose surfaces are in the pyramid's bound
+	struct WaterMapFile
+	{
+		std::filesystem::path path;
+		int minX = 0;
+		int minY = 0;
+		int maxX = 0;
+		int maxY = 0;
+	};
+	std::unordered_map<std::string, WaterMapFile> waterMapFiles;  // by worldspace editor ID
+	eastl::unique_ptr<Texture2D> waterMap;
+	std::string waterMapWorldspace;  // the worldspace waterMap was last looked up for, loaded or not
+	float waterMapTexel = 0.0f;      // game units per texel; 0 = none
+	std::string waterMapState;       // for the debug section
 	uint32_t heightPyramidLevels = 0;
 
 	eastl::unique_ptr<ConstantBuffer> volumeConstants;
 	winrt::com_ptr<ID3D11Buffer> previousConstants;
 	winrt::com_ptr<ID3D11ShaderResourceView> previousHeightMap;
+	winrt::com_ptr<ID3D11ShaderResourceView> previousWaterMap;
 	bool bound = false;
 
 	// How far the wind has carried the noise, in game units.

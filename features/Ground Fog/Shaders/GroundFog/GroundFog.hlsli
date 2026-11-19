@@ -84,7 +84,7 @@ namespace GroundFog
 		float InvShoreDepth;    // 1 / the water depth over which fog over water comes in at a shore, per game unit
 		float WaterPatchiness;  // how uneven the fog over water is
 		float WaterTexel;       // game units per texel of WaterMap; 0 = no map
-		float4 FlowWindow;  // reactive flow map: uv = camera-relative xy * z + xy; w = strength, 0 = none
+		float4 FlowWindow;      // reactive flow map: uv = camera-relative xy * z + xy; w = strength, 0 = none
 	};
 
 	Texture2D<float> HeightMap : register(t6);

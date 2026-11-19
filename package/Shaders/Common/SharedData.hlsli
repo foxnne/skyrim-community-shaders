@@ -793,6 +793,10 @@ namespace SharedData
 		float ShadowSoftening;
 		float NormalUpBias;
 		float Brightness;
+		float RoundNormal;
+		float CrownOcclusion;
+		float WrapFrontLit;
+		float Variation;
 		float3 pad0;
 	};
 

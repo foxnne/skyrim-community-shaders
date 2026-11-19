@@ -43,6 +43,14 @@
 #	define LOD_TREE_LIGHTING
 #endif
 
+// Tree Wind hands the pixel shader where each vertex sits in its tree's crown (TreeWind.hlsli CrownData), for
+// the rounded normal and the self-shadow of LOD_TREE_LIGHTING. Vertex side: exactly the permutations with the
+// tree LOD path (TREE_WIND_VS without TREE_WIND_NEAR_ONLY). The interpolator is last in VS_OUTPUT, so pixel
+// shaders that do not declare it still link.
+#if defined(LOD_TREE_LIGHTING) || (defined(VSHADER) && defined(TREE_WIND) && defined(VC) && !defined(TREE_ANIM) && !defined(LOD) && !defined(LODLANDSCAPE) && !defined(LANDSCAPE) && !defined(SKINNED) && !defined(EYE))
+#	define LOD_TREE_CROWN_DATA
+#endif
+
 #if defined(SNOW_COVER)
 #	if defined(TRUE_PBR)
 #		define GLINT
@@ -122,8 +130,20 @@ struct VS_OUTPUT
 	nointerpolation float FurShell: TEXCOORD13;
 	float4 FurRoot: TEXCOORD14;
 #endif
+#if defined(LOD_TREE_CROWN_DATA)
+	float4 TreeCrown: TEXCOORD15;  // offset from the trunk in xy, height in the crown, validity and tree random
+#endif
 };
 #ifdef VSHADER
+
+// Tree LOD sways only with vertex colours and without TREE_ANIM (TREE_WIND_NEAR_ONLY otherwise); loaded trees
+// sway in every permutation a tree shape can use. Both are picked per draw by the Tree Wind buffer.
+#	if defined(TREE_WIND) && !defined(LOD) && !defined(LODLANDSCAPE) && !defined(LANDSCAPE) && !defined(SKINNED) && !defined(EYE)
+#		define TREE_WIND_VS
+#		if !defined(VC) || defined(TREE_ANIM)
+#			define TREE_WIND_NEAR_ONLY
+#		endif
+#	endif
 
 cbuffer PerTechnique : register(b0)
 {
@@ -161,6 +181,8 @@ cbuffer VS_PerFrame : register(b12)
 #	if defined(SKINNED)
 	float3 BonesPivot : packoffset(c40);
 	float3 PreviousBonesPivot : packoffset(c41);
+#	elif defined(TREE_WIND_VS)
+	float4 CameraPosAdjust : packoffset(c40);  // as in FrameBuffer.hlsli, which is this same buffer
 #	endif  // SKINNED
 };
 
@@ -175,8 +197,7 @@ float2 GetTreeShiftVector(float4 position, float4 color)
 }
 #	endif  // TREE_ANIM
 
-#	if defined(TREE_WIND) && defined(VC) && !defined(TREE_ANIM) && !defined(LOD) && !defined(LODLANDSCAPE) && !defined(LANDSCAPE) && !defined(SKINNED) && !defined(EYE)
-#		define TREE_WIND_VS
+#	if defined(TREE_WIND_VS)
 #		include "TreeWind/TreeWind.hlsli"
 #	endif
 
@@ -218,14 +239,27 @@ VS_OUTPUT main(VS_INPUT input)
 	float3 normal = -1.0.xxx + 2.0.xxx * input.Normal.xyz;
 
 	inputPosition.xyz += normal.xyz * treeShiftVector.x;
+#		if defined(TREE_WIND_VS)
+	// As without Tree Wind, the previous position carries the current leaf flutter (see previousWorldPosition)
+	previousInputPosition.xyz += normal.xyz * treeShiftVector.x;
+#		else
 	previousInputPosition.xyz += normal.xyz * treeShiftVector.y;
+#		endif
 #	endif
 
 #	if defined(TREE_WIND_VS)
+#		if !defined(TREE_WIND_NEAR_ONLY)
 	if (TreeWind::IsEnabled()) {
 		float nearScale = TreeWind::GetNearScale(World, input.Position.xyz);
 		inputPosition.xy += TreeWind::GetOffset(input.Position.xyz, TreeWind::Wind.x, vertexID, nearScale);
 		previousInputPosition.xy += TreeWind::GetOffset(input.Position.xyz, TreeWind::Wind.y, vertexID, nearScale);
+	}
+#		endif
+	// Loaded trees: after the engine's leaf flutter, the same offset for this frame and the last
+	if (TreeWind::IsNearTree()) {
+		TreeWind::NearTree nearTree = TreeWind::GetNearTree(World, CameraPosAdjust.xyz, input.Position.xyz, vertexID);
+		inputPosition.xyz += TreeWind::GetNearOffset(nearTree, TreeWind::Wind.x);
+		previousInputPosition.xyz += TreeWind::GetNearOffset(nearTree, TreeWind::Wind.y);
 	}
 #	endif
 
@@ -366,6 +400,10 @@ VS_OUTPUT main(VS_INPUT input)
 	vsout.FogParam.w = fogColorParam;
 
 	vsout.ModelPosition = input.Position.xyz;
+
+#	if defined(LOD_TREE_CROWN_DATA)
+	vsout.TreeCrown = TreeWind::GetCrownData(vertexID);
+#	endif
 
 #	if defined(FUR_SHELLS)
 	vsout.FurShell = furShell;
@@ -1107,6 +1145,11 @@ bool UseSkylightingShadowVisibility()
 #		include "Common/ViewMedium.hlsli"
 #	endif
 
+#	if defined(LOD_TREE_LIGHTING)
+// Share of lodTreeLightingSettings.Wrap in use for this pixel, read by EvaluateLighting. Set in main.
+static float LODTreeWrapScale = 1.0;
+#	endif
+
 #	include "Common/LightingEval.hlsli"
 
 #	if defined(NIGHT_EYE)
@@ -1145,6 +1188,24 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	const bool inReflection = Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::InReflection;
 #	if defined(LOD_TREE_LIGHTING)
 	const bool lodTreeCrown = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::LODTreeCrown) != 0;
+	// Crown data: only 3D crowns that follow a trunk card have it. Billboards and everything else keep w = 0
+	// and the shading without it.
+	const bool lodTreeCrownData = lodTreeCrown && input.TreeCrown.w > 0.25 / 127.0;
+	const float lodTreeRadial = saturate(length(input.TreeCrown.xy));
+	const float lodTreeHeight = saturate(input.TreeCrown.z);
+	const float lodTreeRandom = saturate((input.TreeCrown.w * 127.0 - 1.0) / 126.0);
+	LODTreeWrapScale = 1.0;
+	// Self-shadow of the crown and of the forest around it, faked from the position in the crown: 1 at the
+	// trunk near the bottom, 0 at the top; the outer shell only gets a little of it toward its lower edge.
+	float lodTreeOcclusion = 0.0;
+	if (lodTreeCrownData) {
+		// 1 with the sun behind the viewer, 0 from side-lit to back-lit
+		const float frontLit = saturate(dot(viewDirection, DirLightDirection.xyz));
+		LODTreeWrapScale = lerp(1.0, SharedData::lodTreeLightingSettings.WrapFrontLit, frontLit);
+		const float inner = 1.0 - smoothstep(0.25, 1.0, lodTreeRadial);
+		const float low = 1.0 - lodTreeHeight;
+		lodTreeOcclusion = SharedData::lodTreeLightingSettings.CrownOcclusion * saturate(0.75 * inner * (1.0 - lodTreeHeight * lodTreeHeight) + 0.25 * low * low);
+	}
 #	endif
 
 	float nearFactor = smoothstep(4096.0 * 2.5, 0.0, viewPosition.z);
@@ -1757,6 +1818,12 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// The LOD atlas is built from the non-PBR leaf textures, about half as bright as the PBR ones on loaded trees
 	if (lodTreeCrown)
 		baseColor.xyz *= SharedData::lodTreeLightingSettings.Brightness;
+	// Neighbouring trees differ a little in brightness and lean toward yellow or blue-green
+	if (lodTreeCrownData) {
+		const float variation = SharedData::lodTreeLightingSettings.Variation;
+		const float hue = (frac(lodTreeRandom * 7.31) * 2.0 - 1.0) * variation;
+		baseColor.xyz *= (1.0 + (lodTreeRandom * 2.0 - 1.0) * variation) * float3(1.0 + hue, 1.0, 1.0 - hue);
+	}
 #	endif
 
 #	if defined(CS_SKIN_SHADING)
@@ -2249,7 +2316,14 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// LOD crown normals are bent and part of them point at the ground, which loaded trees never do
 	[branch] if (lodTreeCrown)
 	{
-		const float3 raisedNormal = worldNormal + float3(0, 0, SharedData::lodTreeLightingSettings.NormalUpBias);
+		// A crown is a cluster of leaf cards with scattered normals: blend toward the normal of a rounded
+		// shape around the trunk, outward and upward, so the tree has a sunlit side and a shaded side
+		if (lodTreeCrownData) {
+			const float3 roundNormal = normalize(float3(input.TreeCrown.xy, 0.25 + 0.75 * saturate(lodTreeHeight * 2.0 - 1.0)));
+			const float3 roundedNormal = lerp(worldNormal, roundNormal, SharedData::lodTreeLightingSettings.RoundNormal);
+			worldNormal = dot(roundedNormal, roundedNormal) > 1e-6 ? normalize(roundedNormal) : roundNormal;
+		}
+		const float3 raisedNormal = worldNormal + float3(0, 0, SharedData::lodTreeLightingSettings.NormalUpBias * LODTreeWrapScale);
 		worldNormal = dot(raisedNormal, raisedNormal) > 1e-6 ? normalize(raisedNormal) : float3(0, 0, 1);
 	}
 #	endif
@@ -3455,6 +3529,12 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	vertexColor.rgb = snowFactor + (1 - snowFactor) * vertexColor.rgb;
 #	endif
 
+#	if defined(LOD_TREE_LIGHTING)
+	// Crown self-shadow, as vertex colour: it darkens the direct and the ambient light here and the albedo
+	// that the deferred ambient uses. The ambient computed here takes the rest, up to the full amount.
+	vertexColor *= 1.0 - 0.6 * lodTreeOcclusion;
+#	endif
+
 #	if defined(IBL)
 	if (SharedData::iblSettings.EnableIBL) {
 		if (!(SharedData::iblSettings.UseStaticIBL && !inWorld && !inReflection)) {
@@ -3468,6 +3548,10 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		endif
 		}
 	}
+#	endif
+
+#	if defined(LOD_TREE_LIGHTING)
+	directionalAmbientColor *= (1.0 - lodTreeOcclusion) / (1.0 - 0.6 * lodTreeOcclusion);
 #	endif
 
 #	if defined(DEFERRED)

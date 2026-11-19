@@ -99,8 +99,17 @@ float2 SmoothSaturate(float2 value)
 	return value * value * (3 - 2 * value);
 }
 
-#	if defined(TREE_WIND) && defined(VC) && !defined(TREE_ANIM) && !defined(LOD_LANDSCAPE) && !defined(SKINNED)
-#		define TREE_WIND_VS
+// Tree LOD sways only with vertex colours and without TREE_ANIM; loaded trees sway in every permutation that
+// draws geometry (TREE_WIND_NEAR_ONLY where only they can). Both are picked per draw by the Tree Wind buffer.
+#	if defined(TREE_WIND) && !defined(LOD_LANDSCAPE) && !defined(SKINNED)
+#		if defined(VC) && !defined(TREE_ANIM)
+#			define TREE_WIND_VS
+#		elif !((defined(RENDER_DEPTH) && defined(RENDER_SHADOWMASK_ANY)) || SHADOWFILTER == 2) && !defined(STENCIL_ABOVE_WATER)
+#			define TREE_WIND_VS
+#			define TREE_WIND_NEAR_ONLY
+#		endif
+#	endif
+#	if defined(TREE_WIND_VS)
 #		include "TreeWind/TreeWind.hlsli"
 #	endif
 
@@ -141,9 +150,16 @@ VS_OUTPUT main(VS_INPUT input)
 
 #		if defined(TREE_WIND_VS)
 	// Same offset as Lighting.hlsl, so depth and shadow passes match the swaying trees
+#			if !defined(TREE_WIND_NEAR_ONLY)
 	if (TreeWind::IsEnabled()) {
 		float nearScale = TreeWind::GetNearScale(float3x4(World[0], World[1], World[2]), input.PositionMS.xyz);
 		positionMS.xy += TreeWind::GetOffset(input.PositionMS.xyz, TreeWind::Wind.x, vertexID, nearScale);
+	}
+#			endif
+	// Loaded trees: after the engine's leaf flutter
+	if (TreeWind::IsNearTree()) {
+		TreeWind::NearTree nearTree = TreeWind::GetNearTree(float3x4(World[0], World[1], World[2]), FrameBuffer::CameraPosAdjust.xyz, input.PositionMS.xyz, vertexID);
+		positionMS.xyz += TreeWind::GetNearOffset(nearTree, TreeWind::Wind.x);
 	}
 #		endif
 

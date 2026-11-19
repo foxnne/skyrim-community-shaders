@@ -26,6 +26,12 @@ namespace TreeShapes
 		// A tree-mod crown waits this many frames after its block last gained trunk cards, so it is built once
 		// with all of them instead of once per trunk shape
 		constexpr uint kSettleFrames = 20;
+		// Render-thread time spent measuring loaded trees per frame; a tree that has started always finishes
+		constexpr int64_t kNearBuildBudgetNs = 1500000;
+		// The tree root is at most this many nodes above its shapes
+		constexpr int kNearTreeDepth = 8;
+		// Most loaded tree shapes with bend data at once (8 bytes per vertex each)
+		constexpr size_t kMaxNearShapes = 4096;
 
 		bool IsTreeShapeName(const RE::BSGeometry* a_geometry)
 		{
@@ -185,7 +191,9 @@ namespace TreeShapes
 			if (twin) {
 				a_card.random = twin->random;
 				a_card.scale = twin->scale;
+				a_card.tree = twin->tree;
 			} else {
+				a_card.tree = static_cast<int>(a_block.cards.size());
 				a_card.random = Hash01(a_card.x, a_card.y);
 				a_card.scale = TreeScale(a_card.top - a_card.base, a_worldScale, Hash01(a_card.y * 1.37f + 11.0f, a_card.x * 0.71f - 5.0f));
 			}
@@ -280,6 +288,73 @@ namespace TreeShapes
 			}
 			return q;
 		}
+
+		// Crown data for the pixel shader, see BendWeights::GetCrownData. a_vertexTree gives each vertex the index
+		// of its tree's first trunk card in the block, or -1. The crown extent of a tree is measured from the
+		// vertices of this shape that follow it.
+		void BuildCrownData(const VertexView& a_vertices, const std::vector<int32_t>& a_vertexTree, const BendWeights::Block& a_block,
+			winrt::com_ptr<ID3D11Buffer>& a_buffer, winrt::com_ptr<ID3D11ShaderResourceView>& a_srv)
+		{
+			struct Extent
+			{
+				float zMin = FLT_MAX, zMax = -FLT_MAX, radiusSq = 0.0f;
+			};
+			std::vector<Extent> extents(a_block.cards.size());
+			bool any = false;
+			for (uint32_t i = 0; i < a_vertices.count; ++i) {
+				const int32_t tree = a_vertexTree[i];
+				if (tree < 0 || static_cast<size_t>(tree) >= extents.size())
+					continue;
+				const auto p = a_vertices(i);
+				const auto& card = a_block.cards[tree];
+				auto& extent = extents[tree];
+				extent.zMin = std::min(extent.zMin, p.z);
+				extent.zMax = std::max(extent.zMax, p.z);
+				extent.radiusSq = std::max(extent.radiusSq, (p.x - card.x) * (p.x - card.x) + (p.y - card.y) * (p.y - card.y));
+				any = true;
+			}
+			if (!any)
+				return;
+
+			const auto toSnorm = [](float a_value) {
+				return static_cast<int8_t>(std::lround(std::clamp(a_value, -1.0f, 1.0f) * 127.0f));
+			};
+			std::vector<int8_t> data(static_cast<size_t>(a_vertices.count) * 4, 0);
+			for (uint32_t i = 0; i < a_vertices.count; ++i) {
+				const int32_t tree = a_vertexTree[i];
+				if (tree < 0 || static_cast<size_t>(tree) >= extents.size())
+					continue;
+				const auto p = a_vertices(i);
+				const auto& card = a_block.cards[tree];
+				const auto& extent = extents[tree];
+				const float radius = std::max(std::sqrt(extent.radiusSq), 1.0f);
+				const float height = std::max(extent.zMax - extent.zMin, 1.0f);
+				const size_t at = static_cast<size_t>(i) * 4;
+				data[at + 0] = toSnorm((p.x - card.x) / radius);
+				data[at + 1] = toSnorm((p.y - card.y) / radius);
+				data[at + 2] = toSnorm((p.z - extent.zMin) / height);
+				data[at + 3] = static_cast<int8_t>(1 + std::lround(std::clamp(card.random, 0.0f, 1.0f) * 126.0f));
+			}
+
+			D3D11_BUFFER_DESC bufferDesc{};
+			bufferDesc.ByteWidth = static_cast<UINT>(data.size());
+			bufferDesc.Usage = D3D11_USAGE_IMMUTABLE;
+			bufferDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			const D3D11_SUBRESOURCE_DATA initData{ data.data(), 0, 0 };
+			D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+			srvDesc.Format = DXGI_FORMAT_R8G8B8A8_SNORM;
+			srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+			srvDesc.Buffer.NumElements = a_vertices.count;
+			winrt::com_ptr<ID3D11Buffer> buffer;
+			winrt::com_ptr<ID3D11ShaderResourceView> srv;
+			if (FAILED(globals::d3d::device->CreateBuffer(&bufferDesc, &initData, buffer.put())) ||
+				FAILED(globals::d3d::device->CreateShaderResourceView(buffer.get(), &srvDesc, srv.put())))
+				return;
+			Util::SetResourceName(buffer.get(), "TreeWind::CrownData");
+			Util::SetResourceName(srv.get(), "TreeWind::CrownData SRV");
+			a_buffer = std::move(buffer);
+			a_srv = std::move(srv);
+		}
 	}
 
 	bool IsPassthruShape(const RE::BSGeometry* a_geometry)
@@ -336,6 +411,289 @@ namespace TreeShapes
 		return Kind::None;
 	}
 
+	RE::NiNode* FindNearTreeRoot(const RE::BSRenderPass* a_pass)
+	{
+		const auto property = a_pass ? a_pass->shaderProperty : nullptr;
+		const auto geometry = a_pass ? a_pass->geometry : nullptr;
+		if (!property || !geometry)
+			return nullptr;
+
+		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
+		if (property->flags.any(Flag::kSkinned, Flag::kLODObjects, Flag::kHDLODObjects, Flag::kLODLandscape))
+			return nullptr;
+
+		static REL::Relocation<const RE::NiRTTI*> triShapeRTTI{ RE::BSTriShape::Ni_RTTI };
+		static REL::Relocation<const RE::NiRTTI*> leafAnimNodeRTTI{ RE::BSLeafAnimNode::Ni_RTTI };
+		static REL::Relocation<const RE::NiRTTI*> treeNodeRTTI{ RE::BSTreeNode::Ni_RTTI };
+		if (geometry->GetRTTI() != triShapeRTTI.get())
+			return nullptr;
+
+		// The first fade node above a shape is the 3D root of its reference: one or two steps for almost everything drawn
+		int depth = 0;
+		for (auto node = geometry->parent; node && depth < kNearTreeDepth; node = node->parent, ++depth) {
+			if (node->AsFadeNode()) {
+				const auto rtti = node->GetRTTI();
+				return rtti == leafAnimNodeRTTI.get() || rtti == treeNodeRTTI.get() ? node : nullptr;
+			}
+		}
+		return nullptr;
+	}
+
+	namespace
+	{
+		struct NearShape
+		{
+			VertexView vertices;
+			RE::NiTransform toRoot;            // shape space -> tree root space
+			std::vector<RE::NiPoint3> points;  // vertices in tree root space
+		};
+
+		// Collects the plain tri shapes under a tree root. Returns false when the tree must stay still: a shape is
+		// skinned (the engine animates the tree) or its vertices cannot be read (it would stay behind the others).
+		bool CollectNearShapes(RE::NiNode* a_root, RE::NiNode* a_node, int a_depth, std::vector<NearShape>& a_shapes, std::vector<VertexView>& a_readable)
+		{
+			static REL::Relocation<const RE::NiRTTI*> triShapeRTTI{ RE::BSTriShape::Ni_RTTI };
+			bool sways = true;
+			for (const auto& child : a_node->GetChildren()) {
+				if (!child)
+					continue;
+				if (auto geometry = child->AsGeometry()) {
+					if (geometry->GetGeometryRuntimeData().skinInstance) {
+						sways = false;
+						continue;
+					}
+					// Particles and other geometry types are not part of the tree mesh
+					if (geometry->GetRTTI() != triShapeRTTI.get())
+						continue;
+					NearShape shape;
+					if (!GetVertices(geometry, shape.vertices)) {
+						sways = false;
+						continue;
+					}
+					a_readable.push_back(shape.vertices);
+					shape.toRoot = geometry->local;
+					bool reachedRoot = false;
+					int depth = 0;
+					for (auto node = geometry->parent; node && depth < kNearTreeDepth; node = node->parent, ++depth) {
+						if (node == a_root) {
+							reachedRoot = true;
+							break;
+						}
+						shape.toRoot = node->local * shape.toRoot;
+					}
+					if (!reachedRoot || !(shape.toRoot.scale > 1e-4f)) {
+						sways = false;
+						continue;
+					}
+					a_shapes.push_back(std::move(shape));
+				} else if (auto node = child->AsNode(); node && a_depth < kNearTreeDepth) {
+					sways = CollectNearShapes(a_root, node, a_depth + 1, a_shapes, a_readable) && sways;
+				}
+			}
+			return sways;
+		}
+	}
+
+	ID3D11ShaderResourceView* NearTrees::Get(RE::BSGeometry* a_geometry, RE::NiNode* a_root, uint a_frame, float a_minHeight)
+	{
+		VertexView vertices;
+		if (!a_geometry || !a_root || !GetVertices(a_geometry, vertices))
+			return nullptr;
+
+		const auto firstVertex = vertices(0);
+		if (auto it = entries.find(vertices.vertexBuffer); it != entries.end()) {
+			auto& entry = it->second;
+			if (entry.vertexCount == vertices.count && entry.firstVertex[0] == firstVertex.x && entry.firstVertex[1] == firstVertex.y && entry.firstVertex[2] == firstVertex.z) {
+				entry.lastFrame = a_frame;
+				return entry.srv.get();
+			}
+			// The vertex buffer address was reused by another shape
+			swayCount -= entry.srv != nullptr;
+			entries.erase(it);
+		}
+
+		// Out of time this frame: the tree stands still until its turn
+		if (a_frame != budgetFrame) {
+			budgetFrame = a_frame;
+			budgetSpentNs = 0;
+		}
+		// The cap only matters if the game stops sharing one vertex buffer between the copies of a tree
+		if (budgetSpentNs >= kNearBuildBudgetNs || swayCount >= kMaxNearShapes)
+			return nullptr;
+
+		Build(a_root, a_frame, a_minHeight);
+
+		if (auto it = entries.find(vertices.vertexBuffer); it != entries.end())
+			return it->second.srv.get();
+
+		// Not part of the tree as measured (for example a skinned shape): remembered as still
+		Entry still;
+		still.vertexCount = vertices.count;
+		still.firstVertex[0] = firstVertex.x;
+		still.firstVertex[1] = firstVertex.y;
+		still.firstVertex[2] = firstVertex.z;
+		still.lastFrame = a_frame;
+		entries.insert_or_assign(vertices.vertexBuffer, std::move(still));
+		return nullptr;
+	}
+
+	void NearTrees::Build(RE::NiNode* a_root, uint a_frame, float a_minHeight)
+	{
+		ZoneScopedN("TreeWind::BuildNearTree");
+		const auto start = std::chrono::steady_clock::now();
+		++builtTrees;
+
+		std::vector<NearShape> shapes;
+		std::vector<VertexView> readable;
+		bool sways = CollectNearShapes(a_root, a_root, 0, shapes, readable) && !shapes.empty();
+
+		// Tree extent in root space
+		float zMin = FLT_MAX, zMax = -FLT_MAX;
+		if (sways) {
+			for (auto& shape : shapes) {
+				shape.points.resize(shape.vertices.count);
+				for (uint32_t i = 0; i < shape.vertices.count; ++i) {
+					const auto p = shape.toRoot * shape.vertices(i);
+					shape.points[i] = p;
+					zMin = std::min(zMin, p.z);
+					zMax = std::max(zMax, p.z);
+				}
+			}
+		}
+		// The base is the root origin (ground level) when the roots reach a little below it, so they stay planted;
+		// a tree whose pivot is elsewhere bends from its lowest vertex
+		const float base = (zMin < 0.0f && -zMin <= 0.15f * (zMax - zMin)) ? 0.0f : zMin;
+		const float height = zMax - base;
+		sways = sways && std::isfinite(height) && height >= std::max(a_minHeight, 1.0f);
+
+		float axisX = 0.0f, axisY = 0.0f, crownRadius = 1.0f;
+		if (sways) {
+			// Trunk axis: centre of the vertices in a low slab above the root flare, widened if that slab is empty
+			for (const auto& [low, high] : { std::pair{ 0.02f, 0.12f }, std::pair{ 0.0f, 0.3f } }) {
+				double sumX = 0.0, sumY = 0.0;
+				uint64_t count = 0;
+				for (const auto& shape : shapes) {
+					for (const auto& p : shape.points) {
+						if (p.z >= base + low * height && p.z <= base + high * height) {
+							sumX += p.x;
+							sumY += p.y;
+							++count;
+						}
+					}
+				}
+				if (count > 0) {
+					axisX = static_cast<float>(sumX / static_cast<double>(count));
+					axisY = static_cast<float>(sumY / static_cast<double>(count));
+					break;
+				}
+			}
+			float radiusSq = 1.0f;
+			for (const auto& shape : shapes)
+				for (const auto& p : shape.points)
+					radiusSq = std::max(radiusSq, (p.x - axisX) * (p.x - axisX) + (p.y - axisY) * (p.y - axisY));
+			crownRadius = std::sqrt(radiusSq);
+		}
+
+		const auto insert = [&](const VertexView& a_vertices, winrt::com_ptr<ID3D11Buffer> a_buffer, winrt::com_ptr<ID3D11ShaderResourceView> a_srv) {
+			Entry entry;
+			entry.buffer = std::move(a_buffer);
+			entry.srv = std::move(a_srv);
+			entry.vertexCount = a_vertices.count;
+			const auto first = a_vertices(0);
+			entry.firstVertex[0] = first.x;
+			entry.firstVertex[1] = first.y;
+			entry.firstVertex[2] = first.z;
+			entry.lastFrame = a_frame;
+			if (const auto it = entries.find(a_vertices.vertexBuffer); it != entries.end())
+				swayCount -= it->second.srv != nullptr;
+			swayCount += entry.srv != nullptr;
+			entries.insert_or_assign(a_vertices.vertexBuffer, std::move(entry));
+		};
+
+		if (!sways) {
+			// Remembered as still, so the tree is not measured again
+			for (const auto& vertices : readable)
+				insert(vertices, nullptr, nullptr);
+		} else {
+			struct Built
+			{
+				winrt::com_ptr<ID3D11Buffer> buffer;
+				winrt::com_ptr<ID3D11ShaderResourceView> srv;
+			};
+			std::vector<Built> built(shapes.size());
+			bool created = true;
+			for (size_t s = 0; s < shapes.size() && created; ++s) {
+				const auto& shape = shapes[s];
+				const uint32_t elements = shape.vertices.count + 2;
+				std::vector<float> data(static_cast<size_t>(elements) * 2);
+				const auto origin = shape.toRoot.Invert() * RE::NiPoint3{ axisX, axisY, base };
+				data[0] = origin.x;
+				data[1] = origin.y;
+				data[2] = origin.z;
+				data[3] = height / shape.toRoot.scale;
+				for (uint32_t i = 0; i < shape.vertices.count; ++i) {
+					const auto& p = shape.points[i];
+					data[(i + 2) * 2 + 0] = std::clamp((p.z - base) / height, 0.0f, 1.0f);
+					data[(i + 2) * 2 + 1] = std::clamp(std::hypot(p.x - axisX, p.y - axisY) / crownRadius, 0.0f, 1.0f);
+				}
+
+				D3D11_BUFFER_DESC bufferDesc{};
+				bufferDesc.ByteWidth = static_cast<UINT>(data.size() * sizeof(float));
+				bufferDesc.Usage = D3D11_USAGE_IMMUTABLE;
+				bufferDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+				const D3D11_SUBRESOURCE_DATA initData{ data.data(), 0, 0 };
+				D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+				srvDesc.Format = DXGI_FORMAT_R32G32_FLOAT;
+				srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+				srvDesc.Buffer.NumElements = elements;
+				created = SUCCEEDED(globals::d3d::device->CreateBuffer(&bufferDesc, &initData, built[s].buffer.put())) &&
+				          SUCCEEDED(globals::d3d::device->CreateShaderResourceView(built[s].buffer.get(), &srvDesc, built[s].srv.put()));
+				if (created) {
+					Util::SetResourceName(built[s].buffer.get(), "TreeWind::NearTree");
+					Util::SetResourceName(built[s].srv.get(), "TreeWind::NearTree SRV");
+				}
+			}
+			// All shapes of the tree or none, so the tree never moves in parts
+			for (size_t s = 0; s < shapes.size(); ++s)
+				insert(shapes[s].vertices, created ? built[s].buffer : nullptr, created ? built[s].srv : nullptr);
+		}
+
+		const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+		budgetSpentNs += ns;
+		buildNs += ns;
+	}
+
+	void NearTrees::Clear()
+	{
+		entries.clear();
+		swayCount = 0;
+	}
+
+	void NearTrees::Evict(uint a_frame)
+	{
+		std::erase_if(entries, [&](const auto& a_entry) {
+			const bool old = a_frame - a_entry.second.lastFrame > kEvictFrames;
+			if (old)
+				swayCount -= a_entry.second.srv != nullptr;
+			return old;
+		});
+		if (builtTrees != loggedBuiltTrees) {
+			logger::info("[TreeWind] near trees: {} measured (+{}, {:.1f} ms), {} shapes of which {} sway",
+				builtTrees, builtTrees - loggedBuiltTrees, (buildNs - loggedBuildNs) / 1e6, entries.size(), swayCount);
+			loggedBuiltTrees = builtTrees;
+			loggedBuildNs = buildNs;
+		}
+	}
+
+	ID3D11ShaderResourceView* BendWeights::GetCrownData(RE::BSGeometry* a_geometry) const
+	{
+		const auto rendererData = a_geometry ? a_geometry->GetGeometryRuntimeData().rendererData : nullptr;
+		if (!rendererData || !rendererData->vertexBuffer)
+			return nullptr;
+		const auto it = entries.find(rendererData->vertexBuffer);
+		return it != entries.end() ? it->second.crownSrv.get() : nullptr;
+	}
+
 	ID3D11ShaderResourceView* BendWeights::Get(RE::BSGeometry* a_geometry, Kind a_kind, uint a_frame, bool a_treeModSupport)
 	{
 		VertexView vertices;
@@ -381,6 +739,8 @@ namespace TreeShapes
 				Entry reused;
 				reused.buffer = record.buffer;
 				reused.srv = record.srv;
+				reused.crownBuffer = record.crownBuffer;
+				reused.crownSrv = record.crownSrv;
 				reused.vertexCount = vertices.count;
 				reused.firstVertex[0] = firstVertex.x;
 				reused.firstVertex[1] = firstVertex.y;
@@ -462,6 +822,8 @@ namespace TreeShapes
 			data[a_index * 4 + 2] = DirectX::PackedVector::XMConvertFloatToHalf(a_scale);
 			data[a_index * 4 + 3] = DirectX::PackedVector::XMConvertFloatToHalf(std::clamp(a_radial, 0.0f, 1.0f));
 		};
+		// Crown vertices that follow a trunk card: the first card of their tree, for the crown data
+		std::vector<int32_t> vertexTree;
 
 		if (a_kind == Kind::Trunk) {
 			// First vertex of each trunk card
@@ -636,6 +998,7 @@ namespace TreeShapes
 				const BendWeights::TrunkCard* card = nullptr;
 			};
 			std::vector<Piece> pieces(pieceCount);
+			vertexTree.assign(vertices.count, -1);
 			for (uint32_t i = 0; i < vertices.count; ++i) {
 				const auto p = vertices(i);
 				auto& piece = pieces[roots[i]];
@@ -681,6 +1044,7 @@ namespace TreeShapes
 					const float height = std::max(card->top - card->base, 1.0f);
 					const float radial = std::sqrt((p.x - card->x) * (p.x - card->x) + (p.y - card->y) * (p.y - card->y)) / crownRadius;
 					put(i, (p.z - card->base) / height, card->random, card->scale, radial);
+					vertexTree[i] = card->tree;
 				}
 			}
 			if (matched == 0)
@@ -690,12 +1054,14 @@ namespace TreeShapes
 			if (block.cards.empty())
 				return nullptr;
 			const float crownRadius = kCrownRadius * 4.0f / std::max(worldScale, 0.01f);
+			vertexTree.assign(vertices.count, -1);
 			for (uint32_t i = 0; i < vertices.count; ++i) {
 				const auto p = vertices(i);
 				if (const auto* card = NearestCard(block, p.x, p.y)) {
 					const float height = std::max(card->top - card->base, 1.0f);
 					const float radial = std::sqrt((p.x - card->x) * (p.x - card->x) + (p.y - card->y) * (p.y - card->y)) / crownRadius;
 					put(i, (p.z - card->base) / height, card->random, card->scale, radial);
+					vertexTree[i] = card->tree;
 				} else {
 					put(i, 0.6f, Hash01(p.x * 0.01f, p.y * 0.01f), 1.0f, 0.5f);
 				}
@@ -719,8 +1085,15 @@ namespace TreeShapes
 			return nullptr;
 		Util::SetResourceName(entry.srv.get(), "TreeWind::BendWeights SRV");
 
+		// Without it (nothing followed a card, or the buffer could not be created) the crown keeps its plain shading
+		if (!vertexTree.empty())
+			BuildCrownData(vertices, vertexTree, block, entry.crownBuffer, entry.crownSrv);
+
 		entry.generation = block.generation;
-		shared.insert_or_assign(signature, Shared{ entry.buffer, entry.srv, block.generation, a_frame });
+		Shared record{ entry.buffer, entry.srv, block.generation, a_frame };
+		record.crownBuffer = entry.crownBuffer;
+		record.crownSrv = entry.crownSrv;
+		shared.insert_or_assign(signature, std::move(record));
 		return entries.insert_or_assign(vertices.vertexBuffer, std::move(entry)).first->second.srv.get();
 	}
 

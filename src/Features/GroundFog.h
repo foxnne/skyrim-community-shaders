@@ -3,7 +3,7 @@
 #include "Buffer.h"
 
 /**
- * @brief A thin sheet of fog that follows the terrain.
+ * @brief Fog that follows the terrain: a soft body of it around the camera, a thin sheet beyond, pools in far valleys.
  *
  * Drawn per screen pixel by its own compute pass (RenderPixel), which Atmosphere and Fog runs right before its
  * post-water composite and lays under the atmosphere there. With the setting VolumeInjection the layer is instead
@@ -52,7 +52,23 @@ struct GroundFog : Feature
 		float GroundFill = 0.25f;  // share of Thickness
 		// Pixel pass.
 		float SurfaceBlendDistance = 3.0f;  // end of the view ray over which the ground becomes the visible surface
-		float SurfaceMaxHeight = 1.0f;      // a surface up to this far above the mapped ground counts as ground
+		float SurfaceMaxHeight = 1.0f;      // an up-facing surface up to this far above the mapped ground counts as ground
+		float SurfaceSoftness = 0.5f;       // fog fades over this last stretch of a ray that ends on something not ground
+		float FloorMaxHeight = 4.0f;        // level floors up to this far above the mapped ground carry the near volume
+		// The near volume: a taller, softer body of fog around the camera.
+		float NearDensity = 0.025f;   // extinction at the ground per meter, at Amount 1; 0 = none
+		float NearThickness = 3.5f;   // height at which it has thinned to nothing
+		float NearFalloff = 2.5f;     // how quickly it thins with height
+		float NearDistance = 60.0f;   // meters from the camera; fades out over the second half
+		float DriftScale = 9.0f;      // size of the drifting patches, meters
+		float DriftStrength = 0.7f;   // how uneven the density is
+		float Breathing = 0.15f;      // share by which the near volume's top rises and falls
+		// Burn-off: amount by time of day, and fog kept where terrain shadow holds the sun off.
+		float BurnOffStrength = 1.0f;  // 0 = the time of day and the sun change nothing
+		float ShadowRetention = 0.8f;  // share of the morning amount that ground in terrain shadow keeps by day
+		float MorningAmount = 1.4f;
+		float MiddayAmount = 0.7f;
+		float EveningAmount = 1.0f;
 		bool HalfResolution = true;
 		float StepGrowth = 0.3f;  // size of terrain detail the march follows, as a share of the distance from the camera
 		int MaxSteps = 72;
@@ -108,8 +124,26 @@ struct GroundFog : Feature
 		float FarBasinRadius;
 		float InvFarBasinDepth;
 		float CloudDarkening;
+		float NearExtinction;
+		float NearThickness;
+		float NearFalloff;
+		float NearEnd;
+		float InvDriftScale;
+		float DriftStrength;
+		float BreathPhase;
+		float NearBreath;
+		float2 FloorAnchor;
+		float FloorOffset;
+		float FloorMax;
+		float SoftLength;
+		float BurnSunlitNear;
+		float BurnSunlitFar;
+		float BurnShaded;
+		float BurnRetention;
+		float3 Reserved;
+		float4 FlowWindow;
 	};
-	static_assert(sizeof(VolumeData) == 192);
+	static_assert(sizeof(VolumeData) == 288);
 	static_assert(offsetof(VolumeData, MapZ) == 16);
 	static_assert(offsetof(VolumeData, Thickness) == 32);
 	static_assert(offsetof(VolumeData, FadeStart) == 48);
@@ -125,6 +159,12 @@ struct GroundFog : Feature
 	static_assert(offsetof(VolumeData, MapSize) == 160);
 	static_assert(offsetof(VolumeData, FarEnd) == 176);
 	static_assert(offsetof(VolumeData, CloudDarkening) == 188);
+	static_assert(offsetof(VolumeData, NearExtinction) == 192);
+	static_assert(offsetof(VolumeData, InvDriftScale) == 208);
+	static_assert(offsetof(VolumeData, FloorAnchor) == 224);
+	static_assert(offsetof(VolumeData, SoftLength) == 240);
+	static_assert(offsetof(VolumeData, BurnRetention) == 256);
+	static_assert(offsetof(VolumeData, FlowWindow) == 272);
 
 	enum class DebugMode : uint32_t
 	{
@@ -187,6 +227,10 @@ struct GroundFog : Feature
 
 private:
 	Status Update(VolumeData& a_data, ID3D11ShaderResourceView*& a_heightMap);
+	/** How far the floor under the player lies above the fog's ground there, smoothed over time. */
+	void UpdateFloorOffset(float a_deltaTime);
+	/** Amount by time of day for sunlit ground, from the Morning / Midday / Evening settings. */
+	float TimeOfDayAmount(float& a_daylight) const;
 	bool EnsureShaders();
 	/** Builds the coarse copies of the height map when it changes. */
 	bool EnsureHeightPyramid(ID3D11DeviceContext* a_context, ID3D11ShaderResourceView* a_heightMap);
@@ -196,8 +240,8 @@ private:
 	winrt::com_ptr<ID3D11ComputeShader> pyramidCS;
 	winrt::com_ptr<ID3D11ComputeShader> pyramidFirstCS;
 	bool shadersRequested = false;
-	eastl::unique_ptr<Texture2D> fogTexture;       // rgb: light toward the camera, a: transmittance
-	eastl::unique_ptr<Texture2D> fogDepthTexture;  // device depth each fog pixel was computed for
+	eastl::unique_ptr<Texture2D> fogTexture;     // rgb: light per unit of opacity, a: transmittance to the far depth
+	eastl::unique_ptr<Texture2D> fogAuxTexture;  // near and far view depth of each fog pixel, transmittance to the near depth
 	eastl::unique_ptr<Texture2D> heightPyramid;
 	winrt::com_ptr<ID3D11ShaderResourceView> heightPyramidSource;
 	uint32_t heightPyramidLevels = 0;
@@ -210,6 +254,11 @@ private:
 	// How far the wind has carried the noise, in game units.
 	double windTravelX = 0.0;
 	double windTravelY = 0.0;
+	double breathTime = 0.0;
+	float floorOffset = 0.0f;  // game units
+	float2 floorAnchor{};      // camera-relative xy of the player
+	float timeAmount = 1.0f;
+	float daylight = 0.0f;
 	uint32_t lastUpdateFrame = UINT32_MAX;
 	uint32_t lastBindFrame = UINT32_MAX;
 

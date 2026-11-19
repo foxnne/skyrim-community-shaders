@@ -8,6 +8,7 @@
 #include "Profiler.h"
 #include "State.h"
 #include "Util.h"
+#include "Utils/Climate.h"
 #include "Utils/DebugSection.h"
 #include "Utils/Game.h"
 #include "Utils/MathUtils.h"
@@ -39,6 +40,20 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	GroundFill,
 	SurfaceBlendDistance,
 	SurfaceMaxHeight,
+	SurfaceSoftness,
+	FloorMaxHeight,
+	NearDensity,
+	NearThickness,
+	NearFalloff,
+	NearDistance,
+	DriftScale,
+	DriftStrength,
+	Breathing,
+	BurnOffStrength,
+	ShadowRetention,
+	MorningAmount,
+	MiddayAmount,
+	EveningAmount,
 	HalfResolution,
 	StepGrowth,
 	MaxSteps,
@@ -72,6 +87,27 @@ namespace
 	constexpr float kMaxGroundFill = 8.0f;
 	constexpr float kMaxSurfaceBlend = 10.0f;
 	constexpr float kMaxSurfaceHeight = 4.0f;
+	constexpr float kMaxSoftness = 2.0f;
+	constexpr float kMaxFloorHeight = 8.0f;
+	constexpr float kMaxNearDensity = 0.2f;
+	constexpr float kMinNearThickness = 1.0f;
+	constexpr float kMaxNearThickness = 8.0f;
+	constexpr float kMinNearFalloff = 0.5f;
+	constexpr float kMaxNearFalloff = 6.0f;
+	constexpr float kMinNearDistance = 15.0f;
+	constexpr float kMaxNearDistance = 150.0f;
+	constexpr float kMinDriftScale = 3.0f;
+	constexpr float kMaxDriftScale = 40.0f;
+	constexpr float kMaxBreathing = 0.4f;
+	constexpr float kMaxTimeAmount = 3.0f;
+	// The near volume's top rises and falls once in this many seconds.
+	constexpr float kBreathPeriod = 11.0f;
+	// The floor offset under the player follows changes over about this many seconds.
+	constexpr float kFloorSmoothing = 0.6f;
+	// Hours after sunrise ends over which the fog thins to its midday amount, and before sunset ends over which it
+	// starts to return.
+	constexpr float kBurnOffHours = 3.0f;
+	constexpr float kReturnHours = 2.0f;
 	constexpr int kMinSteps = 8;
 	constexpr int kMaxSteps = 128;
 	constexpr float kMinFarDensity = 0.0002f;
@@ -115,6 +151,81 @@ void GroundFog::SetupResources()
 	volumeConstants = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<VolumeData>(), "GroundFog::VolumeData");
 }
 
+void GroundFog::UpdateFloorOffset(float a_deltaTime)
+{
+	// The height map knows the land, not what is built on it. Where the player stands on a road on fill, a bridge
+	// or a town floor, the near volume's ground is raised by the difference around the player, so the fog is not
+	// left buried under the floor. In the air the last value is kept; in water there is no floor.
+	const float unitsPerMeter = 1.0f / Util::Units::GAME_UNIT_TO_M;
+	float target = floorOffset;
+	floorAnchor = {};
+	if (auto player = RE::PlayerCharacter::GetSingleton(); player && player->Is3DLoaded()) {
+		const auto position = player->GetPosition();
+		const auto eye = Util::GetEyePosition();
+		floorAnchor = { position.x - eye.x, position.y - eye.y };
+		const auto state = player->AsActorState();
+		if (state && state->IsSwimming()) {
+			target = 0.0f;
+		} else if (!player->IsInMidair()) {
+			float ground = 0.0f;
+			auto tes = RE::TES::GetSingleton();
+			if (tes && tes->GetLandHeight(position, ground) && std::isfinite(ground)) {
+				if (const auto cell = player->GetParentCell()) {
+					const float water = cell->GetExteriorWaterHeight();
+					if (std::isfinite(water) && water > -1.0e6f && water < 1.0e6f)
+						ground = std::max(ground, water);
+				}
+				const float top = std::max(settings.FloorMaxHeight, settings.SurfaceMaxHeight) * unitsPerMeter;
+				const float above = std::max(position.z - ground, 0.0f);
+				// Higher than a floor can be: a roof, a tower, a cliff of rock meshes. The fog stays below.
+				target = above * (1.0f - Util::Smoothstep(top, 1.5f * top, above));
+			} else {
+				target = 0.0f;
+			}
+		}
+	} else {
+		target = 0.0f;
+	}
+	floorOffset += (target - floorOffset) * (1.0f - std::exp(-a_deltaTime / kFloorSmoothing));
+	if (!std::isfinite(floorOffset))
+		floorOffset = 0.0f;
+}
+
+float GroundFog::TimeOfDayAmount(float& a_daylight) const
+{
+	a_daylight = 1.0f;
+	const auto sky = globals::game::sky;
+	if (!sky || !sky->currentClimate)
+		return settings.MiddayAmount;
+	const auto calendar = Util::Climate::GetCalendar();
+	float hour = calendar && calendar->gameHour ? calendar->gameHour->value : sky->currentGameHour;
+	if (!std::isfinite(hour))
+		return settings.MiddayAmount;
+	hour = std::fmod(std::max(hour, 0.0f), 24.0f);
+	const auto& timing = sky->currentClimate->timing;
+	const float sunriseBegin = timing.sunrise.begin * Util::Climate::HoursPerTimingUnit;
+	const float sunriseEnd = std::max(timing.sunrise.end * Util::Climate::HoursPerTimingUnit, sunriseBegin + 0.25f);
+	const float sunsetBegin = std::max(timing.sunset.begin * Util::Climate::HoursPerTimingUnit, sunriseEnd + kBurnOffHours + kReturnHours + 0.5f);
+	const float sunsetEnd = std::min(std::max(timing.sunset.end * Util::Climate::HoursPerTimingUnit, sunsetBegin + 0.25f), 23.75f);
+	const float night = 24.0f - sunsetEnd + sunriseBegin;
+	auto blend = [](float a_from, float a_to, float a_x) { return std::lerp(a_from, a_to, Util::Smoothstep(0.0f, 1.0f, a_x)); };
+
+	a_daylight = Util::Smoothstep(sunriseBegin, sunriseEnd, hour) * (1.0f - Util::Smoothstep(sunsetBegin, sunsetEnd, hour));
+	// Heaviest from the small hours through sunrise, thinning through the morning, light by day, returning from
+	// late afternoon and building through the night.
+	if (hour < sunriseBegin)
+		return blend(settings.EveningAmount, settings.MorningAmount, (hour + 24.0f - sunsetEnd) / night);
+	if (hour < sunriseEnd)
+		return settings.MorningAmount;
+	if (hour < sunriseEnd + kBurnOffHours)
+		return blend(settings.MorningAmount, settings.MiddayAmount, (hour - sunriseEnd) / kBurnOffHours);
+	if (hour < sunsetBegin - kReturnHours)
+		return settings.MiddayAmount;
+	if (hour < sunsetEnd)
+		return blend(settings.MiddayAmount, settings.EveningAmount, (hour - (sunsetBegin - kReturnHours)) / (sunsetEnd - sunsetBegin + kReturnHours));
+	return blend(settings.EveningAmount, settings.MorningAmount, (hour - sunsetEnd) / night);
+}
+
 GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView*& a_heightMap)
 {
 	effectiveAmount = 0.0f;
@@ -151,6 +262,9 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 		const float speed = settings.WindDriftSpeed * unitsPerMeter * std::max(windSpeed, kMinDriftWind);
 		windTravelX += static_cast<double>(windDirection.x) * speed * deltaTime;
 		windTravelY += static_cast<double>(windDirection.y) * speed * deltaTime;
+		breathTime = std::fmod(breathTime + deltaTime, static_cast<double>(kBreathPeriod));
+		UpdateFloorOffset(deltaTime);
+		timeAmount = TimeOfDayAmount(daylight);
 	}
 
 	const float windFactor = 1.0f - settings.WindResponse * Util::Smoothstep(kCalmWind, kStrongWind, windSpeed);
@@ -159,7 +273,9 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 	const bool slab = debugMode == DebugMode::kSlab || debugMode == DebugMode::kGroundHeight;
 	// The valley layer exists in the pixel pass only.
 	effectiveFarAmount = settings.VolumeInjection || slab ? 0.0f : settings.FarAmount * windFactor;
-	if (!debug && effectiveAmount * settings.Density <= 0.0f && effectiveFarAmount * settings.FarDensity <= 0.0f)
+	// The near volume exists in the pixel pass only, and not in the slab views.
+	const float nearDensity = settings.VolumeInjection || slab ? 0.0f : effectiveAmount * settings.NearDensity;
+	if (!debug && effectiveAmount * settings.Density <= 0.0f && nearDensity <= 0.0f && effectiveFarAmount * settings.FarDensity <= 0.0f)
 		return Status::kNoAmount;
 
 	const float thickness = (slab ? kDebugThickness : std::max(settings.Thickness, 0.1f)) * unitsPerMeter;
@@ -206,6 +322,27 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 	a_data.FarBasinRadius = kFarBasinRadius;
 	a_data.InvFarBasinDepth = 1.0f / kFarBasinDepth;
 	a_data.CloudDarkening = settings.CloudDarkening;
+	a_data.NearExtinction = nearDensity * Util::Units::GAME_UNIT_TO_M;
+	a_data.NearThickness = std::max(settings.NearThickness, kMinNearThickness) * unitsPerMeter;
+	a_data.NearFalloff = std::clamp(settings.NearFalloff, kMinNearFalloff, kMaxNearFalloff);
+	a_data.NearEnd = std::clamp(settings.NearDistance, kMinNearDistance, kMaxNearDistance) * unitsPerMeter;
+	a_data.InvDriftScale = 1.0f / (std::max(settings.DriftScale, kMinDriftScale) * unitsPerMeter);
+	a_data.DriftStrength = slab ? 0.0f : settings.DriftStrength;
+	a_data.BreathPhase = static_cast<float>(breathTime / kBreathPeriod * 6.283185307179586);
+	a_data.NearBreath = settings.Breathing;
+	a_data.FloorAnchor = floorAnchor;
+	a_data.FloorOffset = slab || settings.FloorMaxHeight <= 0.0f ? 0.0f : floorOffset;
+	a_data.FloorMax = settings.FloorMaxHeight * unitsPerMeter;
+	a_data.SoftLength = slab ? 0.0f : settings.SurfaceSoftness * unitsPerMeter;
+	// Burn-off. Sunlit ground holds the amount for the time of day; the valley layer is never thinned below what
+	// it holds without burn-off, so its midday look on open ground stays. Ground in terrain shadow keeps up to the
+	// morning amount by day. All 1 and no shadow read when the strength is 0.
+	const float burn = slab ? 0.0f : std::clamp(settings.BurnOffStrength, 0.0f, 1.0f);
+	a_data.BurnSunlitNear = std::lerp(1.0f, timeAmount, burn);
+	a_data.BurnSunlitFar = std::lerp(1.0f, std::max(timeAmount, 1.0f), burn);
+	a_data.BurnShaded = std::lerp(1.0f, settings.MorningAmount, burn);
+	a_data.BurnRetention = settings.VolumeInjection ? 0.0f : burn * settings.ShadowRetention * daylight;
+	a_data.FlowWindow = {};
 	a_heightMap = map.srv;
 	return Status::kActive;
 }
@@ -356,10 +493,10 @@ bool GroundFog::EnsureHeightPyramid(ID3D11DeviceContext* a_context, ID3D11Shader
 
 bool GroundFog::EnsureTargets(uint32_t a_width, uint32_t a_height)
 {
-	if (fogTexture && fogDepthTexture && fogTexture->desc.Width == a_width && fogTexture->desc.Height == a_height)
+	if (fogTexture && fogAuxTexture && fogTexture->desc.Width == a_width && fogTexture->desc.Height == a_height)
 		return true;
 	fogTexture = nullptr;
-	fogDepthTexture = nullptr;
+	fogAuxTexture = nullptr;
 	auto make = [&](DXGI_FORMAT a_format, const char* a_name) {
 		D3D11_TEXTURE2D_DESC desc{};
 		desc.Width = a_width;
@@ -381,7 +518,7 @@ bool GroundFog::EnsureTargets(uint32_t a_width, uint32_t a_height)
 		return texture;
 	};
 	fogTexture = make(DXGI_FORMAT_R16G16B16A16_FLOAT, "GroundFog::Fog");
-	fogDepthTexture = make(DXGI_FORMAT_R32_FLOAT, "GroundFog::FogDepth");
+	fogAuxTexture = make(DXGI_FORMAT_R16G16B16A16_FLOAT, "GroundFog::FogAux");
 	return true;
 }
 
@@ -432,7 +569,7 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 	ID3D11ShaderResourceView* ground[] = { heightMap, heightPyramid->srv.get() };
 	a_context->CSSetShaderResources(kHeightMapSlot, 2, ground);
 	atmosphere.BindLightingInputs(a_context);
-	ID3D11UnorderedAccessView* outputs[] = { fogTexture->uav.get(), fogDepthTexture->uav.get() };
+	ID3D11UnorderedAccessView* outputs[] = { fogTexture->uav.get(), fogAuxTexture->uav.get() };
 	a_context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
 	a_context->CSSetShader(pixelCS.get(), nullptr, 0);
 
@@ -451,7 +588,7 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 	auto* previous = oldConstants.get();
 	a_context->CSSetConstantBuffers(kConstantSlot, 1, &previous);
 	compositeInputs[0] = fogTexture->srv.get();
-	compositeInputs[1] = fogDepthTexture->srv.get();
+	compositeInputs[1] = fogAuxTexture->srv.get();
 	a_context->CSSetShaderResources(kCompositeFogSlot, 2, compositeInputs);
 	return true;
 }
@@ -459,13 +596,55 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 void GroundFog::DrawSettings()
 {
 	ImGui::Checkbox(T(TKEY("enabled"), "Enabled"), &settings.Enabled);
-	Util::HoverTip(T(TKEY("enabled_tooltip"), "A thin sheet of fog on the ground, outdoors. Needs Atmosphere and Fog with Physical Sky running, and a 16-bit terrain height map for the worldspace."));
+	Util::HoverTip(T(TKEY("enabled_tooltip"), "Fog on the ground, outdoors: a soft body of it around you, a thin sheet beyond and pools in far valleys. Needs Atmosphere and Fog with Physical Sky running, and a 16-bit terrain height map for the worldspace."));
 
 	ImGui::SliderFloat(T(TKEY("amount"), "Amount"), &settings.Amount, 0.0f, kMaxAmount, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	Util::HoverTip(T(TKEY("amount_tooltip"), "How much fog there is. This is the control to drive by weather, time of day and location. 0 removes it."));
 
 	ImGui::SliderFloat(T(TKEY("density"), "Density"), &settings.Density, kMinDensity, kMaxDensity, "%.3f /m", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
 	Util::HoverTip(T(TKEY("density_tooltip"), "How opaque the fog is at the ground when Amount is 1. At 0.06 you see about 50 m through it."));
+
+	if (ImGui::TreeNodeEx(T(TKEY("near"), "Around You"), ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::SliderFloat(T(TKEY("near_density"), "Near Density"), &settings.NearDensity, 0.0f, kMaxNearDensity, "%.3f /m", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
+		Util::HoverTip(T(TKEY("near_density_tooltip"), "How opaque the fog around you is at the ground when Amount is 1. This is the fog you see in the air between you and things nearby. 0 removes it and leaves the thin sheet."));
+
+		ImGui::SliderFloat(T(TKEY("near_thickness"), "Near Thickness"), &settings.NearThickness, kMinNearThickness, kMaxNearThickness, "%.1f m", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("near_thickness_tooltip"), "Height above the ground at which the fog around you has thinned to nothing. Above eye height you stand inside it."));
+
+		ImGui::SliderFloat(T(TKEY("near_falloff"), "Near Thinning with Height"), &settings.NearFalloff, kMinNearFalloff, kMaxNearFalloff, "%.1f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("near_falloff_tooltip"), "How strongly the fog around you pools low. Low values fill the whole height evenly; high values keep it at your feet."));
+
+		ImGui::SliderFloat(T(TKEY("near_distance"), "Near Distance"), &settings.NearDistance, kMinNearDistance, kMaxNearDistance, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("near_distance_tooltip"), "How far from you the tall fog reaches. It fades into the thin sheet over the second half of this distance."));
+
+		ImGui::SliderFloat(T(TKEY("drift_strength"), "Patchiness"), &settings.DriftStrength, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("drift_strength_tooltip"), "How uneven the fog is: thicker and thinner patches that travel with the wind and pass you as you move. 0 is even fog."));
+
+		ImGui::SliderFloat(T(TKEY("drift_scale"), "Patch Size"), &settings.DriftScale, kMinDriftScale, kMaxDriftScale, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("drift_scale_tooltip"), "Width of the drifting patches."));
+
+		ImGui::SliderFloat(T(TKEY("breathing"), "Breathing"), &settings.Breathing, 0.0f, kMaxBreathing, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("breathing_tooltip"), "Share by which the top of the fog around you slowly rises and falls, out of step from place to place."));
+		ImGui::TreePop();
+	}
+
+	if (ImGui::TreeNodeEx(T(TKEY("burn_off"), "Time of Day and Sun"), ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::SliderFloat(T(TKEY("burn_off_strength"), "Burn-off Strength"), &settings.BurnOffStrength, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("burn_off_strength_tooltip"), "How much the time of day and the sun change the amount of fog. 0 turns this off: the same fog at every hour, sun or shade."));
+
+		ImGui::SliderFloat(T(TKEY("morning_amount"), "Morning Amount"), &settings.MorningAmount, 0.0f, kMaxTimeAmount, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("morning_amount_tooltip"), "Amount from the small hours through sunrise, when fog is heaviest."));
+
+		ImGui::SliderFloat(T(TKEY("midday_amount"), "Midday Amount"), &settings.MiddayAmount, 0.0f, kMaxTimeAmount, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("midday_amount_tooltip"), "Amount on sunlit ground by day, reached three hours after sunrise. Valley fog is never thinned below what it holds with burn-off turned off."));
+
+		ImGui::SliderFloat(T(TKEY("evening_amount"), "Evening Amount"), &settings.EveningAmount, 0.0f, kMaxTimeAmount, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("evening_amount_tooltip"), "Amount at dusk. From here it builds through the night to the morning amount."));
+
+		ImGui::SliderFloat(T(TKEY("shadow_retention"), "Kept in Shadow"), &settings.ShadowRetention, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("shadow_retention_tooltip"), "By day, ground the terrain keeps in shadow holds this share of the morning amount, so fog lingers where the sun has not reached. Needs Terrain Shadows. The Layer Mask debug view shows it in blue."));
+		ImGui::TreePop();
+	}
 
 	if (ImGui::TreeNodeEx(T(TKEY("shape"), "Shape"), ImGuiTreeNodeFlags_DefaultOpen)) {
 		ImGui::SliderFloat(T(TKEY("thickness"), "Thickness"), &settings.Thickness, kMinThickness, kMaxThickness, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
@@ -547,10 +726,16 @@ void GroundFog::DrawSettings()
 
 	if (ImGui::TreeNodeEx(T(TKEY("surfaces"), "Surfaces"))) {
 		ImGui::SliderFloat(T(TKEY("surface_blend_distance"), "Surface Wrap Distance"), &settings.SurfaceBlendDistance, 0.0f, kMaxSurfaceBlend, "%.1f m", ImGuiSliderFlags_AlwaysClamp);
-		Util::HoverTip(T(TKEY("surface_blend_distance_tooltip"), "Over this last stretch of each view ray the fog settles onto what you see instead of the mapped terrain, so it lies on rocks, roads and ground meshes and thins out against them. 0 uses the terrain map alone."));
+		Util::HoverTip(T(TKEY("surface_blend_distance_tooltip"), "Where what you see faces up, the fog settles onto it over this last stretch of each view ray instead of the mapped terrain, so it lies on rocks, roads and ground meshes. Walls, trunks and the sides of rocks are never treated as ground. 0 uses the terrain map alone."));
 
 		ImGui::SliderFloat(T(TKEY("surface_max_height"), "Surface Max Height"), &settings.SurfaceMaxHeight, 0.0f, kMaxSurfaceHeight, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
-		Util::HoverTip(T(TKEY("surface_max_height_tooltip"), "Surfaces up to this far above the mapped terrain count as ground; above twice this they do not, so roofs, bridges and tree crowns stay clear. Higher values let fog climb walls and trunks."));
+		Util::HoverTip(T(TKEY("surface_max_height_tooltip"), "Up-facing surfaces up to this far above the mapped terrain count as ground for the thin sheet; above twice this they do not."));
+
+		ImGui::SliderFloat(T(TKEY("floor_max_height"), "Floor Max Height"), &settings.FloorMaxHeight, 0.0f, kMaxFloorHeight, "%.1f m", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("floor_max_height_tooltip"), "The fog around you also follows wide level floors up to this far above the mapped terrain: roads on fill, bridges, town floors, and the floor you stand on. Tops of rocks, barrels and walls are not floors. 0 keeps it on the mapped terrain."));
+
+		ImGui::SliderFloat(T(TKEY("surface_softness"), "Softness against Objects"), &settings.SurfaceSoftness, 0.0f, kMaxSoftness, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("surface_softness_tooltip"), "The fog fades over this last stretch in front of anything that is not ground, so it does not draw the outline of what stands in it."));
 		ImGui::TreePop();
 	}
 
@@ -589,7 +774,7 @@ void GroundFog::DrawDebugSection()
 	int mode = static_cast<int>(debugMode);
 	if (ImGui::Combo(T(TKEY("debug_mode"), "Debug View"), &mode, modes, static_cast<int>(std::size(modes))))
 		debugMode = static_cast<DebugMode>(std::clamp(mode, 0, static_cast<int>(std::size(modes)) - 1));
-	Util::HoverTip(T(TKEY("debug_mode_tooltip"), "Slab: a dense, level-topped 1 m layer with no noise, to check the height map against the ground.\nGround Height: the slab colored by the sampled height, one stripe per 64 units.\nLayer Mask: the real fog, dense, green where it is the sheet, red where it is valley fog, blue over water.\nTap Count: texture reads per pixel of the per-pixel pass. Blue is 4 or fewer, green 34, yellow 64, red 94 or more."));
+	Util::HoverTip(T(TKEY("debug_mode_tooltip"), "Slab: a dense, level-topped 1 m layer with no noise, to check the height map against the ground.\nGround Height: the slab colored by the sampled height, one stripe per 64 units.\nLayer Mask: the real fog, dense, green where it is the sheet or the fog around you, red where it is valley fog, blue where terrain shadow keeps it from burning off.\nTap Count: texture and depth reads per pixel of the per-pixel pass. Blue is 4 or fewer, green 34, yellow 64, red 94 or more."));
 
 	// Atmosphere and Fog asks for the layer every frame it composes (or, with volume injection, fills its volume).
 	const bool volumeRunning = lastBindFrame != UINT32_MAX && globals::state->frameCount - lastBindFrame <= 2u;
@@ -631,6 +816,8 @@ void GroundFog::DrawDebugSection()
 	ImGui::Text("%s: %.3f", T(TKEY("debug_effective_amount"), "Amount after wind"), effectiveAmount);
 	ImGui::Text("%s: %.3f", T(TKEY("debug_effective_far_amount"), "Valley amount after wind"), effectiveFarAmount);
 	ImGui::Text("%s: %.2f", T(TKEY("debug_wind"), "Wind speed"), windSpeed);
+	ImGui::Text("%s: %.2f, %s %.2f", T(TKEY("debug_time_amount"), "Time of day amount"), timeAmount, T(TKEY("debug_daylight"), "daylight"), daylight);
+	ImGui::Text("%s: %.2f m", T(TKEY("debug_floor_offset"), "Floor under you above the map"), floorOffset * Util::Units::GAME_UNIT_TO_M);
 	ImGui::Text("%s: %.0f x %.0f, DXGI %d", T(TKEY("debug_height_map"), "Height map"), heightMapSize.x, heightMapSize.y, static_cast<int>(heightMapFormat));
 }
 
@@ -662,6 +849,20 @@ void GroundFog::LoadSettings(json& o_json)
 	sanitize(settings.GroundFill, defaults.GroundFill, 0.0f, kMaxGroundFill);
 	sanitize(settings.SurfaceBlendDistance, defaults.SurfaceBlendDistance, 0.0f, kMaxSurfaceBlend);
 	sanitize(settings.SurfaceMaxHeight, defaults.SurfaceMaxHeight, 0.0f, kMaxSurfaceHeight);
+	sanitize(settings.SurfaceSoftness, defaults.SurfaceSoftness, 0.0f, kMaxSoftness);
+	sanitize(settings.FloorMaxHeight, defaults.FloorMaxHeight, 0.0f, kMaxFloorHeight);
+	sanitize(settings.NearDensity, defaults.NearDensity, 0.0f, kMaxNearDensity);
+	sanitize(settings.NearThickness, defaults.NearThickness, kMinNearThickness, kMaxNearThickness);
+	sanitize(settings.NearFalloff, defaults.NearFalloff, kMinNearFalloff, kMaxNearFalloff);
+	sanitize(settings.NearDistance, defaults.NearDistance, kMinNearDistance, kMaxNearDistance);
+	sanitize(settings.DriftScale, defaults.DriftScale, kMinDriftScale, kMaxDriftScale);
+	sanitize(settings.DriftStrength, defaults.DriftStrength, 0.0f, 1.0f);
+	sanitize(settings.Breathing, defaults.Breathing, 0.0f, kMaxBreathing);
+	sanitize(settings.BurnOffStrength, defaults.BurnOffStrength, 0.0f, 1.0f);
+	sanitize(settings.ShadowRetention, defaults.ShadowRetention, 0.0f, 1.0f);
+	sanitize(settings.MorningAmount, defaults.MorningAmount, 0.0f, kMaxTimeAmount);
+	sanitize(settings.MiddayAmount, defaults.MiddayAmount, 0.0f, kMaxTimeAmount);
+	sanitize(settings.EveningAmount, defaults.EveningAmount, 0.0f, kMaxTimeAmount);
 	sanitize(settings.StepGrowth, defaults.StepGrowth, kMinStepGrowth, kMaxStepGrowth);
 	sanitize(settings.FarAmount, defaults.FarAmount, 0.0f, kMaxAmount);
 	sanitize(settings.FarDensity, defaults.FarDensity, kMinFarDensity, kMaxFarDensity);

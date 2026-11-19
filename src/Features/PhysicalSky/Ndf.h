@@ -346,6 +346,8 @@ struct CloudLightingSettings
 	float deckLight = 0.f;
 	float deckHalfDepth = 400.f;
 	float deckHorizonLight = 0.f;
+	// The same light on the ground: 1 = what a uniform underside of that brightness sheds. 0 = off.
+	float deckGroundLight = 0.f;
 };
 
 struct CloudWindSettings

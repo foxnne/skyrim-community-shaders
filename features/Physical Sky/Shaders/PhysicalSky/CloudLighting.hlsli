@@ -295,12 +295,19 @@ float CloudLightOpticalDepth(float3 pos, float3 viewDir, NDFInfo ndf, float exti
 // type 0.07 ends at h 0.2, 0.2 at 0.4, 0.5 at 0.65, 1.0 at 0.97), the height map sets the span.
 //   transmission = 2 ^ -(metres of cloud above / halfDepth)      thin = bright, thick = dark
 // It is faded in by the part of the local light path that is blocked, so sunlit tops and edges are not lit twice.
+// CloudDeckColumnAbove (metres of weather-map cloud above the sample) is shared with the deck light map that the
+// ground reads (buildCloudDeckLight), so the ground follows the same columns as the rendered underside.
+float CloudDeckColumnAbove(NDFInfo ndf)
+{
+	const float fill = 0.97 * pow(saturate(ndf.top_type), 0.55);
+	const float spanMeters = max(ndf.altitude.y - ndf.altitude.x, 0.0) * GAME_UNIT_TO_M;
+	return max(fill - ndf.height_fraction, 0.0) * spanMeters * saturate(ndf.coverage);
+}
+
 float3 CloudDeckLight(float3 pos, NDFInfo ndf, float3 sunlight, float albedo, float blockedDepth, float viewOpacity)
 {
 	const VolumetricCloudData info = VolumetricCloudBuffer[0];
-	const float fill = 0.97 * pow(saturate(ndf.top_type), 0.55);
-	const float spanMeters = max(ndf.altitude.y - ndf.altitude.x, 0.0) * GAME_UNIT_TO_M;
-	float above = max(fill - ndf.height_fraction, 0.0) * spanMeters * saturate(ndf.coverage);
+	float above = CloudDeckColumnAbove(ndf);
 	// Art control, not transport: thin the counted column with horizontal distance so the far deck, seen at a
 	// grazing angle above the horizon, reads lighter than the deck overhead. Depends on position only (no view
 	// direction), so it does not change when the camera turns.

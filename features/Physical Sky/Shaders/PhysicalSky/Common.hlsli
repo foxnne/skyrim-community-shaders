@@ -826,6 +826,23 @@ Texture2D<float4> TexSkyTail : register(t66);
 
 		return cloudTransmittance.xxx;
 	}
+
+	// foxnne heavy sky: the cloud deck as a light source. Fraction of the directional light's normal-incidence
+	// irradiance that reaches an upward-facing surface as DIFFUSE light through the weather-map deck above it,
+	// from the deck light map (same column law as the rendered underside, see CloudDeckLight). Weighted by the
+	// part of the direct beam the cloud removed, so clear gaps and thin edges are not lit twice. Returns 0 and
+	// reads nothing while the setting is 0 (the default).
+	float GetCloudDeckGroundLight(float3 worldPosAbs, float directTransmittance)
+	{
+		const SharedData::PhysSkyData data = SharedData::physSkyData;
+		[branch] if (data.deckGroundLight <= 0.0 || !data.enableVolumetricClouds || data.volCloudLowThickness <= 0.0)
+			return 0.0;
+		if (CloudShadowVolume::MeanProfile.Load(int3(0, 0, 0)).w == 0.0)
+			return 0.0;
+		const float altitude = worldPosAbs.z - data.zBottom;
+		const float below = 1.0 - smoothstep(data.volCloudLowBottom, data.volCloudLowBottom + 0.25 * data.volCloudLowThickness, altitude);
+		return data.deckGroundLight * below * (1.0 - saturate(directTransmittance)) * CloudShadowVolume::SampleDeckLight(worldPosAbs.xy, data.shadowVolumeRange);
+	}
 #endif
 
 	float3 GetMediumPlanetPosition(float3 position)

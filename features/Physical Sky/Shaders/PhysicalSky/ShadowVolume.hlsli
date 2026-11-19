@@ -13,7 +13,34 @@ namespace CloudShadowVolume
 
 	// Row 0: bottom/top altitude, curvature radius, valid flag. Remaining rows
 	// store mean transmittance at evenly spaced heights, including both endpoints.
+	// foxnne heavy sky: columns 1..DeckMapSize of the same texture hold the deck light map (buildCloudDeckLight):
+	// the part of the sun's horizontal irradiance that the weather-map deck passes down as diffuse light, on a
+	// camera-centred grid DeckMapRangeScale times the shadow volume range wide. Sharing the texture keeps every
+	// binding of slot 69 valid for it. Keep the constants equal to PhysicalSky.h (kShadowMeanHeights + 1,
+	// kDeckMapSize).
 	Texture2D<float4> MeanProfile : register(t69);
+	static const uint MeanRows = 65u;
+	static const uint DeckMapSize = 128u;
+	static const float DeckMapRangeScale = 2.0;
+
+	float2 DeckMapCenter(float2 camera, float range)
+	{
+		const float cellSize = range * DeckMapRangeScale / DeckMapSize;
+		return floor(camera / cellSize) * cellSize;
+	}
+
+	// Bilinear by hand: the profile column sits next to the map, and callers own different samplers.
+	float SampleDeckLight(float2 worldXY, float range)
+	{
+		const float2 uv = (worldXY - DeckMapCenter(FrameBuffer::CameraPosAdjust.xy, range)) / (range * DeckMapRangeScale) + 0.5;
+		const float2 coord = clamp(uv * DeckMapSize - 0.5, 0.0, DeckMapSize - 1.0);
+		const int2 lo = int2(coord);
+		const int2 hi = min(lo + 1, int(DeckMapSize) - 1);
+		const float2 w = coord - lo;
+		return lerp(
+			lerp(MeanProfile.Load(int3(lo.x + 1, lo.y, 0)).x, MeanProfile.Load(int3(hi.x + 1, lo.y, 0)).x, w.x),
+			lerp(MeanProfile.Load(int3(lo.x + 1, hi.y, 0)).x, MeanProfile.Load(int3(hi.x + 1, hi.y, 0)).x, w.x), w.y);
+	}
 
 	float FarTransmittance(float3 pos, float3 lightDir, float4 shadowSample, uint2 dimensions, out float localWeight)
 	{
@@ -41,8 +68,7 @@ namespace CloudShadowVolume
 		}
 		if (localWeight * shadowSample.w >= 1.0)
 			return 1.0;  // Complete local ray: the mean has zero blending weight.
-		uint width, height;
-		MeanProfile.GetDimensions(width, height);
+		const uint height = MeanRows;
 		const float altitude = CloudProfileAltitude(pos, FrameBuffer::CameraPosAdjust.xy, profile.z);
 		const float index = saturate((altitude - profile.x) / max(profile.y - profile.x, 1.0)) * (height - 2u);
 		const uint lo = (uint)index + 1u;

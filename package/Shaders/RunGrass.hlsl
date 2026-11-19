@@ -634,10 +634,13 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	if (SharedData::exponentialHeightFogSettings.enabled)
 		dirLightColor *= ExponentialHeightFog::GetSunlightFogAttenuation(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz);
 #				endif
+	float3 deckGroundColor = 0.0;
 #				if defined(PHYSICAL_SKY)
 	if (SharedData::physSkyData.enabled) {
 		dirLightColor *= PhysSky::SampleDirLightTr(SampShadowMaskSampler);
-		dirLightColor *= PhysSky::GetDirlightTransmittance(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, SampPhysicalSkyWrapSampler, true);
+		const float3 cloudTransmittance = PhysSky::GetDirlightTransmittance(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, SampPhysicalSkyWrapSampler, true);
+		deckGroundColor = dirLightColor * PhysSky::GetCloudDeckGroundLight(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, cloudTransmittance.x);
+		dirLightColor *= cloudTransmittance;
 	}
 #				endif
 
@@ -791,6 +794,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	if (SharedData::ssgiSettings.ReplaceAmbient != 0)
 		directionalAmbientColor = 0;
 	directionalAmbientColor += ShadowSampling::GetCloudScatterLighting(cloudScatterColor, cloudScatter, normal);
+	directionalAmbientColor += ShadowSampling::GetDeckGroundLighting(deckGroundColor, normal);
 	directColor += indirectLobes.diffuse * directionalAmbientColor;
 	float3 outputAlbedo = indirectLobes.diffuse;
 	directionalAmbientColor *= outputAlbedo;
@@ -1044,10 +1048,13 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	}
 #				endif
 
+	float3 deckGroundColor = 0.0;
 #				if defined(PHYSICAL_SKY)
 	if (SharedData::physSkyData.enabled) {
 		dirLightColorMultiplier *= PhysSky::SampleDirLightTr(SampShadowMaskSampler);
-		dirLightColorMultiplier *= PhysSky::GetDirlightTransmittance(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, SampPhysicalSkyWrapSampler, true);
+		const float3 cloudTransmittance = PhysSky::GetDirlightTransmittance(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, SampPhysicalSkyWrapSampler, true);
+		deckGroundColor = dirLightColor * dirLightColorMultiplier * PhysSky::GetCloudDeckGroundLight(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, cloudTransmittance.x);
+		dirLightColorMultiplier *= cloudTransmittance;
 	}
 #				endif
 
@@ -1230,6 +1237,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		directionalAmbientColor = 0;
 
 	directionalAmbientColor += ShadowSampling::GetCloudScatterLighting(cloudScatterColor, cloudScatter, normal);
+	directionalAmbientColor += ShadowSampling::GetDeckGroundLighting(deckGroundColor, normal);
 
 	float3 reflectance = 0;
 	float3 diffuseLobeWeight = reflectionAlbedo;

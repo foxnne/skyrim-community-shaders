@@ -85,6 +85,18 @@ namespace ShadowSampling
 		return scatterColor;
 	}
 
+	// foxnne heavy sky: diffuse light from the cloud deck overhead (PhysSky::GetCloudDeckGroundLight times the
+	// unshadowed directional light). A uniform overhead source: a surface with normal n receives (1 + n.z) / 2 of
+	// the irradiance on the horizontal. Scaled like the cloud scatter term above.
+	float3 GetDeckGroundLighting(float3 deckLightColor, float3 normal)
+	{
+		float3 color = deckLightColor * ((normal.z * 0.5 + 0.5) * Color::BRDFScale);
+#if defined(TRUE_PBR)
+		color /= Color::PBRLightingCompensation;
+#endif
+		return color;
+	}
+
 	float Get3DFilteredShadow(float3 positionWS, float3 viewDirection, float2 screenPosition, out float surfaceShadow)
 	{
 #if defined(EFFECT)

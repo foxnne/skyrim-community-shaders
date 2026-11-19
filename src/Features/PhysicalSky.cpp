@@ -136,7 +136,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	cirrusLightThickness,
 	deckLight,
 	deckHalfDepth,
-	deckHorizonLight)
+	deckHorizonLight,
+	deckGroundLight)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	CloudWindSettings,
@@ -1424,6 +1425,9 @@ void PhysicalSky::DrawCloudLightingSection()
 		ImGui::SliderFloat(T(TKEY("cloud_deck_horizon_light"), "Deck Horizon Light"), &lighting.deckHorizonLight, 0.f, 0.95f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextWrapped("%s", T(TKEY("cloud_deck_horizon_light_desc"), "Counts less of the column for cloud far from the camera, reaching this fraction at 6 km, so the deck brightens toward the horizon. An artistic control."));
+		ImGui::SliderFloat(T(TKEY("cloud_deck_ground_light"), "Deck Ground Light"), &lighting.deckGroundLight, 0.f, 4.f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextWrapped("%s", T(TKEY("cloud_deck_ground_light_desc"), "Lights terrain, objects and grass with the light the deck passes down, as soft light from above: brighter under thin cloud, darker under thick cloud. It scales with Deck Light Strength; one matches the brightness of the underside. Zero is off and leaves the lighting unchanged."));
 
 		if (ImGui::TreeNode(T(TKEY("cloud_source_details"), "Low Cloud Source Integration"))) {
 			ImGui::SliderFloat(T(TKEY("cloud_scatter_density_threshold"), "Scattering Density Threshold"), &lighting.scatterDensityThreshold, 0.001f, 1.f, "%.3f 1/m");
@@ -1983,6 +1987,10 @@ void PhysicalSky::Reset()
 		.secundaDir = { secundaDir.x, secundaDir.y, secundaDir.z },
 		.secundaColor = sRGBToWorkingGamut(settings.secundaColor),
 		.enabled = allGood,
+		// Neutral at the default: 0 skips the surface shader branch, and the map is not built.
+		.deckGroundLight = csCloudDeckLight && std::isfinite(settings.cloudLayer.lighting.deckGroundLight) && settings.cloudLayer.lighting.deckLight > 0.f ?
+		                       std::clamp(settings.cloudLayer.lighting.deckGroundLight, 0.f, 4.f) :
+		                       0.f,
 		.vanillaMix = settings.vanillaMix,
 		.zBottom = zBottom,
 		.rPlanet = settings.planetRadius / Util::Units::GAME_UNIT_TO_KM,

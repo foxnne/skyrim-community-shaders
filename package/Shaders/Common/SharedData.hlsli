@@ -680,7 +680,7 @@ namespace SharedData
 
 		// GENERAL
 		uint enabled;  //
-		float pad;
+		float deckGroundLight;  // foxnne heavy sky: diffuse light from the cloud deck on surfaces, 0 = off
 		float vanillaMix;
 
 		// WORLD

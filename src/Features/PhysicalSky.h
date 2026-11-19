@@ -235,7 +235,7 @@ struct PhysicalSky final : public Feature
 
 		// GENERAL
 		uint enabled;  //
-		float pad;
+		float deckGroundLight;  // Heavy sky: diffuse light from the cloud deck on surfaces. 0 = off.
 		float vanillaMix;
 
 		// WORLD
@@ -317,6 +317,9 @@ struct PhysicalSky final : public Feature
 	constexpr static uint16_t kShadowVolH = 256;
 	constexpr static uint16_t kShadowVolD = 64;
 	constexpr static uint16_t kShadowMeanHeights = 64;
+	// Heavy sky: the deck light map shares the shadow mean texture (columns 1..kDeckMapSize). Keep both equal to
+	// CloudShadowVolume::MeanRows - 1 and DeckMapSize in ShadowVolume.hlsli.
+	constexpr static uint16_t kDeckMapSize = 128;
 	constexpr static uint16_t kVolCubeSize = 64;
 	constexpr static uint32_t kCloudBoundaryCells = 256;
 	eastl::unique_ptr<Texture2D> texCloudBoundary = nullptr;
@@ -610,6 +613,7 @@ struct PhysicalSky final : public Feature
 	winrt::com_ptr<ID3D11ComputeShader> csVolShadowWeather, csVolShadowColumns, csCloudShadowMeanWeather;
 	winrt::com_ptr<ID3D11ComputeShader> csVolShadowResample = nullptr;
 	winrt::com_ptr<ID3D11ComputeShader> csCloudShadowMean, csCloudShadowMeanVolcanic, csCloudShadowMeanVoxel;
+	winrt::com_ptr<ID3D11ComputeShader> csCloudDeckLight;
 	winrt::com_ptr<ID3D11ComputeShader> csVolCubemap = nullptr;
 	winrt::com_ptr<ID3D11ComputeShader> csVolAmbientSH = nullptr;
 	winrt::com_ptr<ID3D11ComputeShader> csCloudAmbientReduce;

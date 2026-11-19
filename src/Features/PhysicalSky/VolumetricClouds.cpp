@@ -700,7 +700,9 @@ void PhysicalSky::SetupVolumetricResources()
 		context->ClearUnorderedAccessViewFloat(texShadowVolume->uav.get(), kClearShadowVolume);
 		context->ClearUnorderedAccessViewFloat(texShadowVolumeRaw->uav.get(), kClearShadowVolume);
 		// Metadata row plus endpoint-inclusive vertical mean transmittance profile.
-		texCloudShadowMean = CreateCloudTexture(1, kShadowMeanHeights + 1u, DXGI_FORMAT_R32G32B32A32_FLOAT, "PhysicalSky::CloudShadowMean");
+		// Column 0: the profile. Columns 1..kDeckMapSize: the heavy-sky deck light map (buildCloudDeckLight).
+		static_assert(kDeckMapSize >= kShadowMeanHeights + 1u);
+		texCloudShadowMean = CreateCloudTexture(1u + kDeckMapSize, kDeckMapSize, DXGI_FORMAT_R32G32B32A32_FLOAT, "PhysicalSky::CloudShadowMean");
 		context->ClearUnorderedAccessViewFloat(texCloudShadowMean->uav.get(), kClearLuminance);
 	}
 
@@ -822,6 +824,7 @@ void PhysicalSky::CompileVolumetricShaders()
 		ShaderInfo{ &csCloudShadowMeanWeather, "Volumetrics.cs.hlsl", { { "NO_CLOUD_STORMS", "" } }, "buildCloudShadowMean" },
 		ShaderInfo{ &csCloudShadowMeanVolcanic, "Volumetrics.cs.hlsl", { { "VOLCANIC_STORMS_ONLY", "" } }, "buildCloudShadowMean" },
 		ShaderInfo{ &csCloudShadowMeanVoxel, "Volumetrics.cs.hlsl", { { "CLOUD_VOXELS", "" } }, "buildCloudShadowMean" },
+		ShaderInfo{ &csCloudDeckLight, "Volumetrics.cs.hlsl", { { "NO_CLOUD_STORMS", "" } }, "buildCloudDeckLight" },
 		ShaderInfo{ &csVolCubemap, "Volumetrics.cs.hlsl", { { "CLOUD_REFLECTION", "" } }, "renderCubemap" },
 		ShaderInfo{ &csCloudCrossSection, "CloudCrossSection.cs.hlsl", {} },
 		ShaderInfo{ &csLightningQuery, "Volumetrics.cs.hlsl", { { "CLOUD_VOXELS", "" } }, "findLightningSource" },
@@ -1408,6 +1411,13 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 		globals::profiler->BeginPass("PhysicalSky::CloudShadowMean");
 		context->Dispatch(1, kShadowMeanHeights, 1);
 		globals::profiler->EndPass();
+		// Heavy sky: the deck light map for the ground, only while the ground term is on.
+		if (csCloudDeckLight && lighting.deckLight > 0.f && lighting.deckGroundLight > 0.f) {
+			context->CSSetShader(csCloudDeckLight.get(), nullptr, 0);
+			globals::profiler->BeginPass("PhysicalSky::CloudDeckLight");
+			context->Dispatch((kDeckMapSize + 7u) / 8u, (kDeckMapSize + 7u) / 8u, 1);
+			globals::profiler->EndPass();
+		}
 		context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
 		context->CSSetShaderResources(14, 1, &nullPsShadowSrv);
 		state->EndPerfEvent();

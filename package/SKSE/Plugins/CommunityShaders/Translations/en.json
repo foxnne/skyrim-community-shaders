@@ -2730,6 +2730,8 @@
     "feature.physical_sky.cloud_cubemap": "Cloud Cubemap",
     "feature.physical_sky.cloud_curvature_radius": "Cloud Curvature Radius",
     "feature.physical_sky.cloud_curvature_radius_desc": "Controls how far clouds bend below the horizon. Smaller radii curve them more; NDF thickness is unaffected.",
+    "feature.physical_sky.cloud_deck_ground_light": "Deck Ground Light",
+    "feature.physical_sky.cloud_deck_ground_light_desc": "Lights terrain, objects and grass with the light the deck passes down, as soft light from above: brighter under thin cloud, darker under thick cloud. It scales with Deck Light Strength; one matches the brightness of the underside. Zero is off and leaves the lighting unchanged.",
     "feature.physical_sky.cloud_deck_half_depth": "Deck Half Depth",
     "feature.physical_sky.cloud_deck_half_depth_desc": "Meters of cloud above a point that halve the light reaching it. Smaller values darken thick columns faster and raise the contrast between thin and thick cloud.",
     "feature.physical_sky.cloud_deck_horizon_light": "Deck Horizon Light",

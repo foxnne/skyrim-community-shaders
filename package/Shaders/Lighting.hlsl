@@ -2953,10 +2953,13 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	}
 #	endif
 
+	float3 deckGroundColor = 0.0;
 #	if defined(PHYSICAL_SKY)
 	if (SharedData::physSkyData.enabled) {
 		dirLightColor *= PhysSky::SampleDirLightTr(SampShadowMaskSampler);
-		dirLightColor *= PhysSky::GetDirlightTransmittance(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, SampColorSampler, true);
+		const float3 cloudTransmittance = PhysSky::GetDirlightTransmittance(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, SampColorSampler, true);
+		deckGroundColor = dirLightColor * PhysSky::GetCloudDeckGroundLight(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, cloudTransmittance.x);
+		dirLightColor *= cloudTransmittance;
 	}
 #	endif
 
@@ -3565,6 +3568,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	endif
 
 	directionalAmbientColor += ShadowSampling::GetCloudScatterLighting(cloudScatterColor, cloudScatter, ambientNormal);
+	directionalAmbientColor += ShadowSampling::GetDeckGroundLighting(deckGroundColor, ambientNormal);
 
 	float3 reflectionDiffuseColor = diffuseColor + directionalAmbientColor;
 

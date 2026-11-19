@@ -1847,8 +1847,7 @@ groupshared float ShadowMeanSamples[64];
 // Averaging exp(-tau), rather than tau, preserves clear gaps between clouds.
 [numthreads(64, 1, 1)] void buildCloudShadowMean(uint lane : SV_GroupIndex, uint3 group : SV_GroupID) {
 	const VolumetricCloudData info = VolumetricCloudBuffer[0];
-	uint width, height;
-	RWCloudShadowMean.GetDimensions(width, height);
+	const uint height = CloudShadowVolume::MeanRows;
 	uint3 dims;
 	TexShadowVolume.GetDimensions(dims.x, dims.y, dims.z);
 	const float2 center = CloudShadowVolume::GridCenter(FrameBuffer::CameraPosAdjust.xy, info.shadowVolumeRange, dims.xy);
@@ -1913,4 +1912,28 @@ groupshared float ShadowMeanSamples[64];
 		if (group.y == 0u)
 			RWCloudShadowMean[uint2(0, 0)] = float4(info.shadowVolumeBottom, info.shadowVolumeTop, info.cloudCurvatureRadius, 1);
 	}
+}
+
+// foxnne heavy sky: the deck as a light source for the ground. One weather-map sample per texel gives the whole
+// column above the cloud base, and the same 2 ^ -(metres / half depth) law that shades the underside
+// (CloudDeckLight) gives the part of the sun's horizontal irradiance that comes out below as diffuse light. So
+// the ground is brighter under the columns that look bright from below and darker under the heavy cells.
+// Stored next to the shadow mean profile (CloudShadowVolume::SampleDeckLight); only dispatched while the ground
+// term is on. A column without cloud stores full transmission: the receiver weights the value by how much of the
+// direct beam the cloud took away, so clear gaps add nothing.
+[numthreads(8, 8, 1)] void buildCloudDeckLight(uint2 texel : SV_DispatchThreadID) {
+	const VolumetricCloudData info = VolumetricCloudBuffer[0];
+	if (any(texel >= CloudShadowVolume::DeckMapSize))
+		return;
+	const float range = info.shadowVolumeRange * CloudShadowVolume::DeckMapRangeScale;
+	const float2 xy = CloudShadowVolume::DeckMapCenter(FrameBuffer::CameraPosAdjust.xy, info.shadowVolumeRange) + ((texel + 0.5) / CloudShadowVolume::DeckMapSize - 0.5) * range;
+	const float2 field = CloudFieldPosition((xy - info.noiseWindOffset) * GAME_UNIT_TO_M, info.cloudEvolution.xy) * GAME_UNITS_PER_METER;
+	const float3 heights = SampleCloudHeights(field, xy);
+	float transmission = 1.0;
+	if (heights.g > heights.r) {
+		const NDFInfo ndf = sampleWeatherNDF(field, xy, lerp(heights.r, heights.g, 0.01));
+		if (ndf.in_layer)
+			transmission = exp2(-CloudDeckColumnAbove(ndf) / info.heavySky.y);
+	}
+	RWCloudShadowMean[texel + uint2(1u, 0u)] = float4(info.heavySky.x * max(info.dirlightDir.z, 0.0) * transmission, 0, 0, 0);
 }

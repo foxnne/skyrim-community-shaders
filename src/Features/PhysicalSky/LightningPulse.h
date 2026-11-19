@@ -22,6 +22,9 @@ namespace LightningPulse
 	// when a 20 ms return stroke falls between two 30 Hz frames.
 	// Artist-scalable optical envelope, not an electrical current model.
 	// Reach the configured peak quickly, then decay smoothly to zero at duration.
+	// The decay rate keeps a stroke on screen for a few 60 Hz frames (about 0.6, 0.2, 0.07 of the
+	// peak for a 60 ms stroke) rather than one.
+	inline constexpr double kDecay = 4.0;
 	inline double StrokeIntegral(double time, double duration)
 	{
 		const double t = std::clamp(time, 0.0, duration);
@@ -30,8 +33,8 @@ namespace LightningPulse
 			return t * t / (2.0 * rise);
 		const double fall = duration - rise;
 		const double u = (t - rise) / fall;
-		const double tail = std::exp(-6.0);
-		return rise * 0.5 + fall * (-std::expm1(-6.0 * u) / 6.0 - tail * u) / (1.0 - tail);
+		const double tail = std::exp(-kDecay);
+		return rise * 0.5 + fall * (-std::expm1(-kDecay * u) / kDecay - tail * u) / (1.0 - tail);
 	}
 
 	inline float Average(double begin, double end, const Parameters& parameters)

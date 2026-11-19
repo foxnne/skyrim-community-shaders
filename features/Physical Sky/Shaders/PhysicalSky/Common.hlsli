@@ -650,8 +650,8 @@ Texture2D<float4> TexSkyTail : register(t66);
 		if (ViewAtmosphere::ReflectionEnabled())
 			return ColorManagement::SceneColor::ScaleByLinear(color, TexVolCubeTr.SampleLevel(samp, viewDir, 0));
 		const float4 cloud = TexVolCubeLum.SampleLevel(samp, viewDir, 0);
-		const float3 flash = SharedData::physSkyData.lightningColorIntensity.w > 0.0 ?
-		                         TexLightningReflection.SampleLevel(samp, viewDir, 0).rgb * SharedData::physSkyData.lightningColorIntensity.w :
+		const float3 flash = SharedData::physSkyData.lightningColorIntensity.w * SharedData::physSkyData.lightningBolt.z > 0.0 ?
+		                         TexLightningReflection.SampleLevel(samp, viewDir, 0).rgb * (SharedData::physSkyData.lightningColorIntensity.w * SharedData::physSkyData.lightningBolt.z) :
 		                         0.0;
 		const float cloudT = TexVolCubeTr.SampleLevel(samp, viewDir, 0);
 		const float depth = TexVolCubeDepth.SampleLevel(samp, viewDir, 0).x * 1000.0 / GAME_UNIT_TO_M;
@@ -674,8 +674,8 @@ Texture2D<float4> TexSkyTail : register(t66);
 			const float visibility = skyRay ? 1.0 : saturate((distance - depth) * GAME_UNIT_TO_M * 0.025);
 			const float cloudT = lerp(1.0, TexVolCubeTr.SampleLevel(samp, viewDir, 0), visibility);
 			const ViewAtmosphere::Medium front = ViewAtmosphere::SampleReflection(uv, min(depth, distance), samp);
-			const float3 flash = SharedData::physSkyData.lightningColorIntensity.w > 0.0 ?
-			                         TexLightningReflection.SampleLevel(samp, viewDir, 0).rgb * SharedData::physSkyData.lightningColorIntensity.w :
+			const float3 flash = SharedData::physSkyData.lightningColorIntensity.w * SharedData::physSkyData.lightningBolt.z > 0.0 ?
+			                         TexLightningReflection.SampleLevel(samp, viewDir, 0).rgb * (SharedData::physSkyData.lightningColorIntensity.w * SharedData::physSkyData.lightningBolt.z) :
 			                         0.0;
 			const float3 cloudL = (TexVolCubeLum.SampleLevel(samp, viewDir, 0).rgb + flash) * visibility;
 			medium.luminance = lerp(front.luminance, medium.luminance, cloudT) + front.transmittance * cloudL;

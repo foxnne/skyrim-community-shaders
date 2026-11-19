@@ -94,7 +94,11 @@ float LightningChannelTransmission(float3 direction, float distance)
 	return exp(-opticalDepth);
 }
 
-float4 LightningChannel(float3 direction, float sceneDistance, float footprint, float intensity)
+// The channel as drawn. Its radiance is the configured bolt luminance whatever its distance or width:
+// a core no narrower than `minimumWidth` (radians, half-width) with a soft halo five core widths wide.
+// Segments combine by maximum, so joints and crossings are no brighter than a single segment.
+// It emits nothing into the scene; that is Lightning::IncidentFrom, set independently.
+float4 LightningChannel(float3 direction, float sceneDistance, float footprint, float minimumWidth, float intensity)
 {
 	if (!Lightning::HasSource() || intensity <= 0.0)
 		return 0.0;
@@ -121,12 +125,13 @@ float4 LightningChannel(float3 direction, float sceneDistance, float footprint, 
 		const float distance = dot(closestPoint, direction);
 		if (distance <= 0.0 || distance > sceneDistance)
 			continue;
-		const float width = max(segment.start.w, footprint * distance * 0.65);
+		// Forks are drawn thinner than the main channel, down to 55% at their dim tips.
+		const float apparent = minimumWidth * (0.55 + 0.45 * saturate(segment.end.w));
+		const float width = max(segment.start.w, max(apparent, footprint * 0.65) * distance);
 		const float separation2 = dot(closestPoint - distance * direction, closestPoint - distance * direction) / (width * width);
 		if (separation2 > 100.0)
 			continue;
-		const float coverage = min(segment.start.w / width, 1.0);
-		const float contribution = ((exp2(-4.0 * separation2) + 0.035 * exp2(-0.16 * separation2)) / 1.035) * coverage * segment.end.w;
+		const float contribution = min(exp2(-4.0 * separation2) + SharedData::physSkyData.lightningBolt.y * exp2(-0.16 * separation2), 1.0) * segment.end.w;
 		energy = max(energy, contribution);
 		if (contribution > strongest) {
 			strongest = contribution;
@@ -153,7 +158,9 @@ float4 LightningChannel(float3 direction, float sceneDistance, float footprint, 
 	const float sceneDistance = FrameBuffer::ToStandardDepth(deviceDepth) >= 1.0 - 1e-6 ? info.rayMarchRange :
 	                                                        SharedData::GetScreenDepth(deviceDepth) / max(abs(mul(FrameBuffer::CameraView, float4(ray, 0)).z), 1e-6);
 	const float footprint = 2.0 / max(abs(FrameBuffer::CameraProj[1][1]) * info.activeFrameDim.y, 1.0);
-	float4 channel = LightningChannel(ray, sceneDistance, footprint, SharedData::physSkyData.lightningColorIntensity.w);
+	// Bolt width is given in pixels of a 1080-line image, so it does not change with render resolution.
+	const float minimumWidth = SharedData::physSkyData.lightningBolt.x * 2.0 / (max(abs(FrameBuffer::CameraProj[1][1]), 1e-3) * 1080.0);
+	float4 channel = LightningChannel(ray, sceneDistance, footprint, minimumWidth, SharedData::physSkyData.lightningColorIntensity.w);
 	if (!ViewAtmosphere::Enabled() && channel.a > 0.0)
 		channel.rgb *= SampleCloudAerialPerspective(ray, DecodeCloudDepth(channel.a), 0.0).a;
 	RWLightningChannels[pixel] = float4(min(channel.rgb, 65504.0), channel.a);
@@ -169,7 +176,8 @@ float4 LightningChannel(float3 direction, float sceneDistance, float footprint, 
 	float4 cloud = float4(Lightning::ActiveMask(LightningResolvedCubeMask.SampleLevel(TransmittanceSampler, direction, 0)) *
 							  SharedData::physSkyData.lightningColorIntensity.rgb * SharedData::physSkyData.lightningPhotometry.x,
 		0);
-	const float4 channel = LightningChannel(direction, VolumetricCloudBuffer[0].rayMarchRange, 2.0 / width, 1.0);
+	// The reflection cube has no projection of its own; use the width a 65 degree view would give.
+	const float4 channel = LightningChannel(direction, VolumetricCloudBuffer[0].rayMarchRange, 2.0 / width, SharedData::physSkyData.lightningBolt.x * 2.0 / (1.57 * 1080.0), 1.0);
 	// Reflection composition applies foreground air together with the cloud source.
 	cloud.rgb += channel.rgb;
 	RWLightningCubeColor[pixel] = float4(min(cloud.rgb, 65504.0), cloud.a);

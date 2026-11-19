@@ -735,6 +735,8 @@ namespace SharedData
 		float4 lightningChannelEmitter;
 		float4 lightningPreparationPositionRadius;
 		float4 lightningPreparationControl;  // base mode, history valid, active mask lane, preparing
+		float4 lightningScene;               // illuminance at the cloud and channel emitters at full pulse, soft radius in game units, fog share
+		float4 lightningBolt;                // least half-width (pixels at 1080p), halo amount, share drawn into sky reflections
 		float4 diskAngularRadius;            // Sun, Masser, Secunda, directional light
 		float3 dirLightBodyDir;
 		uint dirLightDiskIndex;

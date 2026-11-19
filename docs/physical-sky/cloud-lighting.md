@@ -439,27 +439,51 @@ own defaults. See [cirrus inputs](volumetric-cloud-texture-resources.md#cirrus-i
 
 ## Lightning photometry
 
-Lightning uses the solar control's existing calibration: linear working-gamut
-Y is illuminance in lux. Cloud and channel peak luminances are in cd/m²; their
-shared color is normalized to working-gamut Y = 1 after color conversion. The
-Intensity control multiplies both peaks. Changing solar illuminance does not
-rescale lightning; both use the same fixed unit convention, including at night.
+Lightning is set in scene units: the scale of the Solar Illuminance control,
+whose default is 10 for full sun, so a sunlit white surface has a luminance of
+about 3.2. These are not real-world lux or cd/m². Real lightning values
+(a channel of 10^7 cd/m², a cloud of 10^3 cd/m²) are four orders of magnitude
+above this scene's sun and must not be entered. The shared color is normalized
+to working-gamut Y = 1 after color conversion. Lightning Intensity multiplies
+the bolt, the cloud glow, the scene light and the thunder volume together.
 
-An equivalent finite emitter of luminance `L`, radius `R` and distance `d`
-supplies perpendicular illuminance `E = pi * L * R² / (d² + R²)`. This tends
-to `L * projectedArea / d²` in the far field and remains finite nearby.
-The cloud radius is an equivalent emitting-area parameter; the visible cloud
-still follows the normalized cloud-base or embedded-cloud profile. The
-channel emitter uses the main channel's area-weighted centroid and broadside
-projected area `sum(2 * channelRadius * segmentLength)`; branches are visual
-detail. These are finite-emitter approximations, not electrical discharge or
-full local cloud light-transport simulations.
+What is drawn and what lights the scene are separate:
 
-Clustered scene lights, rain and the shared atmosphere use the same illuminance
-expression. They no longer use independent lightning brightness constants.
-Surface BRDFs, visibility, user lighting multipliers and exposure apply afterward.
-Calibration matches the sun under Linear Lighting and PBR; radiance stored in
-half-float cloud buffers retains the existing HDR range limit.
+- **Bolt.** The channel is drawn at `boltLuminance` at any distance, with a core
+  no narrower than `boltWidth` (half-width in pixels of a 1080-line image) and a
+  halo of `boltGlow` five core widths wide. Forks are thinner and dimmer.
+  Segments combine by maximum. Width and brightness do not change the scene light.
+- **Cloud glow.** `cloudGlow` is the peak luminance of the normalized cloud-base
+  or embedded-cloud profile; `radius` sets its size and the size of the
+  channel's bends and forks.
+- **Scene light.** `sceneIlluminance` is the peak illuminance from a strike 1 km
+  away. Two emitters carry it, the lit cloud and the centre of the main channel
+  (70% from the channel for a ground stroke, all from the cloud otherwise), each
+  as `E = E0 * r² / (d² + r²)` with `r` = 500 m: inverse square far away, finite
+  beside the strike. Clustered scene lights, rain and the shared atmosphere use
+  this expression; the atmosphere takes the share `fogScatter` of it.
+
+Limits apply per discharge, in this order: `sceneIlluminance` is at most 2; the
+light at the camera is at most 2 and beside the strike at most 10 (full sun);
+and, when pre-exposure is published (Linear Lighting with auto exposure), a
+50% albedo surface at the camera is lifted to at most `sceneExposureLimit` EV
+over mid-grey at the exposure in force when the discharge starts, the ground
+beside the strike to 3 EV more, the cloud glow to 2.5 EV more and the bolt core
+to 5 EV more. The settings panel shows what the last discharge resolved to.
+
+A flash is kept out of temporal histories: exposure adaptation holds, the
+dynamic cubemap capture is skipped, and screen-space GI shortens its
+accumulation and stops multi-bounce feedback, from the first lit frame until
+eight frames after the last. The bolt and cloud glow are drawn into the sky
+reflection cubemap only by the share `reflection` (default 0), because that
+cubemap also feeds sky ambient light and refreshes over several frames.
+
+Physical Sky owns the weather's lightning whenever it renders: the game's flash
+value, the two game settings that turn it into directional and ambient light
+and its thunder are suppressed, also at zero intensity, unless `vanillaFallback`
+is set. Automatic discharges happen in thunder weathers only (`weatherMode` 1,
+a weather record whose thunder frequency is neither 0 nor 255) or in any weather
+with a suitable cloud (`weatherMode` 0).
 
 Rate is in discharges per minute, distances in km/m, and return-stroke duration
 and start-to-start interval in ms. The rate range is 0–600 per minute; each
@@ -478,7 +502,7 @@ the active discharge duration; discharges do not overlap.
 
 The optical envelope rises linearly over 5% of the duration, then follows a
 truncated exponential over the remaining 95%, reaching zero continuously after
-six decay time constants. These proportions are an artistic approximation,
+four decay time constants, so a 60 ms stroke shows on about three 60 Hz frames. These proportions are an artistic approximation,
 not measured current-waveform parameters. Its peak remains one, so the peak
 luminance controls retain their units; its time integral is smaller than the
 previous triangle. An analytic integral over each display interval preserves

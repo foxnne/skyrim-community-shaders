@@ -1910,7 +1910,8 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 		context->CSSetShaderResources(23, (uint)cubeSrvs.size(), nullTemporalSrvs);
 		context->CSSetShaderResources(59, 1, nullTemporalSrvs);
 		context->CSSetUnorderedAccessViews(3, 1, &nullLightning, nullptr);
-		if (lightning.HasSource()) {
+		// Nothing samples the lightning cube while its share of the sky reflection is zero.
+		if (lightning.HasSource() && settings.lightning.reflection > 0.f) {
 			auto* mask = texLightningCubeMask->srv.get();
 			auto* channel = lightning.Segments();
 			context->CSSetShaderResources(94, 1, &channel);

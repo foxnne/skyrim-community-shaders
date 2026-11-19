@@ -72,17 +72,24 @@ namespace Lightning
 		return index == 0u ? SharedData::physSkyData.lightningPositionRadius : SharedData::physSkyData.lightningChannelEmitter;
 	}
 
+	// Illuminance in scene units from one of the two emitters (0: the lit cloud, 1: the main channel).
+	// lightningScene.xy is the illuminance at the emitter at full pulse, already inside the per-discharge
+	// limits; it falls as r^2 / (d^2 + r^2) with the soft radius r, so it tends to inverse square far away
+	// and stays finite beside the strike. What is drawn (bolt, cloud glow) plays no part in it.
 	float3 IncidentFrom(uint index, float3 worldPosition)
 	{
-		const float4 source = Emitter(index);
-		const float3 offset = source.xyz - worldPosition;
-		const float radius2 = source.w * source.w;
-		// Equivalent finite emitter: projected solid angle tends to A/d^2 in the
-		// far field and pi at the emitter. cd/m^2 times projected sr gives lux.
-		const float luminance = index == 0u ? SharedData::physSkyData.lightningPhotometry.x : SharedData::physSkyData.lightningPhotometry.y;
+		const float3 offset = Emitter(index).xyz - worldPosition;
+		const float radius2 = SharedData::physSkyData.lightningScene.z * SharedData::physSkyData.lightningScene.z;
+		const float atEmitter = index == 0u ? SharedData::physSkyData.lightningScene.x : SharedData::physSkyData.lightningScene.y;
 		return HasSource() ? SharedData::physSkyData.lightningColorIntensity.rgb *
-		                         (luminance * SharedData::physSkyData.lightningColorIntensity.w * 3.14159265 * radius2 / max(dot(offset, offset) + radius2, 1e-6)) :
+		                         (atEmitter * SharedData::physSkyData.lightningColorIntensity.w * radius2 / max(dot(offset, offset) + radius2, 1e-6)) :
 		                     0.0;
+	}
+
+	// The share of that light that air, haze and fog may scatter towards the eye.
+	float3 MediumIncidentFrom(uint index, float3 worldPosition)
+	{
+		return IncidentFrom(index, worldPosition) * SharedData::physSkyData.lightningScene.w;
 	}
 
 	float3 Incident(float3 worldPosition)

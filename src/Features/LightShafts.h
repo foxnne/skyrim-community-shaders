@@ -8,8 +8,9 @@
  * Its own passes, run right after Atmosphere and Fog's post-water composite (Deferred's post-water hook): opaque
  * surfaces, water, fog, air and clouds are in the scene, transparent surfaces and upscaling are not. Each pixel's
  * view ray is marched through the world at half or quarter resolution against the directional shadow cascades,
- * the terrain shadow and the cloud shadow volume, and only air that gets more light than the air around it adds
- * light: open ground and overcast add nothing. See LightShafts/LightShafts.hlsli.
+ * the terrain shadow and the cloud shadow volume, distant rays are read from a mask of open sky on the screen, and
+ * only air that gets more light than the air around it adds light: open ground, clear sky and overcast add nothing.
+ * See LightShafts/LightShafts.hlsli.
  *
  * Needs Physical Sky and the shared atmosphere volume of Atmosphere and Fog (for the light's colour after the
  * atmosphere, the cloud shadow volume and the shadow inputs the volume already gathers).
@@ -48,6 +49,7 @@ struct LightShafts : Feature
 		float DistantLength = 1500.0f;   // distance over which those fade to 1/e
 		float HighSunStrength = 0.5f;    // strength left when the light is high in the sky
 		float VeilRemoval = 1.0f;        // 1: contrast only. 0: all lit air glows, like plain volumetric light
+		float SilhouetteRays = 0.0f;     // distant rays past terrain and objects against a clear sky; brightens open sky near them
 	};
 
 	/** Mirrors LightShaftsCB in LightShafts/Constants.hlsli. */
@@ -75,15 +77,21 @@ struct LightShafts : Feature
 		uint32_t DebugMode;
 		float RidgeRadius;
 		float AmbientHeight;
-		float2 Padding;
+		float2 LightUv;
+		float ScreenWeight;
+		uint32_t ScreenSteps;
+		float SilhouetteRays;
+		float Padding;
 	};
-	static_assert(sizeof(ShaftData) == 112);
+	static_assert(sizeof(ShaftData) == 128);
 	static_assert(offsetof(ShaftData, LightColor) == 16);
 	static_assert(offsetof(ShaftData, NearLength) == 32);
 	static_assert(offsetof(ShaftData, PhaseG) == 48);
 	static_assert(offsetof(ShaftData, DistantStrength) == 64);
 	static_assert(offsetof(ShaftData, NearSteps) == 80);
 	static_assert(offsetof(ShaftData, RidgeRadius) == 96);
+	static_assert(offsetof(ShaftData, LightUv) == 104);
+	static_assert(offsetof(ShaftData, ScreenWeight) == 112);
 
 	enum class Status
 	{
@@ -104,9 +112,10 @@ struct LightShafts : Feature
 	{
 		uint32_t divisor;
 		uint32_t nearSteps;
-		uint32_t farSteps;
+		uint32_t farSteps;     // distant rays through the world, light off the screen
+		uint32_t screenSteps;  // distant rays from the screen, light on or near it
 	};
-	static constexpr Quality kQualities[] = { { 4u, 12u, 6u }, { 2u, 16u, 8u }, { 2u, 24u, 12u }, { 2u, 40u, 16u } };
+	static constexpr Quality kQualities[] = { { 4u, 12u, 6u, 12u }, { 2u, 16u, 8u, 16u }, { 2u, 24u, 12u, 24u }, { 2u, 40u, 16u, 32u } };
 
 	Settings settings;
 
@@ -132,18 +141,22 @@ struct LightShafts : Feature
 	static constexpr uint32_t kPreparedSlot = 44;
 	static constexpr uint32_t kShaftsSlot = 45;
 	static constexpr uint32_t kShaftsDepthSlot = 46;
+	static constexpr uint32_t kMaskSlot = 47;
+	static constexpr uint32_t kCloudSlot = 110;
 
 private:
 	Status Update(ShaftData& a_data);
 	bool EnsureShaders();
-	bool EnsureResources(uint32_t a_width, uint32_t a_height);
+	bool EnsureResources(uint32_t a_width, uint32_t a_height, uint32_t a_maskWidth, uint32_t a_maskHeight);
 
+	winrt::com_ptr<ID3D11ComputeShader> maskCS;
 	winrt::com_ptr<ID3D11ComputeShader> prepareCS;
 	winrt::com_ptr<ID3D11ComputeShader> marchCS;
 	winrt::com_ptr<ID3D11ComputeShader> resolveCS;
 	winrt::com_ptr<ID3D11ComputeShader> compositeCS;
 	bool shadersRequested = false;
 
+	eastl::unique_ptr<Texture2D> maskTexture;      // quarter resolution: open sky (x), sky (y)
 	eastl::unique_ptr<Texture2D> shaftsTexture;    // rgb: light to add, a: lit share of the ray
 	eastl::unique_ptr<Texture2D> resolvedTexture;  // the same with the step offsets averaged out
 	eastl::unique_ptr<Texture2D> depthTexture;     // device depth each of their pixels was computed for
@@ -160,4 +173,5 @@ private:
 	float lightElevation = 0.0f;   // degrees
 	float lightViewAngle = 0.0f;   // degrees from the view centre
 	float effectiveStrength = 0.0f;
+	float screenWeight = 0.0f;
 };

@@ -5,6 +5,7 @@
 //   what the near march expects air to get; only air that gets more adds light. It is eased over time, so walking
 //   from sun into shade does not switch the beams on in one frame.
 // - The mean cloud transmittance of the sky, and the cloud and terrain light at the camera itself.
+// - How open the sky is on the whole screen, from the mask: what the screen part of the march expects.
 
 #define COMPUTESHADER
 #define PS_LINEAR_SHADOW_SAMPLER
@@ -46,5 +47,14 @@ RWTexture2D<float4> PreparedOut : register(u0);
 
 	const float3 camera = FrameBuffer::CameraPosAdjust.xyz;
 	const float cloudMean = LightShafts::CloudMeanStored();
-	PreparedOut[uint2(1, 0)] = float4(saturate(share), cloudMean, LightShafts::TerrainLight(camera, 512.0), LightShafts::CloudLight(camera, cloudMean));
+	PreparedOut[uint2(1, 0)] = float4(saturate(share), LightShafts::CloudApplied(cloudMean), LightShafts::TerrainLight(camera, 512.0), LightShafts::CloudLight(camera));
+
+	// Light through the sky as a share of the sky on screen: 1 without cloud. Silhouette Rays moves it toward the
+	// share of the whole screen, so that terrain and objects against the sky count as contrast too.
+	float2 mask = 0.0;
+	[loop] for (uint j = 0u; j < 144u; ++j)
+		mask += LightShafts::SampleMask((float2(j % 16u, j / 16u) + 0.5) / float2(16.0, 9.0));
+	mask /= 144.0;
+	const float openSky = mask.y > 0.01 ? saturate(mask.x / mask.y) : 1.0;
+	PreparedOut[uint2(2, 0)] = float4(lerp(openSky, mask.x, LightShafts::SilhouetteRays), mask.y, 0.0, 1.0);
 }

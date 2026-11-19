@@ -5,10 +5,16 @@
 // exp(-t / NearLength). The cloud and terrain light change slowly over this stretch and are read at its two ends.
 // A step adds what the cascades give over the share of lit air around the camera.
 //
-// Far part, from NearRange to FarRange, the surface or the cloud base: the cloud shadow volume against the mean
-// cloud transmittance, and the terrain shadow against the terrain shadow to both sides of the sample across the
-// light. A step adds what it gets over that. This is where rays through gaps in the cloud and past ridges come
-// from; under a clear or an overcast sky over open ground it adds nothing.
+// Distant part, light on or near the screen: the mask of open sky along the line from the pixel to the light,
+// against how open the sky is on the whole. The shadow of something far away falls on the air of a view ray along
+// that line (near air at the light's end, far air at the pixel's), so a gap in the cloud draws a ray away from the
+// light. Sky pixels take it in full, surfaces by the depth of air in front of them.
+//
+// Distant part, light off the screen: from NearRange to FarRange, the surface or the cloud base, the cloud shadow
+// volume against the mean cloud transmittance, and the terrain shadow against the terrain shadow to both sides of
+// the sample across the light.
+//
+// Under a clear or an overcast sky over open ground no part adds anything.
 //
 // Each pixel starts its steps at one of 16 ordered offsets; Resolve averages them out. The result depends on the
 // pixel's ray, its depth and the world only: no history.
@@ -71,8 +77,7 @@ RWTexture2D<float> ShaftsDepthOut : register(u1);  // the device depth each outp
 
 	const float4 prepared = LightShafts::Prepared[uint2(1, 0)];
 	const float ambient = prepared.x;
-	const float cloudMeanStored = prepared.y;
-	const float cloudMean = LightShafts::CloudApplied(cloudMeanStored);
+	const float cloudMean = prepared.y;
 	const float3 camera = FrameBuffer::CameraPosAdjust.xyz;
 	const float jitter = LightShafts::Bayer(pixel);
 	const DirectionalShadowLightData light = DirectionalShadowLights[0];
@@ -80,8 +85,8 @@ RWTexture2D<float> ShaftsDepthOut : register(u1);  // the device depth each outp
 	// Near part.
 	const float nearEnd = sky ? LightShafts::NearRange : min(sceneDistance, LightShafts::NearRange);
 	const float nearReach = 1.0 - exp(-nearEnd / LightShafts::NearLength);
-	const float surroundStart = prepared.z * LightShafts::CloudApplied(prepared.w);
-	const float surroundEnd = LightShafts::TerrainLight(camera + dir * nearEnd, 512.0) * LightShafts::CloudLight(camera + dir * nearEnd, cloudMeanStored);
+	const float surroundStart = prepared.z * prepared.w;
+	const float surroundEnd = LightShafts::TerrainLight(camera + dir * nearEnd, 512.0) * LightShafts::CloudLight(camera + dir * nearEnd);
 	const float expected = LightShafts::VeilRemoval * ambient;
 	float nearSum = 0.0;
 	float litSum = 0.0;
@@ -101,11 +106,32 @@ RWTexture2D<float> ShaftsDepthOut : register(u1);  // the device depth each outp
 		distanceSum += contrast * t;
 		weightSum += contrast;
 	}
+	distanceSum *= nearReach / float(max(LightShafts::NearSteps, 1u));
+	weightSum *= nearReach / float(max(LightShafts::NearSteps, 1u));
 	const float steps = float(max(LightShafts::NearSteps, 1u));
 	float depthOptical = nearReach * nearSum / steps;
 	const float litShare = litSum / steps;
 
-	// Far part.
+	// Distant part, from the screen.
+	const float distantWeight = sky ? 1.0 : 1.0 - exp(-max(sceneDistance - LightShafts::NearRange, 0.0) / LightShafts::FarLength);
+	[branch] if (LightShafts::ScreenSteps > 0u && LightShafts::ScreenWeight > 0.0 && LightShafts::DistantStrength > 0.0 && distantWeight > 0.01)
+	{
+		const float expectedOpen = LightShafts::Prepared[uint2(2, 0)].x;
+		float open = 0.0;
+		[loop] for (uint s = 0u; s < LightShafts::ScreenSteps; ++s)
+		{
+			const float2 at = lerp(uv, LightShafts::LightUv, (float(s) + jitter) / float(LightShafts::ScreenSteps));
+			// Off the screen nothing is known: worth what is expected.
+			open += any(at < 0.0) || any(at > 1.0) ? expectedOpen : LightShafts::SampleMask(at).x;
+		}
+		const float contrast = LightShafts::DistantStrength * LightShafts::ScreenWeight * distantWeight *
+		                       max(open / float(LightShafts::ScreenSteps) - LightShafts::VeilRemoval * expectedOpen, 0.0);
+		depthOptical += contrast;
+		distanceSum += contrast * (LightShafts::NearRange + LightShafts::FarLength);
+		weightSum += contrast;
+	}
+
+	// Distant part, through the world.
 	float farEnd = sky ? LightShafts::FarRange : min(sceneDistance, LightShafts::FarRange);
 	if (LightShafts::CloudsActive()) {
 		// Up to the cloud base: above it the ray is inside the cloud, which the sky pass draws.
@@ -116,12 +142,13 @@ RWTexture2D<float> ShaftsDepthOut : register(u1);  // the device depth each outp
 			farEnd = 0.0;
 	}
 	const float farSpan = farEnd - LightShafts::NearRange;
-	[branch] if (LightShafts::FarSteps > 0u && LightShafts::DistantStrength > 0.0 && farSpan > 1.0)
+	[branch] if (LightShafts::FarSteps > 0u && LightShafts::DistantStrength > 0.0 && LightShafts::ScreenWeight < 1.0 && farSpan > 1.0)
 	{
 		const float farReach = 1.0 - exp(-farSpan / LightShafts::FarLength);
 		const float3 lightDir = PhysSky::GetCloudShadowLightDirection();
 		const float horizontal = length(lightDir.xy);
 		const float2 side = horizontal > 0.05 ? float2(-lightDir.y, lightDir.x) / horizontal : 0.0;
+		const float worldWeight = LightShafts::DistantStrength * (1.0 - LightShafts::ScreenWeight) * farReach;
 		float farSum = 0.0;
 		[loop] for (uint j = 0u; j < LightShafts::FarSteps; ++j)
 		{
@@ -135,13 +162,13 @@ RWTexture2D<float> ShaftsDepthOut : register(u1);  // the device depth each outp
 				const float3 offset = float3(side * max(LightShafts::RidgeRadius, 0.1 * t), 0.0);
 				expectedTerrain = 0.5 * (LightShafts::TerrainLight(where + offset, blur) + LightShafts::TerrainLight(where - offset, blur));
 			}
-			const float cloud = terrain > 0.0 ? LightShafts::CloudLight(where, cloudMeanStored) : 0.0;
+			const float cloud = terrain > 0.0 ? LightShafts::CloudLight(where) : 0.0;
 			const float contrast = max(terrain * cloud - LightShafts::VeilRemoval * expectedTerrain * cloudMean, 0.0);
 			farSum += contrast;
-			distanceSum += contrast * t * LightShafts::DistantStrength;
-			weightSum += contrast * LightShafts::DistantStrength;
+			distanceSum += contrast * t * worldWeight / float(LightShafts::FarSteps);
+			weightSum += contrast * worldWeight / float(LightShafts::FarSteps);
 		}
-		depthOptical += LightShafts::DistantStrength * farReach * farSum / float(LightShafts::FarSteps);
+		depthOptical += worldWeight * farSum / float(LightShafts::FarSteps);
 	}
 
 	float3 beams = color * (1.0 - exp(-LightShafts::Density * depthOptical));

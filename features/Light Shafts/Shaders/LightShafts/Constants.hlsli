@@ -29,7 +29,11 @@ namespace LightShafts
 		uint DebugMode;       // 0 off, 1 lit share of the ray, 2 beams only
 		float RidgeRadius;    // least distance to the sides the terrain shadow is compared over, game units
 		float AmbientHeight;  // height above the camera the lit share is taken over, game units
-		float2 Padding;
+		float2 LightUv;        // where the light stands on the screen, 0..1, possibly outside
+		float ScreenWeight;    // share of the distant rays taken from the screen (the light is on or near it)
+		uint ScreenSteps;      // samples from each pixel toward the light on the screen
+		float SilhouetteRays;  // how much terrain and objects against the sky count as contrast, like cloud does
+		float Padding;
 	};
 
 	static const float3 Luma = float3(0.2126, 0.7152, 0.0722);

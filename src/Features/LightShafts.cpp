@@ -30,7 +30,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	DistantStrength,
 	DistantLength,
 	HighSunStrength,
-	VeilRemoval)
+	VeilRemoval,
+	SilhouetteRays)
 
 namespace
 {
@@ -69,6 +70,11 @@ namespace
 	// (cosines).
 	constexpr float kViewFadeFull = 0.4226f;
 	constexpr float kViewFadeOff = -0.4226f;
+	// The distant rays come from the screen while the light is on it or less than an eighth of the screen outside,
+	// and from the world once it is more than five eighths outside (in units of half the screen: 1 is the edge).
+	constexpr float kScreenFull = 1.25f;
+	constexpr float kScreenOff = 2.25f;
+	constexpr uint32_t kMaskDivisor = 4u;
 	// Below this added luminance straight toward the light the pass is not worth running.
 	constexpr float kMinLuminance = 1.0e-5f;
 
@@ -131,6 +137,14 @@ LightShafts::Status LightShafts::Update(ShaftData& a_data)
 	const float cosine = std::clamp(std::isfinite(clip.w) ? clip.w : 1.0f, -1.0f, 1.0f);
 	lightViewAngle = DirectX::XMConvertToDegrees(std::acos(cosine));
 	const float viewFade = Util::Smoothstep(kViewFadeOff, kViewFadeFull, cosine);
+	// Where the light stands on the screen. Behind the camera plane it has no place there.
+	float2 lightUv{ 0.5f, 0.5f };
+	screenWeight = 0.0f;
+	if (std::isfinite(clip.x) && std::isfinite(clip.y) && clip.w > 0.05f) {
+		const float2 ndc{ clip.x / clip.w, clip.y / clip.w };
+		lightUv = { ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f };
+		screenWeight = 1.0f - Util::Smoothstep(kScreenFull, kScreenOff, std::max(std::abs(ndc.x), std::abs(ndc.y)));
+	}
 
 	const float fade = horizonFade * highFade * viewFade;
 	color *= fade;
@@ -164,7 +178,11 @@ LightShafts::Status LightShafts::Update(ShaftData& a_data)
 	a_data.AmbientHistory = history ? std::exp(-deltaTime / kAmbientEaseTime) : 0.0f;
 	a_data.AmbientRadius = kAmbientRadius * unitsPerMeter;
 	a_data.NearSteps = quality.nearSteps;
-	a_data.FarSteps = settings.DistantStrength > 0.0f ? quality.farSteps : 0u;
+	a_data.FarSteps = settings.DistantStrength > 0.0f && screenWeight < 1.0f ? quality.farSteps : 0u;
+	a_data.ScreenSteps = settings.DistantStrength > 0.0f && screenWeight > 0.0f ? quality.screenSteps : 0u;
+	a_data.ScreenWeight = screenWeight;
+	a_data.LightUv = lightUv;
+	a_data.SilhouetteRays = settings.SilhouetteRays;
 	a_data.Divisor = quality.divisor;
 	a_data.DebugMode = static_cast<uint32_t>(std::clamp(settings.DebugView, 0, kDebugViewCount - 1));
 	a_data.RidgeRadius = kRidgeRadius * unitsPerMeter;
@@ -174,6 +192,7 @@ LightShafts::Status LightShafts::Update(ShaftData& a_data)
 
 void LightShafts::ClearShaderCache()
 {
+	maskCS = nullptr;
 	prepareCS = nullptr;
 	marchCS = nullptr;
 	resolveCS = nullptr;
@@ -191,13 +210,14 @@ bool LightShafts::EnsureShaders()
 			defines.emplace_back("TERRAIN_SHADOWS", "");
 		prepareCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\LightShafts\\Prepare.cs.hlsl", defines, "cs_5_0")));
 		marchCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\LightShafts\\March.cs.hlsl", defines, "cs_5_0")));
+		maskCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\LightShafts\\Mask.cs.hlsl", {}, "cs_5_0")));
 		resolveCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\LightShafts\\Resolve.cs.hlsl", {}, "cs_5_0")));
 		compositeCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\LightShafts\\Composite.cs.hlsl", {}, "cs_5_0")));
 	}
-	return prepareCS && marchCS && resolveCS && compositeCS;
+	return maskCS && prepareCS && marchCS && resolveCS && compositeCS;
 }
 
-bool LightShafts::EnsureResources(uint32_t a_width, uint32_t a_height)
+bool LightShafts::EnsureResources(uint32_t a_width, uint32_t a_height, uint32_t a_maskWidth, uint32_t a_maskHeight)
 {
 	auto make = [](uint32_t a_w, uint32_t a_h, DXGI_FORMAT a_format, const char* a_name) {
 		D3D11_TEXTURE2D_DESC desc{};
@@ -222,8 +242,8 @@ bool LightShafts::EnsureResources(uint32_t a_width, uint32_t a_height)
 	if (!constants)
 		constants = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<ShaftData>(), "LightShafts::ShaftData");
 	if (!preparedTextures[0]) {
-		preparedTextures[0] = make(2, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, "LightShafts::Prepared0");
-		preparedTextures[1] = make(2, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, "LightShafts::Prepared1");
+		preparedTextures[0] = make(3, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, "LightShafts::Prepared0");
+		preparedTextures[1] = make(3, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, "LightShafts::Prepared1");
 		lastDrawFrame = UINT32_MAX;
 	}
 	if (!linearSampler || !shadowSampler) {
@@ -246,7 +266,9 @@ bool LightShafts::EnsureResources(uint32_t a_width, uint32_t a_height)
 		resolvedTexture = make(a_width, a_height, DXGI_FORMAT_R16G16B16A16_FLOAT, "LightShafts::Resolved");
 		depthTexture = make(a_width, a_height, DXGI_FORMAT_R32_FLOAT, "LightShafts::Depth");
 	}
-	return shaftsTexture && resolvedTexture && depthTexture && preparedTextures[0] && preparedTextures[1];
+	if (!maskTexture || maskTexture->desc.Width != a_maskWidth || maskTexture->desc.Height != a_maskHeight)
+		maskTexture = make(a_maskWidth, a_maskHeight, DXGI_FORMAT_R16G16_FLOAT, "LightShafts::Mask");
+	return maskTexture && shaftsTexture && resolvedTexture && depthTexture && preparedTextures[0] && preparedTextures[1];
 }
 
 void LightShafts::Render()
@@ -273,7 +295,8 @@ void LightShafts::Render()
 	D3D11_TEXTURE2D_DESC mainDesc{};
 	main.texture->GetDesc(&mainDesc);
 	const uint32_t divisor = data.Divisor;
-	if (!EnsureResources((mainDesc.Width + divisor - 1u) / divisor, (mainDesc.Height + divisor - 1u) / divisor)) {
+	if (!EnsureResources((mainDesc.Width + divisor - 1u) / divisor, (mainDesc.Height + divisor - 1u) / divisor,
+			(mainDesc.Width + kMaskDivisor - 1u) / kMaskDivisor, (mainDesc.Height + kMaskDivisor - 1u) / kMaskDivisor)) {
 		status = Status::kNoResources;
 		return;
 	}
@@ -311,11 +334,23 @@ void LightShafts::Render()
 
 	globals::state->BeginPerfEvent("Light Shafts");
 
+	ID3D11UnorderedAccessView* output = maskTexture->uav.get();
+	globals::profiler->BeginPass("LightShafts::Mask");
+	const auto& sky = globals::features::physicalSky;
+	bind(kCloudSlot, sky.texVolFilteredTr ? sky.texVolFilteredTr->srv.get() : nullptr);
+	context->CSSetUnorderedAccessViews(0, 1, &output, nullptr);
+	context->CSSetShader(maskCS.get(), nullptr, 0);
+	context->Dispatch(((width + kMaskDivisor - 1u) / kMaskDivisor + 7u) / 8u, ((height + kMaskDivisor - 1u) / kMaskDivisor + 7u) / 8u, 1);
+	context->CSSetUnorderedAccessViews(0, 2, nullOutputs, nullptr);
+	bind(kCloudSlot, nullptr);
+	bind(kMaskSlot, maskTexture->srv.get());
+	globals::profiler->EndPass();
+
 	auto& prepared = preparedTextures[preparedIndex];
 	auto& previous = preparedTextures[preparedIndex ^ 1u];
 	globals::profiler->BeginPass("LightShafts::Prepare");
 	bind(kShaftsSlot, previous->srv.get());
-	ID3D11UnorderedAccessView* output = prepared->uav.get();
+	output = prepared->uav.get();
 	context->CSSetUnorderedAccessViews(0, 1, &output, nullptr);
 	context->CSSetShader(prepareCS.get(), nullptr, 0);
 	context->Dispatch(1, 1, 1);
@@ -353,7 +388,7 @@ void LightShafts::Render()
 	globals::state->EndPerfEvent();
 
 	// Leave the compute stage as the atmosphere's composite does: nothing of this pass bound.
-	for (UINT slot : { 1u, 2u, 25u, kDepthSlot, kPreparedSlot, kShaftsSlot, kShaftsDepthSlot, 60u, 61u, 69u, 70u, 98u, 112u, 125u, 126u, 127u })
+	for (UINT slot : { 1u, 2u, 25u, kDepthSlot, kPreparedSlot, kShaftsSlot, kShaftsDepthSlot, kMaskSlot, 60u, 61u, 69u, 70u, 98u, 112u, 125u, 126u, 127u })
 		bind(slot, nullptr);
 	context->CSSetShader(nullptr, nullptr, 0);
 	auto* restored = oldConstants.get();
@@ -407,15 +442,18 @@ void LightShafts::DrawSettings()
 		Util::HoverTip(T(TKEY("distant_strength_tooltip"), "Weight of the rays beyond the near range: through gaps in the cloud and past ridges. 0 removes them and their cost."));
 
 		ImGui::SliderFloat(T(TKEY("distant_length"), "Distant Length"), &settings.DistantLength, kMinDistantLength, kMaxDistantLength, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
-		Util::HoverTip(T(TKEY("distant_length_tooltip"), "Distance over which the distant rays fade. They are followed to three times this, to the cloud base or to the edge of the cloud shadows."));
+		Util::HoverTip(T(TKEY("distant_length_tooltip"), "Depth of air a distant surface needs in front of it to show distant rays in full, and the distance over which rays followed through the world fade while the light is off the screen."));
+
+		ImGui::SliderFloat(T(TKEY("silhouette_rays"), "Silhouette Rays"), &settings.SilhouetteRays, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("silhouette_rays_tooltip"), "At 0 distant rays need cloud: a clear sky adds nothing however much of it mountains and trees cover. Higher values count what stands against the sky as contrast too, which gives rays past ridges and towers on a clear day and brightens the open sky near the light by as much."));
 		ImGui::TreePop();
 	}
 
 	const char* qualities[] = {
-		T(TKEY("quality_low"), "Low (quarter resolution, 12 + 6 steps)"),
-		T(TKEY("quality_medium"), "Medium (half resolution, 16 + 8 steps)"),
-		T(TKEY("quality_high"), "High (half resolution, 24 + 12 steps)"),
-		T(TKEY("quality_ultra"), "Ultra (half resolution, 40 + 16 steps)")
+		T(TKEY("quality_low"), "Low (quarter resolution, 12 + 12 steps)"),
+		T(TKEY("quality_medium"), "Medium (half resolution, 16 + 16 steps)"),
+		T(TKEY("quality_high"), "High (half resolution, 24 + 24 steps)"),
+		T(TKEY("quality_ultra"), "Ultra (half resolution, 40 + 32 steps)")
 	};
 	settings.Quality = std::clamp(settings.Quality, 0, kQualityCount - 1);
 	ImGui::Combo(T(TKEY("quality"), "Quality"), &settings.Quality, qualities, kQualityCount);
@@ -483,6 +521,7 @@ void LightShafts::DrawDebugSection()
 	ImGui::Text("%s: %.1f", T(TKEY("debug_elevation"), "Light elevation (degrees)"), lightElevation);
 	ImGui::Text("%s: %.1f", T(TKEY("debug_view_angle"), "Light from view centre (degrees)"), lightViewAngle);
 	ImGui::Text("%s: %.3f", T(TKEY("debug_fade"), "Strength after elevation and view fades"), effectiveStrength);
+	ImGui::Text("%s: %.2f", T(TKEY("debug_screen_weight"), "Distant rays taken from the screen"), screenWeight);
 }
 
 void LightShafts::LoadSettings(json& o_json)
@@ -503,6 +542,7 @@ void LightShafts::LoadSettings(json& o_json)
 	sanitize(settings.DistantLength, defaults.DistantLength, kMinDistantLength, kMaxDistantLength);
 	sanitize(settings.HighSunStrength, defaults.HighSunStrength, 0.0f, 1.0f);
 	sanitize(settings.VeilRemoval, defaults.VeilRemoval, 0.0f, 1.0f);
+	sanitize(settings.SilhouetteRays, defaults.SilhouetteRays, 0.0f, 1.0f);
 	settings.Quality = std::clamp(settings.Quality, 0, kQualityCount - 1);
 	settings.DebugView = std::clamp(settings.DebugView, 0, kDebugViewCount - 1);
 }

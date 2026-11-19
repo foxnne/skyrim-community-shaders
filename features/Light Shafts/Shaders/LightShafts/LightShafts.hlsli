@@ -9,14 +9,17 @@
 // - near the camera (March.cs.hlsl, near part) from the directional shadow cascades, against the share of lit air
 //   around the camera (Prepare.cs.hlsl). Open ground: everything is lit, the expectation is 1, nothing is added.
 //   Under a canopy: most air is dark, the lit gaps stand out.
-// - far away (far part) from the cloud shadow volume against the mean cloud transmittance of the whole sky, and
-//   from the terrain shadow against the terrain shadow to both sides of the sample. Clear or overcast sky: nothing.
-//   Broken cloud: the lit air under the gaps.
+// - far away, while the light is on or near the screen, from the screen itself (Mask.cs.hlsl): how open the sky is
+//   along the line from the pixel to the light, against how open the sky is on the whole. Clear or overcast sky:
+//   nothing. Broken cloud: rays from the gaps. This works at any elevation of the light, sunrise and sunset included.
+// - far away, while the light is off the screen, from the cloud shadow volume against the mean cloud transmittance
+//   of the sky, and from the terrain shadow against the terrain shadow to both sides of the sample. The volume only
+//   holds the shadows of cloud within a few kilometers, so this part needs the light well above the horizon.
 // What is left is integrated with a weight that falls off with distance, turned into an optical depth by Density and
 // lit with the light's colour after the atmosphere (the transmittance LUT), a phase function that concentrates it
 // toward the light, and a ceiling. Nothing is accumulated over frames.
 //
-// Passes: Prepare (one thread) -> March (half or quarter resolution) -> Resolve (same) -> Composite (full).
+// Passes: Mask (quarter resolution) -> Prepare (one thread) -> March (half or quarter resolution) -> Resolve (same) -> Composite (full).
 //
 // Include after Common/ViewAtmosphere.hlsli, PhysicalSky/Common.hlsli and ViewAtmosphere/MediumLighting.hlsli.
 
@@ -26,8 +29,10 @@ namespace LightShafts
 {
 	// Output of Prepare. Texel 0: rgb light colour at the camera after the atmosphere. Texel 1: x share of lit air
 	// around the camera (cascades), y mean cloud transmittance toward the light, z terrain light and w cloud
-	// transmittance at the camera.
+	// transmittance at the camera. Texel 2: x how open the sky is on the whole screen.
 	Texture2D<float4> Prepared : register(t44);
+	// Output of Mask. x: light that gets through from that part of the screen, y: share of it that is sky.
+	Texture2D<float2> Mask : register(t47);
 
 	SamplerComparisonState ShadowSampler : register(s1);
 
@@ -118,16 +123,22 @@ namespace LightShafts
 		return lerp(1.0, transmittance, CloudOcclusion);
 	}
 
-	// Cloud transmittance toward the light at an absolute point. Outside the shadow volume it is the mean, so that
-	// air there neither stands out nor goes dark.
-	float CloudLight(float3 absolute, float meanStored)
+	// Cloud transmittance toward the light at an absolute point: the shadow volume where it holds the whole path
+	// through the cloud, the mean of the sky where it does not, so that air there neither stands out nor goes dark.
+	float CloudLight(float3 absolute)
 	{
 		if (!CloudsActive())
 			return 1.0;
-		float3 relative = absolute;
-		relative.z -= SharedData::physSkyData.zBottom;
-		const float4 shadowSample = PhysSky::GetShadowVolumeSample(relative, PhysSky::GetCloudShadowLightDirection());
-		return CloudApplied(saturate(CloudShadowVolume::SampleTransmittance(PhysSky::TexShadowVolume, LinearSampler, shadowSample, meanStored)));
+		return CloudApplied(saturate(PhysSky::GetDirlightTransmittance(absolute, LinearSampler, true).x));
+	}
+
+	// Mask at a screen position (0..1, undistorted by dynamic resolution).
+	float2 SampleMask(float2 screenUv)
+	{
+		uint2 size;
+		Mask.GetDimensions(size.x, size.y);
+		const float2 active = max(floor(float2(size) * FrameBuffer::DynamicResolutionParams1.xy), 1.0);
+		return Mask.SampleLevel(LinearSampler, clamp(screenUv * active, 0.5, active - 0.5) / float2(size), 0);
 	}
 }
 

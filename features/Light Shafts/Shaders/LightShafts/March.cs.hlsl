@@ -3,7 +3,7 @@
 // Near part, from the camera to NearRange or the surface: the directional cascades (trees, buildings, rocks), one
 // compared read per step. Steps are placed so that each stands for the same share of the distance weight
 // exp(-t / NearLength). The cloud and terrain light change slowly over this stretch and are read at its two ends.
-// A step adds what the cascades give over the share of lit air around the camera.
+// A step adds what the cascades give over the share of lit air around the camera at the step's height.
 //
 // Distant part, light on or near the screen: the mask of open sky along the line from the pixel to the light,
 // against how open the sky is on the whole. The shadow of something far away falls on the air of a view ray along
@@ -76,7 +76,7 @@ RWTexture2D<float> ShaftsDepthOut : register(u1);  // the device depth each outp
 	}
 
 	const float4 prepared = LightShafts::Prepared[uint2(1, 0)];
-	const float ambient = prepared.x;
+	const float4 ambientBands = LightShafts::Prepared[uint2(3, 0)];
 	const float cloudMean = prepared.y;
 	const float3 camera = FrameBuffer::CameraPosAdjust.xyz;
 	const float jitter = LightShafts::Bayer(pixel);
@@ -87,7 +87,6 @@ RWTexture2D<float> ShaftsDepthOut : register(u1);  // the device depth each outp
 	const float nearReach = 1.0 - exp(-nearEnd / LightShafts::NearLength);
 	const float surroundStart = prepared.z * prepared.w;
 	const float surroundEnd = LightShafts::TerrainLight(camera + dir * nearEnd, 512.0) * LightShafts::CloudLight(camera + dir * nearEnd);
-	const float expected = LightShafts::VeilRemoval * ambient;
 	float nearSum = 0.0;
 	float litSum = 0.0;
 	float distanceSum = 0.0;
@@ -98,9 +97,10 @@ RWTexture2D<float> ShaftsDepthOut : register(u1);  // the device depth each outp
 		bool covered;
 		float value = LightShafts::CascadeLight(dir * t, light, false, covered);
 		// Past the cascades nothing is known: the air there is worth what is expected, and adds nothing.
+		const float ambient = LightShafts::AmbientShare(ambientBands, dir.z * t);
 		value = covered ? value : ambient;
 		const float surround = lerp(surroundStart, surroundEnd, saturate(t / max(nearEnd, 1.0)));
-		const float contrast = surround * max(value - expected, 0.0);
+		const float contrast = surround * max(value - LightShafts::VeilRemoval * ambient, 0.0);
 		nearSum += contrast;
 		litSum += surround * value;
 		distanceSum += contrast * t;

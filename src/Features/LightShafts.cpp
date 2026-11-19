@@ -242,8 +242,8 @@ bool LightShafts::EnsureResources(uint32_t a_width, uint32_t a_height, uint32_t 
 	if (!constants)
 		constants = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<ShaftData>(), "LightShafts::ShaftData");
 	if (!preparedTextures[0]) {
-		preparedTextures[0] = make(3, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, "LightShafts::Prepared0");
-		preparedTextures[1] = make(3, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, "LightShafts::Prepared1");
+		preparedTextures[0] = make(4, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, "LightShafts::Prepared0");
+		preparedTextures[1] = make(4, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, "LightShafts::Prepared1");
 		lastDrawFrame = UINT32_MAX;
 	}
 	if (!linearSampler || !shadowSampler) {

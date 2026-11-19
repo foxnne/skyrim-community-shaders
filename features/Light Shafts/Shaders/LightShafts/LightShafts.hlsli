@@ -7,8 +7,9 @@
 // the world and asks, at every sample, how much MORE light the air there gets than the air around it is expected
 // to get:
 // - near the camera (March.cs.hlsl, near part) from the directional shadow cascades, against the share of lit air
-//   around the camera (Prepare.cs.hlsl). Open ground: everything is lit, the expectation is 1, nothing is added.
-//   Under a canopy: most air is dark, the lit gaps stand out.
+//   around the camera at the sample's height (Prepare.cs.hlsl). Open ground: everything is lit, the expectation
+//   is 1, nothing is added. Under a canopy: most air among the trunks is dark and the lit gaps stand out, while the
+//   air above the crowns is all lit and adds nothing to the sky seen between them.
 // - far away, while the light is on or near the screen, from the screen itself (Mask.cs.hlsl): how open the sky is
 //   along the line from the pixel to the light, against how open the sky is on the whole. Clear or overcast sky:
 //   nothing. Broken cloud: rays from the gaps. This works at any elevation of the light, sunrise and sunset included.
@@ -29,12 +30,29 @@ namespace LightShafts
 {
 	// Output of Prepare. Texel 0: rgb light colour at the camera after the atmosphere. Texel 1: x share of lit air
 	// around the camera (cascades), y mean cloud transmittance toward the light, z terrain light and w cloud
-	// transmittance at the camera. Texel 2: x how open the sky is on the whole screen.
+	// transmittance at the camera. Texel 2: x how open the sky is on the whole screen. Texel 3: share of lit air
+	// around the camera in four bands of height above it (see AmbientShare).
 	Texture2D<float4> Prepared : register(t44);
 	// Output of Mask. x: light that gets through from that part of the screen, y: share of it that is sky.
 	Texture2D<float2> Mask : register(t47);
 
 	SamplerComparisonState ShadowSampler : register(s1);
+
+	// Middle heights of the four bands the lit share around the camera is taken in, and their edges, as multiples
+	// of AmbientHeight above the camera.
+	static const float4 AmbientCentres = float4(0.5, 2.0, 5.0, 12.0);
+	static const float AmbientEdges[5] = { 0.0, 1.0, 3.0, 7.0, 17.0 };
+
+	// Share of lit air expected at a height above the camera: between the bands, and all lit well above the
+	// highest, where nothing stands in the light.
+	float AmbientShare(float4 bands, float height)
+	{
+		const float4 centres = AmbientCentres * AmbientHeight;
+		float share = lerp(bands.x, bands.y, saturate((height - centres.x) / (centres.y - centres.x)));
+		share = lerp(share, bands.z, saturate((height - centres.y) / (centres.z - centres.y)));
+		share = lerp(share, bands.w, saturate((height - centres.z) / (centres.w - centres.z)));
+		return lerp(share, 1.0, saturate((height - centres.w) / centres.w));
+	}
 
 	// 4 x 4 ordered offsets in [0, 1). Any 4 x 4 window of pixels holds each of the 16 values once, which is what
 	// Resolve averages over.

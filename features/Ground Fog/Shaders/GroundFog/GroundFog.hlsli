@@ -61,6 +61,26 @@ namespace GroundFog
 		float FarBasinRadius;
 		float InvFarBasinDepth;
 		float CloudDarkening;  // how much cloud overhead dims the sky light the fog takes
+		// The near volume: a taller, softer body of fog around the camera, on top of the sheet.
+		float NearExtinction;  // extinction at the ground, per game unit, amount included; 0 = none
+		float NearThickness;   // height at which it has thinned to nothing, game units
+		float NearFalloff;     // density falls by exp(-NearFalloff) over NearThickness, then is cut to reach zero there
+		float NearEnd;         // game units from the camera; fades out over the second half
+		float InvDriftScale;   // patches of the density modifier, per game unit
+		float DriftStrength;
+		float BreathPhase;   // radians, advances with time
+		float NearBreath;    // share by which the near volume's top rises and falls
+		float2 FloorAnchor;  // camera-relative xy of the player
+		float FloorOffset;   // how far the floor the player stands on lies above the fog's ground there, game units
+		float FloorMax;      // visible level floors up to this far above the mapped ground carry the near volume
+		float SoftLength;    // fog fades over this last stretch of a ray that ends on something that is not ground
+		// Burn-off: amounts by time of day for ground the sun has reached, and what ground in terrain shadow keeps.
+		float BurnSunlitNear;
+		float BurnSunlitFar;
+		float BurnShaded;
+		float BurnRetention;  // share of the way from the sunlit to the shaded amount that shadow gives; 0 at night
+		float3 Reserved;
+		float4 FlowWindow;  // reactive flow map: uv = camera-relative xy * z + xy; w = strength, 0 = none
 	};
 
 	Texture2D<float> HeightMap : register(t6);
@@ -200,14 +220,6 @@ namespace GroundFog
 		return TerrainZ(MapUv(xy), log2(radius / MapTexel) + 0.5);
 	}
 
-	// HOOK (later phase): near-camera wind / fluid simulation. A 2D world-space lookup that scales the density,
-	// and later the layer top, where the simulation covers the point; 1 outside it. Called once per march joint
-	// inside the layer with the absolute xy, so a simulation texture needs only its own uv mapping here.
-	float DensityModifier(float2 xyAbs)
-	{
-		return 1.0;
-	}
-
 	// ---------------------------------------------------------------------------------------------------------
 
 	float Hash(int2 cell)
@@ -241,6 +253,60 @@ namespace GroundFog
 			top *= max(1.0 + BankStrength * (bank - 1.0), 0.0);
 		}
 		return max(top, 1.0);
+	}
+
+	// ---------------------------------------------------------------------------------------------------------
+	// Movement of the fog near the camera. Two parts, both functions of world position and time only:
+	// - Flow: where the reactive simulation (GroundFog/FlowSim.cs.hlsl) covers a point, how far things moving
+	//   through the fog have pushed it aside there. It shifts every pattern lookup and thins the fog.
+	// - DensityModifier: patches of thicker and thinner fog carried by the wind.
+	// The pixel pass calls both once per march joint inside the sheet or the near volume.
+
+	// xy: displacement of the fog in game units, z: share of the fog cleared away.
+	Texture2D<float4> FlowMap : register(t8);
+
+	bool InFlowWindow(float2 xy)
+	{
+		const float2 uv = xy * FlowWindow.z + FlowWindow.xy;
+		return FlowWindow.w > 0.0 && all(uv > 0.0) && all(uv < 1.0);
+	}
+
+	float3 Flow(float2 xy)
+	{
+		if (FlowWindow.w <= 0.0)
+			return 0.0;
+		const float2 uv = xy * FlowWindow.z + FlowWindow.xy;
+		const float2 edge = saturate(min(uv, 1.0 - uv) * 8.0);
+		const float inside = edge.x * edge.y;
+		if (inside <= 0.0)
+			return 0.0;
+		return FlowMap.SampleLevel(LinearSampler, uv, 0).xyz * float3(1.0, 1.0, FlowWindow.w) * inside;
+	}
+
+	// HOOK: the density of the fog relative to its mean, at an absolute xy (already shifted by Flow). Today a cheap
+	// procedural stand-in: two octaves of value noise travelling with the wind at different speeds, so patches
+	// drift past and change shape. A fluid simulation's density field replaces the body of this function; the
+	// reactive flow map above is the first piece of that. reach: the size of detail the caller can resolve; the
+	// patches fade to their mean (1) as it grows past them, so distant fog does not flicker.
+	float DensityModifier(float2 xyAbs, float reach)
+	{
+		if (DriftStrength <= 0.0)
+			return 1.0;
+		const float fade = saturate(reach * InvDriftScale - 0.5);
+		if (fade >= 1.0)
+			return 1.0;
+		const float2 p = (xyAbs - WindTravel) * InvDriftScale;
+		const float2 p2 = (xyAbs - 1.7 * WindTravel) * InvDriftScale * 2.3 + 11.9;
+		const float n = smoothstep(0.25, 0.75, 0.62 * ValueNoise(p) + 0.38 * ValueNoise(p2));
+		return 1.0 + DriftStrength * 0.8 * (2.0 * n - 1.0) * (1.0 - fade);
+	}
+
+	// Slow rise and fall of the near volume's top, out of step from place to place.
+	float Breathing(float2 xyAbs)
+	{
+		if (NearBreath <= 0.0)
+			return 1.0;
+		return 1.0 + NearBreath * sin(BreathPhase + 6.2831853 * ValueNoise((xyAbs - WindTravel) * InvDriftScale * 0.25 + 3.1));
 	}
 
 	// More fog in hollows, less on rises: the terrain around the point against the terrain at it.
@@ -279,6 +345,63 @@ namespace GroundFog
 	Profile MakeProfile(float top)
 	{
 		return MakeProfile(top, GroundFill);
+	}
+
+	// The near volume's profile: 1 from -fill to 0, then an exponential lowered and rescaled so that it reaches
+	// exactly zero at top. No step at the top, so the layer has no visible lid from inside or from the side.
+	struct SoftProfile
+	{
+		float fill;
+		float top;
+		float scale;  // e-folding height
+		float cut;    // exp(-top / scale)
+		float norm;   // 1 / (1 - cut)
+	};
+
+	SoftProfile MakeSoftProfile(float top, float fill, float falloff)
+	{
+		SoftProfile profile;
+		profile.fill = fill;
+		profile.top = top;
+		const float f = max(falloff, 0.25);
+		profile.scale = top / f;
+		profile.cut = exp(-f);
+		profile.norm = 1.0 / (1.0 - profile.cut);
+		return profile;
+	}
+
+	float SoftDensity(SoftProfile profile, float h)
+	{
+		if (h < -profile.fill || h > profile.top)
+			return 0.0;
+		return h < 0.0 ? 1.0 : profile.norm * (exp(-h / profile.scale) - profile.cut);
+	}
+
+	// Antiderivative of the density from -fill to x.
+	float SoftFirst(SoftProfile profile, float x)
+	{
+		const float below = clamp(x + profile.fill, 0.0, profile.fill);
+		const float inside = clamp(x, 0.0, profile.top);
+		return below + profile.norm * (profile.scale * OneMinusExp(inside / profile.scale) - profile.cut * inside);
+	}
+
+	// Mean relative density along a ray whose height above the ground runs straight from ha to hb.
+	float SoftLineMean(SoftProfile profile, float ha, float hb)
+	{
+		const float low = min(ha, hb);
+		const float high = max(ha, hb);
+		if (high <= -profile.fill || low >= profile.top)
+			return 0.0;
+		if (high - low < 1.0)
+			return SoftDensity(profile, 0.5 * (low + high));
+		return (SoftFirst(profile, high) - SoftFirst(profile, low)) / (high - low);
+	}
+
+	// Density integrated from h up to the top.
+	float SoftAbove(SoftProfile profile, float h)
+	{
+		const float x = clamp(h, 0.0, profile.top);
+		return profile.norm * (profile.scale * (exp(-x / profile.scale) - profile.cut) - profile.cut * (profile.top - x));
 	}
 
 	// Relative density at height h above the ground: 1 from -fill to 0, exp(-h / scale) up to top, 0 above. Space

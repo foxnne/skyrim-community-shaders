@@ -265,6 +265,12 @@ namespace GroundFog
 	// xy: displacement of the fog in game units, z: share of the fog cleared away.
 	Texture2D<float4> FlowMap : register(t8);
 
+	bool InFlowWindow(float2 xy)
+	{
+		const float2 uv = xy * FlowWindow.z + FlowWindow.xy;
+		return FlowWindow.w > 0.0 && all(uv > 0.0) && all(uv < 1.0);
+	}
+
 	float3 Flow(float2 xy)
 	{
 		if (FlowWindow.w <= 0.0)

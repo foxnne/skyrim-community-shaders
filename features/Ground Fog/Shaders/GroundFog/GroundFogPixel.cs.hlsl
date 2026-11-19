@@ -85,6 +85,22 @@ namespace GroundFog
 		float shade;   // share-weighted terrain shade, for the Layer Mask view
 	};
 
+	// Placement terms that change over tens of meters, not from joint to joint: read again only after the ray has
+	// gone on by SlowStep or 15 % of the distance, and held in between. The segment integrals average them anyway.
+	struct Slow
+	{
+		float tShade;  // where the terrain shade was last read; negative: not yet
+		float shade;
+		float tAround;  // the same for the terrain averaged around the point
+		float around;
+	};
+	static const float SlowStep = 420.0;
+
+	bool Stale(float last, float t)
+	{
+		return last < 0.0 || t - last > max(SlowStep, 0.15 * t);
+	}
+
 	// The pixel's ray and what its end says about the ground.
 	struct Ray
 	{
@@ -165,10 +181,10 @@ namespace GroundFog
 		return ray.surfaceOffset * saturate((t - ray.tBlend) / max(ray.blendLength, 1e-3));
 	}
 
-	// Hollows hold more, rises less. One read of the terrain averaged around the point.
-	float Basin(float2 xy, float terrain)
+	// Hollows hold more, rises less: the terrain averaged around the point against the terrain at it.
+	float Basin(float around, float terrain)
 	{
-		const float hollow = clamp((GroundAround(xy, BasinRadius) - terrain) * InvBasinDepth, -1.0, 1.0);
+		const float hollow = clamp((around - terrain) * InvBasinDepth, -1.0, 1.0);
 		return clamp(1.0 + BasinStrength * hollow, 0.0, 1.0 + BasinStrength);
 	}
 
@@ -215,7 +231,7 @@ namespace GroundFog
 	}
 
 	// Fills in what a joint needs to hold fog. Joints clear of all layers cost nothing more than their ground read.
-	void Shade(inout Joint joint, float2 xy, GroundSample ground, float reach, inout uint taps)
+	void Shade(inout Joint joint, float2 xy, GroundSample ground, float reach, inout Slow slow, inout uint taps)
 	{
 		const float2 xyAbs = xy + FrameBuffer::CameraPosAdjust.xy;
 		const float sheetFade = 1.0 - smoothstep(FadeStart, FadeEnd, joint.t);
@@ -235,16 +251,24 @@ namespace GroundFog
 		if (!joint.sheet.inside && !joint.valley.inside && !joint.near.inside)
 			return;
 		const float coverage = MapCoverage(MapUv(xy));
-		joint.shade = TerrainShade(xyAbs, ground.z + 70.0, taps);
+		if (BurnRetention > 0.0 && Stale(slow.tShade, joint.t)) {
+			slow.shade = TerrainShade(xyAbs, ground.z + 70.0, taps);
+			slow.tShade = joint.t;
+		}
+		joint.shade = slow.shade;
 		if (joint.sheet.inside || joint.near.inside) {
 			// Shared by the sheet and the near volume: they are one body of fog, thin far away and tall close by.
 			float place = coverage * lerp(1.0, WaterPreference, ground.water) * BurnOff(BurnSunlitNear, joint.shade);
 			if (place > 0.0 && BasinStrength > 0.0) {
-				place *= Basin(xy, ground.terrain);
-				++taps;
+				if (Stale(slow.tAround, joint.t)) {
+					slow.around = GroundAround(xy, BasinRadius);
+					slow.tAround = joint.t;
+					++taps;
+				}
+				place *= Basin(slow.around, ground.terrain);
 			}
 			float3 flow = 0.0;
-			if (FlowWindow.w > 0.0) {
+			if (InFlowWindow(xy)) {
 				flow = Flow(xy);
 				++taps;
 			}
@@ -271,7 +295,7 @@ namespace GroundFog
 	}
 
 	// Reads the ground under a point of the ray and fills in the joint.
-	Joint MakeJoint(Ray ray, float t, float reach, inout uint taps)
+	Joint MakeJoint(Ray ray, float t, float reach, inout Slow slow, inout uint taps)
 	{
 		const float2 xy = ray.dir.xy * t;
 		const GroundSample ground = GroundAt(xy, reach);
@@ -282,7 +306,7 @@ namespace GroundFog
 		const float z = ray.camZ + ray.dir.z * t;
 		joint.h = z - joint.ground;
 		joint.hn = z - ground.z - FloorAt(ray, t);
-		Shade(joint, xy, ground, reach, taps);
+		Shade(joint, xy, ground, reach, slow, taps);
 		return joint;
 	}
 
@@ -532,7 +556,10 @@ namespace GroundFog
 	const float2 uvStart = GroundFog::MapUv(0.0);
 	const float2 uvStep = dir.xy * GroundFog::MapScaleOffset.xy;
 
-	GroundFog::Joint a = GroundFog::MakeJoint(ray, 0.0, GroundFog::StepMin, taps);
+	GroundFog::Slow slow;
+	slow.tShade = slow.tAround = -1.0;
+	slow.shade = slow.around = 0.0;
+	GroundFog::Joint a = GroundFog::MakeJoint(ray, 0.0, GroundFog::StepMin, slow, taps);
 
 	GroundFog::Seen seen;
 	seen.tau = seen.share = seen.t = seen.z = seen.above = seen.valley = seen.shade = 0.0;
@@ -561,7 +588,7 @@ namespace GroundFog
 			if (from >= tEnd - 0.01)
 				break;
 			if (from > a.t)
-				a = GroundFog::MakeJoint(ray, from, max(from * GroundFog::StepGrowth, GroundFog::StepMin), taps);
+				a = GroundFog::MakeJoint(ray, from, max(from * GroundFog::StepGrowth, GroundFog::StepMin), slow, taps);
 		}
 
 		// The next joint: where the ray next crosses the texel grid of the ground it is over. The grid is fixed in
@@ -582,7 +609,7 @@ namespace GroundFog
 			if (ray.tFloorEnd > a.t + 0.01)
 				tb = min(tb, ray.tFloorEnd);
 		}
-		const GroundFog::Joint b = GroundFog::MakeJoint(ray, tb, max(tb * GroundFog::StepGrowth, GroundFog::StepMin), taps);
+		const GroundFog::Joint b = GroundFog::MakeJoint(ray, tb, max(tb * GroundFog::StepGrowth, GroundFog::StepMin), slow, taps);
 
 		const float scale = a.t >= tSoft - 0.01 ? softScale : 1.0;
 		GroundFog::IntegrateNear(seen, a, b, scale);

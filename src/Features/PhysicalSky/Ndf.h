@@ -108,9 +108,15 @@ struct NdfGenerationParameters
 	uint32_t hasLocalMask = 0;
 	uint32_t imported = 0;
 	uint32_t preview = 0;
-	float3 padding = {};
+	// Heavy sky: how much a full top type cancels the base lift, so thick columns hang lower (0 = not at all).
+	float baseReliefThickness = 0.f;
+	float2 padding = {};
+	// Heavy sky: lifts the cloud base by its own noise (fraction of the height span). Output interval z == w is off.
+	NdfNoiseLayer baseRelief = { .noise = 1, .range = { -0.9f, 0.2f, 0.f, 0.f } };
 };
-static_assert(sizeof(NdfGenerationParameters) == 384);
+static_assert(sizeof(NdfGenerationParameters) == 432);
+static_assert(offsetof(NdfGenerationParameters, baseReliefThickness) == 372);
+static_assert(offsetof(NdfGenerationParameters, baseRelief) == 384);
 
 struct ProceduralNdfSettings
 {
@@ -255,6 +261,8 @@ struct LowCloudSettings
 	float bottomSoftnessHeight = 0.68f;
 	float topExpansionScale = 1.f;
 	float densityScale = 0.75f;
+	// Heavy sky: depth in metres of the rounded pouches hung from the base by the shape noise. 0 = off.
+	float baseBillowHeight = 0.f;
 
 	float2 GetNdfAltitudeRangeKm() const;
 	float GetCurvatureRadiusKm() const;
@@ -334,6 +342,10 @@ struct CloudLightingSettings
 	float scatterDensityThreshold = 0.001f;
 	float scatterDensityPower = 1.f;
 	float cirrusLightThickness = 200.f;
+	// Heavy sky: light diffused down through the column above each sample. Strength 0 = off.
+	float deckLight = 0.f;
+	float deckHalfDepth = 400.f;
+	float deckHorizonLight = 0.f;
 };
 
 struct CloudWindSettings

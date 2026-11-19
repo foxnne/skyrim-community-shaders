@@ -60,7 +60,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	NdfGenerationParameters,
 	primary, secondary, coverageGain, modeling, modelingGain, heightVariation,
 	heightAuxiliaryRange, bottomTypeRange, baseHeight, bottomTypeExponent, heightFromCoverage,
-	localBlendMode, localModelingWeight, localHeightWeight, localWindScale, windOffset)
+	localBlendMode, localModelingWeight, localHeightWeight, localWindScale, windOffset,
+	baseRelief, baseReliefThickness)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	ProceduralNdfSettings,
@@ -94,7 +95,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	bottomSoftness,
 	bottomSoftnessHeight,
 	topExpansionScale,
-	densityScale)
+	densityScale,
+	baseBillowHeight)
 
 void to_json(nlohmann::json& j, const CirrusSettings& value)
 {
@@ -131,7 +133,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	ambientStrength,
 	scatterDensityThreshold,
 	scatterDensityPower,
-	cirrusLightThickness)
+	cirrusLightThickness,
+	deckLight,
+	deckHalfDepth,
+	deckHorizonLight)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	CloudWindSettings,
@@ -1318,6 +1323,9 @@ void PhysicalSky::DrawLowCloudSection()
 		ImGui::SliderFloat(T(TKEY("cloud_bottom_softness"), "Bottom Softness"), &low.bottomSoftness, 0.f, 1.f, "%.3f");
 		ImGui::SliderFloat(T(TKEY("cloud_bottom_softness_height"), "Bottom Softness Height"), &low.bottomSoftnessHeight, 0.f, 1.f, "%.3f");
 		ImGui::SliderFloat(T(TKEY("cloud_top_expansion"), "Top Expansion"), &low.topExpansionScale, 0.f, 1.f, "%.3f");
+		ImGui::SliderFloat(T(TKEY("cloud_base_billow_height"), "Base Billow Height"), &low.baseBillowHeight, 0.f, 400.f, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextWrapped("%s", T(TKEY("cloud_base_billow_height_desc"), "Hangs rounded pouches from the cloud base: the base starts up to this many meters higher where the shape noise is low. Gives a closed deck a billowed underside. Zero is off and leaves the base unchanged."));
 		if (ImGui::TreeNode(T(TKEY("cloud_local_section"), "Local Cloud"))) {
 			Util::Text::WrappedSecondary("%s", T(TKEY("cloud_local_desc"),
 												   "A single authored cloud map placed in the world for hero shapes; it replaces the weather map inside its rectangle."));
@@ -1405,6 +1413,17 @@ void PhysicalSky::DrawCloudLightingSection()
 		ImGui::SliderFloat(T(TKEY("cloud_ambient_strength"), "Ambient Response Strength"), &lighting.ambientStrength, 0.f, 8.f, "%.3f");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextWrapped("%s", T(TKEY("cloud_shared_ambient_desc"), "Sky and ground radiance propagate through a directional cloud volume. Scattering follows droplet size and albedo; cloud density controls occlusion. Ground radiance comes from the reflection cubemap bottom face, with atmospheric transport and a directional ambient fallback. Strength 1 uses the medium response. The light field updates progressively. Cirrus uses its thin-layer response."));
+
+		ImGui::SeparatorText(T(TKEY("cloud_lighting_deck"), "Light Through The Deck"));
+		ImGui::SliderFloat(T(TKEY("cloud_deck_light"), "Deck Light Strength"), &lighting.deckLight, 0.f, 4.f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextWrapped("%s", T(TKEY("cloud_deck_light_desc"), "Adds the sunlight and skylight that diffuse down through the whole cloud column above each point, so the underside of a closed deck is bright under thin cloud and dark under thick cloud. One is the physical amount for the chosen half depth. Zero is off and leaves the lighting unchanged."));
+		ImGui::SliderFloat(T(TKEY("cloud_deck_half_depth"), "Deck Half Depth"), &lighting.deckHalfDepth, 10.f, 4000.f, "%.0f m", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextWrapped("%s", T(TKEY("cloud_deck_half_depth_desc"), "Meters of cloud above a point that halve the light reaching it. Smaller values darken thick columns faster and raise the contrast between thin and thick cloud."));
+		ImGui::SliderFloat(T(TKEY("cloud_deck_horizon_light"), "Deck Horizon Light"), &lighting.deckHorizonLight, 0.f, 0.95f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextWrapped("%s", T(TKEY("cloud_deck_horizon_light_desc"), "Counts less of the column for cloud far from the camera, reaching this fraction at 6 km, so the deck brightens toward the horizon. An artistic control."));
 
 		if (ImGui::TreeNode(T(TKEY("cloud_source_details"), "Low Cloud Source Integration"))) {
 			ImGui::SliderFloat(T(TKEY("cloud_scatter_density_threshold"), "Scattering Density Threshold"), &lighting.scatterDensityThreshold, 0.001f, 1.f, "%.3f 1/m");

@@ -288,6 +288,37 @@ float CloudLightOpticalDepth(float3 pos, float3 viewDir, NDFInfo ndf, float exti
 	return TraceCloudLighting(pos, viewDir, ndf, extinction, viewDistance, minimumMip, CloudTransportExtinction(ndf)) * VolumetricCloudBuffer[0].sunExtinction;
 }
 
+// foxnne heavy sky: light that has diffused down through the whole column above the sample. The local light march
+// only sees 120-240 m toward the sun and the ambient grid has cells of 125 m to 1 km, so under a closed deck neither
+// can tell a thin column from a thick one. The column above is taken from the weather map values the sample already
+// carries (no extra fetch): the top type sets how much of the slab the column fills (fit of NubisVerticalProfile:
+// type 0.07 ends at h 0.2, 0.2 at 0.4, 0.5 at 0.65, 1.0 at 0.97), the height map sets the span.
+//   transmission = 2 ^ -(metres of cloud above / halfDepth)      thin = bright, thick = dark
+// It is faded in by the part of the local light path that is blocked, so sunlit tops and edges are not lit twice.
+float3 CloudDeckLight(float3 pos, NDFInfo ndf, float3 sunlight, float albedo, float blockedDepth, float viewOpacity)
+{
+	const VolumetricCloudData info = VolumetricCloudBuffer[0];
+	const float fill = 0.97 * pow(saturate(ndf.top_type), 0.55);
+	const float spanMeters = max(ndf.altitude.y - ndf.altitude.x, 0.0) * GAME_UNIT_TO_M;
+	float above = max(fill - ndf.height_fraction, 0.0) * spanMeters * saturate(ndf.coverage);
+	// Art control, not transport: thin the counted column with horizontal distance so the far deck, seen at a
+	// grazing angle above the horizon, reads lighter than the deck overhead. Depends on position only (no view
+	// direction), so it does not change when the camera turns.
+	const float2 offset = (pos.xy - FrameBuffer::CameraPosAdjust.xy) * GAME_UNIT_TO_M;
+	above *= 1.0 - info.heavySky.w * saturate(dot(offset, offset) * (1.0 / (6000.0 * 6000.0)));
+	const float transmission = exp2(-above / info.heavySky.y);
+	const float blocked = 1.0 - exp(-blockedDepth);
+	// Lambertian exit radiance of the light falling on the deck top: direct beam on a horizontal surface plus the
+	// sky's irradiance / pi.
+	const float3 incident = sunlight * (max(info.dirlightDir.z, 0.0) * RCP_PI) + SampleCloudAmbientRadiance();
+	// Placed storms and voxel clouds keep their own lighting models.
+	float weatherWeight = 1.0 - ndf.stormBlend;
+#ifdef CLOUD_VOXELS
+	weatherWeight -= ndf.voxelBlend;
+#endif
+	return (info.cloudLightingScale * info.heavySky.x * albedo * transmission * blocked * viewOpacity * saturate(weatherWeight)) * incident;
+}
+
 float3 ShadeCloudLighting(float3 pos, NDFInfo ndf, float extinction, float viewDepth, float viewOpacity, float phase, float opticalDepth, float multipleScattering, float externalSunTransmission)
 {
 	const VolumetricCloudData info = VolumetricCloudBuffer[0];
@@ -303,7 +334,11 @@ float3 ShadeCloudLighting(float3 pos, NDFInfo ndf, float extinction, float viewD
 	float multiple = 0.0;
 	[branch] if (info.msStrength > 0.0 && albedo > 0.0)
 		multiple = info.msStrength * albedo * multipleScattering * exp(-opticalDepth * transportExtinction);
-	return info.cloudLightingScale * sunlight * externalSunTransmission * (directional * scatterAmount + multiple * viewOpacity);
+	float3 lit = info.cloudLightingScale * sunlight * externalSunTransmission * (directional * scatterAmount + multiple * viewOpacity);
+	// Weather-map cloud only: middle-cloud materials carry no column (in_layer is false for them).
+	[branch] if (info.heavySky.x > 0.0 && ndf.in_layer)
+		lit += CloudDeckLight(pos, ndf, sunlight * externalSunTransmission, albedo, opticalDepth * transportExtinction, viewOpacity);
+	return lit;
 }
 
 #ifdef CLOUD_AP_SHADOW

@@ -242,6 +242,10 @@ static void DrawNdfParameters(NdfGenerationParameters& parameters)
 			parameters.heightFromCoverage = fromCoverage ? 1u : 0u;
 	}
 	DrawNdfLayer(T(TKEY("ndf_bottom_height_variation"), "Bottom height variation"), parameters.heightVariation, true);
+	DrawNdfLayer(T(TKEY("ndf_base_relief"), "Base relief"), parameters.baseRelief, true);
+	ImGui::SliderFloat(T(TKEY("ndf_base_relief_thickness"), "Base relief: thick columns hang lower"), &parameters.baseReliefThickness, 0.f, 1.f, "%.3f");
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::TextWrapped("%s", T(TKEY("ndf_base_relief_desc"), "Base relief lifts the cloud base by its own smoothed noise, as a fraction of the height span, so a fully closed deck has shelves and billows underneath. The output interval is the lift at the low and high end of the input interval; equal values switch it off. This slider cancels the lift under tall columns so they hang lower."));
 	ImGui::DragFloat2(T(TKEY("ndf_weather_offset"), "Weather offset (m)"), &parameters.windOffset.x, 1.f);
 }
 
@@ -471,7 +475,7 @@ bool NdfManager::UpdateNdf(const NdfSettings& settings, TextureManager& textures
 	data.preview = static_cast<uint32_t>(preview);
 	if (preview && !texPreview)
 		texPreview = CreateNdfTexture(width, DXGI_FORMAT_R16G16B16A16_FLOAT, "PhysicalSky::NdfPreview", false, height);
-	for (auto* layer : { &data.primary, &data.secondary, &data.coverageGain, &data.modeling, &data.modelingGain, &data.heightVariation }) {
+	for (auto* layer : { &data.primary, &data.secondary, &data.coverageGain, &data.modeling, &data.modelingGain, &data.heightVariation, &data.baseRelief }) {
 		layer->noise = std::min(layer->noise, 4u);
 		layer->frequency = FiniteClamp(layer->frequency, 0.f, 64.f, 1.f);
 		layer->exponent = FiniteClamp(layer->exponent, 0.01f, 8.f, 1.f);
@@ -494,6 +498,7 @@ bool NdfManager::UpdateNdf(const NdfSettings& settings, TextureManager& textures
 	data.windOffset.x = FiniteClamp(data.windOffset.x, -1e7f, 1e7f, 0.f);
 	data.windOffset.y = FiniteClamp(data.windOffset.y, -1e7f, 1e7f, 0.f);
 	data.hasLocalMask = sources[6] ? 1u : 0u;
+	data.baseReliefThickness = FiniteClamp(data.baseReliefThickness, 0.f, 1.f, 0.f);
 	data.padding = {};
 	auto previousData = generatedData;
 	previousData.preview = data.preview;

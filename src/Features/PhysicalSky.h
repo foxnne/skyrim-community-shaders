@@ -491,12 +491,13 @@ struct PhysicalSky final : public Feature
 		float2 noisePadding;  // Previous curvature radius, weather-history refresh weight.
 		float4 middleLayer;
 		float4 middleShape;
+		float4 heavySky;  // deck light strength, deck half depth (m), base billow height (m), horizon thinning
 		std::array<float4, kCloudMsCalibrationSize> msCalibration;
 		float4 middleCells;
 		float4 middleBands;
 		float4 middleBandShape;
 	};
-	static_assert(sizeof(VolumetricCloudCB) == 1328);
+	static_assert(sizeof(VolumetricCloudCB) == 1344);
 	static_assert(offsetof(VolumetricCloudCB, dirlightDir) == 48);
 	static_assert(offsetof(VolumetricCloudCB, previousCamera) == 64);
 	static_assert(offsetof(VolumetricCloudCB, lowNdfFrequency) == 128);
@@ -508,10 +509,11 @@ struct PhysicalSky final : public Feature
 	static_assert(offsetof(VolumetricCloudCB, lowCloudPhase) == 416);
 	static_assert(offsetof(VolumetricCloudCB, stormCount) == 432);
 	static_assert(offsetof(VolumetricCloudCB, middleLayer) == 464);
-	static_assert(offsetof(VolumetricCloudCB, msCalibration) == 496);
-	static_assert(offsetof(VolumetricCloudCB, middleCells) == 1280);
-	static_assert(offsetof(VolumetricCloudCB, middleBands) == 1296);
-	static_assert(offsetof(VolumetricCloudCB, middleBandShape) == 1312);
+	static_assert(offsetof(VolumetricCloudCB, heavySky) == 496);
+	static_assert(offsetof(VolumetricCloudCB, msCalibration) == 512);
+	static_assert(offsetof(VolumetricCloudCB, middleCells) == 1296);
+	static_assert(offsetof(VolumetricCloudCB, middleBands) == 1312);
+	static_assert(offsetof(VolumetricCloudCB, middleBandShape) == 1328);
 	eastl::unique_ptr<ConstantBuffer> volCloudCb = nullptr;
 	eastl::unique_ptr<ConstantBuffer> cloudDispatchCb;
 	eastl::unique_ptr<Texture2D> texVolStormMotion, texVolCubeStormMotion;

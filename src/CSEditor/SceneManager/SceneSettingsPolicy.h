@@ -50,6 +50,7 @@ namespace SceneSettingsPolicy
 		{ "PhysicalSky", "cloudMap", "procedural", "parameters", "modelingGain", "noise" },
 		{ "PhysicalSky", "cloudMap", "procedural", "parameters", "modelingGain", "exponent" },
 		{ "PhysicalSky", "cloudMap", "procedural", "parameters", "heightVariation", "noise" },
+		{ "PhysicalSky", "cloudMap", "procedural", "parameters", "baseRelief", "noise" },
 		// Debug visualisation, never a look
 		{ "LightLimitFix", "EnableLightsVisualisation" },
 		{ "LightLimitFix", "LightsVisualisationMode" },

@@ -34,7 +34,9 @@ cbuffer CB : register(b1)
 	uint hasLocalMask;
 	uint imported;
 	uint preview;
-	float3 padding;
+	float baseReliefThickness;
+	float2 padding;
+	NoiseLayer baseRelief;
 };
 
 Texture2D<float4> Noise0 : register(t0);
@@ -200,5 +202,16 @@ void StoreMaps(uint2 tid, float2 height, float3 model, float first, float second
 		variation = Remap(NoisePower(driver, heightVariation.exponent), heightVariation.range);
 	}
 	height.x += variation;
+	// foxnne heavy sky: lift the cloud base with its own noise, so a closed deck (coverage 1 everywhere, which
+	// flattens the coverage-driven variation above) still has a shelf-and-billow underside. The driver is not
+	// coverage, so it cannot draw bands along coverage contours, and it is read two mips coarser than the other
+	// layers so the base slope stays shallow. Thick columns (high top type) are lifted less and hang lower.
+	// Output interval z == w leaves the map untouched.
+	if (baseRelief.range.z != baseRelief.range.w) {
+		const float2 reliefUv = ((baseRelief.offset - wind) + uv) * baseRelief.frequency;
+		const float shape = NoisePower(saturate((SampleNoise(baseRelief.noise, reliefUv, baseRelief.frequency * 4.0, size) * 2.0 - 1.0 - baseRelief.range.x) / (baseRelief.range.y - baseRelief.range.x)), baseRelief.exponent);
+		const float lift = max(lerp(baseRelief.range.z, baseRelief.range.w, shape), 0.0) * (1.0 - baseReliefThickness * saturate(model.g));
+		height.x = min(height.x + lift, max(height.x, height.y - 0.05));
+	}
 	StoreMaps(tid, height, model, first, second, gain, typeGain, variation);
 }

@@ -1238,6 +1238,11 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 			0.f,
 			Util::Units::GAME_UNIT_TO_M / (std::isfinite(middle.detailScale) ? std::clamp(middle.detailScale, 200.f, 4000.f) : 256.f),
 			static_cast<float>(std::min(middle.detailMode, 1u)) },
+		// Neutral at the defaults: strength 0 and billow height 0 skip the shader branches.
+		.heavySky = { std::isfinite(lighting.deckLight) ? std::clamp(lighting.deckLight, 0.f, 4.f) : 0.f,
+			std::isfinite(lighting.deckHalfDepth) ? std::clamp(lighting.deckHalfDepth, 10.f, 4000.f) : 400.f,
+			std::isfinite(low.baseBillowHeight) ? std::clamp(low.baseBillowHeight, 0.f, 400.f) : 0.f,
+			std::isfinite(lighting.deckHorizonLight) ? std::clamp(lighting.deckHorizonLight, 0.f, 0.95f) : 0.f },
 		.middleCells = { std::isfinite(middle.cellFrequency) ? std::clamp(middle.cellFrequency, .25f, 16.f) : 2.f,
 			std::isfinite(middle.cellStrength) ? std::clamp(middle.cellStrength, 0.f, 1.f) : .9f,
 			std::isfinite(middle.stratusCellStrength) ? std::clamp(middle.stratusCellStrength, 0.f, 1.f) : .1f,

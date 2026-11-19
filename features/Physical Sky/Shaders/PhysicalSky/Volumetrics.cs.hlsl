@@ -138,6 +138,7 @@ struct VolumetricCloudData
 	float2 noisePadding;  // previous curvature radius, weather-history refresh weight
 	float4 middleLayer;   // bottom/top (game units), extinction/metre, weather UV/game unit
 	float4 middleShape;   // edge softness, reserved, detail UV/game unit, 3D detail
+	float4 heavySky;      // deck light strength, deck half depth (m), base billow height (m), horizon thinning
 };
 
 cbuffer VolumetricCloudConstants : register(b1)
@@ -986,8 +987,17 @@ float sampleCloudDensityFromContext(
 #else
 	const float densityScale = ndf.stormVolume ? lerp(info.lowDensityScale, CloudStorms[ndf.stormIndex].driftDensity.z * ndf.plumeDensity, ndf.stormBlend) : info.lowDensityScale;
 #endif
+	float shapingHeight = ndf.height_fraction;
+	// foxnne heavy sky: hang rounded pouches from the base. The base density ramp starts higher where the shape
+	// noise is low, so the underside gets metre-scale relief from the noise sample this function already has.
+	// Off (0) leaves the height untouched; storm volumes shape their own base.
+	[branch] if (info.heavySky.z > 0.0 && !ndf.stormVolume && ndf.altitude.y > ndf.altitude.x)
+	{
+		const float spanMeters = max((ndf.altitude.y - ndf.altitude.x) * GAME_UNIT_TO_M, 1.0);
+		shapingHeight = max(shapingHeight - (1.0 - sqrt(saturate(noise.r))) * info.heavySky.z / spanMeters, 0.0);
+	}
 	float lightDensity;
-	const float density = ShapeCloudBaseDensity(eroded, ndf.height_fraction, info.bottomDensityWidth, info.bottomDensityPower, ndf.shaping_start, ndf.rawStorm, lightDensity, risingBillows) * densityScale;
+	const float density = ShapeCloudBaseDensity(eroded, shapingHeight, info.bottomDensityWidth, info.bottomDensityPower, ndf.shaping_start, ndf.rawStorm, lightDensity, risingBillows) * densityScale;
 	// The supercell's enhanced shadow density belongs to its anvil model.
 	// An opaque eruption shades the same eroded surface that the view ray sees.
 #ifdef NO_CLOUD_STORMS

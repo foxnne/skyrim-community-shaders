@@ -384,9 +384,10 @@ namespace GroundFog
 	{
 		const float2 xy = ray.dir.xy * t;
 		// Joints whose land is above every water surface around them skip the water read. The bound is read from a
-		// coarse level of the water map and held like the other slow reads.
-		if (HasWaterMap() && Stale(slow.tWater, t)) {
-			slow.waterCeiling = WaterCeiling(MapUv(xy), max(SlowStep, 0.15 * t));
+		// coarse level of the water map and held until the ray has gone on by 30 % of the distance (12 m near the
+		// camera); it is asked for half as far again as it is held.
+		if (HasWaterMap() && (slow.tWater < 0.0 || t - slow.tWater > max(2.0 * SlowStep, 0.3 * t))) {
+			slow.waterCeiling = WaterCeiling(MapUv(xy), max(3.0 * SlowStep, 0.65 * t));
 			slow.tWater = t;
 			++taps;
 		}

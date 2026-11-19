@@ -573,7 +573,7 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 	// morning amount by day. All 1 and no shadow read when the strength is 0.
 	const float burn = slab ? 0.0f : std::clamp(settings.BurnOffStrength, 0.0f, 1.0f);
 	a_data.BurnSunlitNear = std::lerp(1.0f, timeAmount, burn);
-	a_data.BurnSunlitFar = std::lerp(1.0f, std::max(timeAmount, 1.0f), burn);
+	a_data.BurnSunlitFar = std::lerp(1.0f, timeAmount, burn);  // the valley layer burns off with the day as well
 	a_data.BurnShaded = std::lerp(1.0f, settings.MorningAmount, burn);
 	a_data.BurnRetention = settings.VolumeInjection ? 0.0f : burn * settings.ShadowRetention * daylight;
 	a_data.FlowWindow = {};

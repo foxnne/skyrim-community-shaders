@@ -65,10 +65,10 @@ struct GroundFog : Feature
 		float Breathing = 0.15f;     // share by which the near volume's top rises and falls
 		// Burn-off: amount by time of day, and fog kept where terrain shadow holds the sun off.
 		float BurnOffStrength = 1.0f;  // 0 = the time of day and the sun change nothing
-		float ShadowRetention = 0.8f;  // share of the morning amount that ground in terrain shadow keeps by day
+		float ShadowRetention = 0.45f;  // share of the morning amount that ground in terrain shadow keeps by day
 		float MorningAmount = 1.4f;
-		float MiddayAmount = 0.7f;
-		float EveningAmount = 1.0f;
+		float MiddayAmount = 0.1f;
+		float EveningAmount = 0.8f;
 		// Reactive fog: things moving through the fog around the camera push it aside.
 		bool Reactive = true;
 		float ReactiveStrength = 1.0f;  // how much of the fog a mover clears; 0 leaves only the displacement

@@ -580,6 +580,32 @@ RE::NiPoint3 SkySync::CalculateVanillaSunDirection(float hour, float sunrise, fl
 	return dir;
 }
 
+const RE::TESClimate::Timing* SkySync::GetSunPathTiming() const
+{
+	if (!loaded || !settings.Enabled || worldspaceDisabled)
+		return nullptr;
+	const auto sky = globals::game::sky;
+	return sky && sky->currentClimate ? &sky->currentClimate->timing : nullptr;
+}
+
+std::optional<SkySync::SunClock> SkySync::GetSunClock(float hour) const
+{
+	const auto timing = GetSunPathTiming();
+	if (!timing)
+		return std::nullopt;
+	const auto [sunrise, sunset] = GetSunHorizonHours(*timing);
+	const float height = std::clamp(GetSunDirectionAtHour(*timing, hour).z, -1.0f, 1.0f);
+	return SunClock{ .elevationDegrees = DirectX::XMConvertToDegrees(std::asin(height)), .noonHour = (sunrise + sunset) * 0.5f };
+}
+
+std::optional<float> SkySync::GetSunElevationCrossingHour(float elevationDegrees, bool rising) const
+{
+	const auto timing = GetSunPathTiming();
+	if (!timing)
+		return std::nullopt;
+	return GetSunCrossingHour(*timing, DirectX::XMConvertToRadians(elevationDegrees), rising);
+}
+
 float SkySync::GetAlternateSunPhase(float hour, float sunrise, float sunset)
 {
 	const float dayLength = sunset - sunrise;

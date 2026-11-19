@@ -134,6 +134,25 @@ public:
 	/** @brief Blend of the bodies the directional light comes from, for discs and transmittance that should follow the light rather than the shadow direction. */
 	DirectionalLightBlend GetDirectionalLightBlend() const;
 
+	/** @brief Where the sun stands at an hour on the path it is drawn and lit along. */
+	struct SunClock
+	{
+		float elevationDegrees;  // geometric, negative below the horizon
+		float noonHour;          // hour the sun is highest; it is lowest twelve hours away
+	};
+
+	/**
+	 * @brief The sun's elevation at an hour from the active climate and sun path, for callers that sort the day by its light.
+	 * @return nullopt where Sky Sync places no sun: disabled, a disabled worldspace, or no climate yet.
+	 */
+	std::optional<SunClock> GetSunClock(float hour) const;
+
+	/**
+	 * @brief Hour at which the sun crosses an elevation in degrees, rising before its highest point or setting after it.
+	 * @return The hour, which may fall outside 0-24; nullopt where GetSunClock has none.
+	 */
+	std::optional<float> GetSunElevationCrossingHour(float elevationDegrees, bool rising) const;
+
 private:
 	enum class CellFlagExt : uint16_t
 	{
@@ -284,6 +303,9 @@ private:
 
 	/** @brief Re-evaluates worldspaceDisabled; call whenever the current worldspace or the disabled list changes. */
 	void UpdateWorldspaceDisabled() { worldspaceDisabled = IsWorldspaceDisabled(currentCellWorldspace); }
+
+	/** @brief The climate timing the sun follows here, or null where Sky Sync places no sun. */
+	const RE::TESClimate::Timing* GetSunPathTiming() const;
 
 	/** @brief Hours at which the active sun path crosses the horizon, as { sunrise, sunset }. */
 	std::pair<float, float> GetSunHorizonHours(const RE::TESClimate::Timing& timing) const;

@@ -51,6 +51,7 @@ SceneSettingsManager::DebugSnapshot SceneSettingsManager::GetDebugSnapshot() con
 	snapshot.gameHour = GetCurrentGameHour();
 	snapshot.period = GetCurrentPeriod();
 	snapshot.timeOfDayFactors = GetTimeOfDayFactors();
+	snapshot.sunPeriod = GetSunPeriodInfo();
 
 	// Sampled live rather than from the resolver, so an interior still shows what the sky is doing.
 	// Observing must not advance the resolver's weather tracking, which an interior would not.

@@ -23,6 +23,7 @@ using json = nlohmann::json;
 #include "Feature.h"
 #include "Globals.h"
 #include "Presets/UnifiedPresetCatalog.h"
+#include "ScenePeriodSun.h"
 #include "Utils/Form.h"
 #include "Utils/Logging.h"
 
@@ -88,6 +89,13 @@ public:
 	static constexpr float kMaxWeatherTransitionScale = 10.0f;
 	/// Weight of smootherstep over a linear blend; 0 is linear.
 	static constexpr float kDefaultTransitionEase = 1.0f;
+	/// Sun elevations in degrees that bound the periods when they follow the sun, and the width of each blend.
+	/// With the alternate sun path the warm light sits between +10 and 0 and the usable twilight ends near -5.
+	static constexpr float kDefaultSunDayElevation = 10.0f;
+	static constexpr float kSunHorizonElevation = 0.0f;
+	static constexpr float kDefaultSunNightElevation = -5.0f;
+	static constexpr float kDefaultSunBlendDegrees = 3.0f;
+	static constexpr float kMaxSunBlendDegrees = 10.0f;
 
 	/// Global transition controls a preset ships and the user can override.
 	enum class TransitionControl
@@ -96,6 +104,10 @@ public:
 		LocationSeconds,
 		WeatherScale,
 		Ease,
+		SunPeriods,         // 1: periods follow the sun's elevation; 0: the climate's clock timing
+		SunBlendDegrees,    // full width of each blend between sun-driven periods
+		SunDayElevation,    // Sunrise | Day and Day | Sunset boundary
+		SunNightElevation,  // Night | Dawn and Dusk | Night boundary
 		Count
 	};
 	static constexpr size_t kTransitionControlCount = static_cast<size_t>(TransitionControl::Count);
@@ -114,6 +126,10 @@ public:
 		{ "locationTransitionSeconds", 0.0f, kMaxLocationTransitionSeconds, kDefaultLocationTransitionSeconds },
 		{ "weatherTransitionScale", kMinWeatherTransitionScale, kMaxWeatherTransitionScale, kDefaultWeatherTransitionScale },
 		{ "transitionEase", 0.0f, 1.0f, kDefaultTransitionEase },
+		{ "periodsFollowSun", 0.0f, 1.0f, 1.0f },
+		{ "periodSunBlendDegrees", 0.0f, kMaxSunBlendDegrees, kDefaultSunBlendDegrees },
+		{ "periodSunDayElevation", 2.0f, 30.0f, kDefaultSunDayElevation },
+		{ "periodSunNightElevation", -18.0f, -1.0f, kDefaultSunNightElevation },
 	} };
 	static constexpr const TransitionControlSpec& GetTransitionControlSpec(TransitionControl control)
 	{
@@ -372,8 +388,20 @@ public:
 	/// Writes the game hour every reader, including GetCurrentGameHour, resolves against.
 	static void SetGameHour(float hour);
 
-	/** @brief Period starts from the active climate's sky colour timing, see Util::Climate::DayHours. */
+	/**
+	 * @brief Period starts: the hours the sun crosses the period elevations while periods follow the sun,
+	 * else the active climate's sky colour timing, see Util::Climate::DayHours.
+	 */
 	static PeriodStartHours GetPeriodStartHours();
+
+	/// The sun as the sun-driven period model sees it.
+	struct SunPeriodInfo
+	{
+		float elevationDegrees;
+		float risingShare;  // 1 in the morning, 0 in the evening
+	};
+	/** @brief The sun's elevation when it drives the periods here; nullopt while the clock model applies. */
+	std::optional<SunPeriodInfo> GetSunPeriodInfo() const;
 
 	/// Middle of a period's full-weight hours, wrapped into [0, 24): Night runs past midnight.
 	float GetPeriodMidHour(TimeOfDayPeriod period) const;
@@ -888,6 +916,7 @@ public:
 		float gameHour = 0.0f;
 		TimeOfDayPeriod period = TimeOfDayPeriod::Count;
 		std::array<float, kPeriodCount> timeOfDayFactors{};
+		std::optional<SunPeriodInfo> sunPeriod;  // set while the periods follow the sun
 		WeatherBlend weather;
 		std::string currentWeatherName;
 		std::string previousWeatherName;
@@ -1153,8 +1182,17 @@ private:
 		PeriodStartHours starts{};
 		float blendHours = 0.0f;
 	};
-	/** @brief Starts shifted by the applied blend length, which is capped so every shifted period fits it. */
+	/**
+	 * @brief Starts shifted by the applied blend length, which is capped so every shifted period fits it.
+	 * Sun-driven starts are the blend centres already and come back unshifted with no blend length.
+	 */
 	BlendedPeriods GetBlendedPeriods() const;
+	/** @brief Elevation boundaries and blend of the sun-driven period model, from the transition controls. */
+	ScenePeriodSun::Model GetSunPeriodModel() const;
+	/** @brief Weights from the sun's elevation; nullopt while the clock model applies. */
+	std::optional<std::array<float, kPeriodCount>> GetSunPeriodFactors() const;
+	/** @brief Hours the sun crosses the period elevations; nullopt on the clock model or when they leave a period empty. */
+	std::optional<PeriodStartHours> GetSunPeriodStartHours() const;
 	/** @brief The shifted period the current hour is in, the one whose blend out the weights describe. */
 	static PeriodLookup FindBlendPeriod(const BlendedPeriods& blended);
 

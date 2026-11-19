@@ -230,6 +230,14 @@ namespace
 			DrawField(T("cs_editor.debug.current_period", "Current period"), SceneSettingsManager::GetPeriodDisplayName(snapshot.period));
 			DrawField(T("cs_editor.debug.hour_at_last_resolve", "Hour at last resolve"),
 				snapshot.lastHour < 0.0f ? std::string(kMissingValue) : FormatGameHour(snapshot.lastHour));
+			DrawField(T("cs_editor.debug.period_model", "Period model"),
+				std::string(snapshot.sunPeriod ? T("cs_editor.debug.period_model_sun", "sun elevation") :
+												 T("cs_editor.debug.period_model_clock", "clock (climate timing)")));
+			if (snapshot.sunPeriod)
+				DrawField(T("cs_editor.debug.sun_elevation", "Sun elevation"),
+					std::format("{:.2f} deg, {}", snapshot.sunPeriod->elevationDegrees,
+						snapshot.sunPeriod->risingShare >= 0.5f ? T("cs_editor.debug.sun_rising", "rising") :
+																  T("cs_editor.debug.sun_setting", "setting")));
 			ImGui::EndTable();
 		}
 
@@ -509,8 +517,55 @@ void SceneManager::DrawSettings()
 		T("feature.scene_manager.time_of_day_transition_tooltip",
 			"Hours spent blending between time of day periods, kept inside the sky's own colour transitions.\n"
 			"0 switches between periods instantly.\n"
+			"Used by the clock periods only: periods that follow the sun blend by its elevation.\n"
 			"The active preset supplies this until you set your own."),
 		T("feature.scene_manager.time_of_day_transition_reset", "Reset##TimeOfDayTransition"));
+
+	bool periodsFollowSun = GetTransitionControl(TransitionControl::SunPeriods) >= 0.5f;
+	if (ImGui::Checkbox(T("feature.scene_manager.periods_follow_sun", "Periods Follow the Sun"), &periodsFollowSun))
+		SetTransitionControl(TransitionControl::SunPeriods, periodsFollowSun ? 1.0f : 0.0f);
+	Util::AddTooltip(T("feature.scene_manager.periods_follow_sun_tooltip",
+		"Time of day periods come from the sun's elevation on Sky Sync's path: Night below the night elevation,\n"
+		"Dawn and Dusk up to the horizon, Sunrise and Sunset up to the day elevation, Day above it.\n"
+		"Off, or where Sky Sync places no sun, the periods follow the climate's clock timing."));
+	if (GetUserTransitionControl(TransitionControl::SunPeriods) &&
+		DrawResetButton(T("feature.scene_manager.periods_follow_sun_reset", "Reset##PeriodsFollowSun"),
+			T("feature.scene_manager.transition_reset_tooltip",
+				"Drop your value and use the active preset's, or the default when it sets none.")))
+		SetTransitionControl(TransitionControl::SunPeriods, std::nullopt);
+	if (periodsFollowSun) {
+		drawTransitionControl(TransitionControl::SunBlendDegrees,
+			T("feature.scene_manager.sun_period_blend", "Sun Period Blend"), "%.1f deg", ImGuiSliderFlags_None,
+			T("feature.scene_manager.sun_period_blend_tooltip",
+				"Degrees of sun elevation each blend between periods spans, centred on the boundary.\n"
+				"Capped so neighbouring blends never overlap. 0 switches instantly."),
+			T("feature.scene_manager.sun_period_blend_reset", "Reset##SunPeriodBlend"));
+		drawTransitionControl(TransitionControl::SunDayElevation,
+			T("feature.scene_manager.sun_day_elevation", "Day Above"), "%.1f deg", ImGuiSliderFlags_None,
+			T("feature.scene_manager.sun_day_elevation_tooltip",
+				"Sun elevation where Sunrise hands over to Day and Day to Sunset."),
+			T("feature.scene_manager.sun_day_elevation_reset", "Reset##SunDayElevation"));
+		drawTransitionControl(TransitionControl::SunNightElevation,
+			T("feature.scene_manager.sun_night_elevation", "Night Below"), "%.1f deg", ImGuiSliderFlags_None,
+			T("feature.scene_manager.sun_night_elevation_tooltip",
+				"Sun elevation where Night hands over to Dawn and Dusk to Night."),
+			T("feature.scene_manager.sun_night_elevation_reset", "Reset##SunNightElevation"));
+	}
+	if (EditorWindow::CanBeOpen()) {
+		// The live blend, so a boundary can be tuned while watching the light it names.
+		std::string periodLine;
+		const auto factors = GetTimeOfDayFactors();
+		for (int period = 0; period < kPeriodCount; ++period)
+			if (factors[period] > 0.0005f)
+				periodLine += std::format("{}{} {:.0f}%", periodLine.empty() ? "" : " / ",
+					GetPeriodDisplayName(static_cast<TimeOfDayPeriod>(period)), factors[period] * 100.0f);
+		if (const auto sun = GetSunPeriodInfo())
+			periodLine += std::format("  (sun {:.1f} deg, {})", sun->elevationDegrees,
+				sun->risingShare >= 0.5f ? T("cs_editor.debug.sun_rising", "rising") : T("cs_editor.debug.sun_setting", "setting"));
+		else
+			periodLine += std::format("  ({})", T("feature.scene_manager.period_line_clock", "clock periods"));
+		Util::Text::Disabled("%s", periodLine.c_str());
+	}
 	drawTransitionControl(TransitionControl::LocationSeconds,
 		T("feature.scene_manager.location_transition", "Location Transition"), "%.1f s", ImGuiSliderFlags_Logarithmic,
 		T("feature.scene_manager.location_transition_tooltip",

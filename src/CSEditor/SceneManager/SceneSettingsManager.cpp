@@ -1,6 +1,7 @@
 #include "SceneSettingsManager.h"
 
 #include "Feature.h"
+#include "Features/SkySync.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
 #include "Presets/UnifiedPresetCatalog.h"
@@ -338,6 +339,10 @@ void SceneSettingsManager::SetGameHour(float hour)
 
 SceneSettingsManager::PeriodStartHours SceneSettingsManager::GetPeriodStartHours()
 {
+	if (const auto* manager = GetSingleton())
+		if (const auto sunStarts = manager->GetSunPeriodStartHours())
+			return *sunStarts;
+
 	const auto sky = globals::game::sky;
 	if (!sky || !sky->currentClimate)
 		return kFallbackPeriodStartHours;
@@ -349,6 +354,58 @@ SceneSettingsManager::PeriodStartHours SceneSettingsManager::GetPeriodStartHours
 	const bool valid = std::ranges::adjacent_find(starts, std::greater_equal<>{}) == starts.end() &&
 	                   starts.back() < starts.front() + 24.0f;
 	return valid ? starts : kFallbackPeriodStartHours;
+}
+
+ScenePeriodSun::Model SceneSettingsManager::GetSunPeriodModel() const
+{
+	return { .dayElevation = GetTransitionControl(TransitionControl::SunDayElevation),
+		.horizonElevation = kSunHorizonElevation,
+		.nightElevation = GetTransitionControl(TransitionControl::SunNightElevation),
+		.blendDegrees = GetTransitionControl(TransitionControl::SunBlendDegrees),
+		.ease = GetTransitionControl(TransitionControl::Ease) };
+}
+
+std::optional<SceneSettingsManager::SunPeriodInfo> SceneSettingsManager::GetSunPeriodInfo() const
+{
+	if (GetTransitionControl(TransitionControl::SunPeriods) < 0.5f)
+		return std::nullopt;
+	// The same direction the sun is drawn and lit from, so the periods describe the light on screen.
+	const float hour = GetCurrentGameHour();
+	const auto sunClock = globals::features::skySync.GetSunClock(hour);
+	if (!sunClock)
+		return std::nullopt;
+	return SunPeriodInfo{ sunClock->elevationDegrees, ScenePeriodSun::GetRisingShare(hour, sunClock->noonHour) };
+}
+
+std::optional<std::array<float, SceneSettingsManager::kPeriodCount>> SceneSettingsManager::GetSunPeriodFactors() const
+{
+	const auto sun = GetSunPeriodInfo();
+	if (!sun)
+		return std::nullopt;
+	return ScenePeriodSun::GetWeights(sun->elevationDegrees, sun->risingShare, GetSunPeriodModel());
+}
+
+std::optional<SceneSettingsManager::PeriodStartHours> SceneSettingsManager::GetSunPeriodStartHours() const
+{
+	if (GetTransitionControl(TransitionControl::SunPeriods) < 0.5f)
+		return std::nullopt;
+	const auto& skySync = globals::features::skySync;
+	const auto model = GetSunPeriodModel();
+	// Dawn, Sunrise and Day start as the sun rises through the boundaries; Sunset, Dusk and Night as it sinks back.
+	const std::array<std::pair<float, bool>, kPeriodCount> crossings = { { { model.nightElevation, true },
+		{ model.horizonElevation, true }, { model.dayElevation, true }, { model.dayElevation, false },
+		{ model.horizonElevation, false }, { model.nightElevation, false } } };
+	PeriodStartHours starts{};
+	for (int index = 0; index < kPeriodCount; ++index) {
+		const auto hour = skySync.GetSunElevationCrossingHour(crossings[index].first, crossings[index].second);
+		if (!hour)
+			return std::nullopt;
+		starts[index] = *hour;
+	}
+	// The same shape the clock starts have: ascending within the day, Night alone wrapping past midnight.
+	const bool valid = starts.front() >= 0.0f && starts.back() < 24.0f &&
+	                   std::ranges::adjacent_find(starts, std::greater_equal<>{}) == starts.end();
+	return valid ? std::optional{ starts } : std::nullopt;
 }
 
 float SceneSettingsManager::GetPeriodEndHour(const PeriodStartHours& starts, int index)
@@ -385,6 +442,9 @@ SceneSettingsManager::PeriodLookup SceneSettingsManager::FindPeriodForHour(const
 
 SceneSettingsManager::BlendedPeriods SceneSettingsManager::GetBlendedPeriods() const
 {
+	if (const auto sunStarts = GetSunPeriodStartHours())
+		return { .starts = *sunStarts, .blendHours = 0.0f };
+
 	const auto boundaries = GetPeriodStartHours();
 	// A shifted period must still fit a whole blend; periods that grow with the blend never limit it.
 	float blendHours = GetTransitionControl(TransitionControl::TimeOfDayHours);
@@ -402,6 +462,9 @@ SceneSettingsManager::BlendedPeriods SceneSettingsManager::GetBlendedPeriods() c
 
 std::array<float, SceneSettingsManager::kPeriodCount> SceneSettingsManager::GetTimeOfDayFactors() const
 {
+	if (const auto sunFactors = GetSunPeriodFactors())
+		return *sunFactors;
+
 	std::array<float, kPeriodCount> factors{};
 	const auto blended = GetBlendedPeriods();
 	const auto& [starts, blendHours] = blended;
@@ -476,6 +539,14 @@ SceneSettingsManager::TimeOfDayPeriod SceneSettingsManager::GetCurrentPeriod()
 {
 	// Read as the blend weights are, so mid-blend the period is the outgoing one and the next is incoming.
 	const auto* manager = GetSingleton();
+	if (const auto sunFactors = manager ? manager->GetSunPeriodFactors() : std::nullopt) {
+		// Mid-blend the outgoing period is the one followed by another with weight.
+		const auto& factors = *sunFactors;
+		for (int index = 0; index < kPeriodCount; ++index)
+			if (factors[index] > 0.0f && factors[(index + 1) % kPeriodCount] > 0.0f)
+				return static_cast<TimeOfDayPeriod>(index);
+		return static_cast<TimeOfDayPeriod>(std::ranges::max_element(factors) - factors.begin());
+	}
 	const auto lookup = manager ? FindBlendPeriod(manager->GetBlendedPeriods()) :
 	                              FindPeriodForHour(GetPeriodStartHours(), GetCurrentGameHour());
 	return lookup.index < 0 ? TimeOfDayPeriod::Day : static_cast<TimeOfDayPeriod>(lookup.index);

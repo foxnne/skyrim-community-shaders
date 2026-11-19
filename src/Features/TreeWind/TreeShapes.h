@@ -18,8 +18,8 @@
  * Loaded (full-model) trees are separate: NearTrees finds the tree a plain BSTriShape belongs to and
  * builds its bend data from the geometry of the whole tree, so leaves and trunk bend together.
  *
- * A tree whose model is named in a bespoke profile (BespokeProfiles) and whose mesh carries a painted wind mask
- * in its vertex colours gets its own motion instead: still trunk, slow branches, leaf flutter, swinging strands.
+ * A tree whose model is named in a bespoke profile (BespokeProfiles) with a painted wind mask (a sidecar file, the
+ * mesh itself is not changed) gets its own motion instead: still trunk, slow branches, leaf flutter, swinging strands.
  */
 namespace TreeShapes
 {
@@ -52,8 +52,8 @@ namespace TreeShapes
 	 * @brief Motion of one hand-masked tree model. Lengths are in units of the nif root node, angles in radians,
 	 * speeds are multiples of the wind clock (TreeWind phase, about 0.6 rad/s in calm air and faster in wind).
 	 *
-	 * The mask is the mesh's vertex colour, read from the CPU copy of the vertices (the shader flag Vertex_Colors
-	 * stays off, so the game never shades with it):
+	 * The mask is four bytes per vertex in a sidecar file next to the profile, never in the mesh: the game shades
+	 * with any vertex colour a mesh carries (tint from RGB, alpha test from A), whatever its shader flags say.
 	 *   R  branch weight, 0 = trunk and main forks (still) .. 1 = twig tips; leaves and strands carry the weight
 	 *      of the bark they are attached to
 	 *   G  flutter weight where A < 128; on a strand (A >= 128) its free length, 16384 * (G / 255)^2 units
@@ -62,8 +62,18 @@ namespace TreeShapes
 	 */
 	struct BespokeProfile
 	{
+		/** @brief The mask of one shape of the model, matched to the loaded shape by vertex count and position hash. */
+		struct MaskShape
+		{
+			std::string name;           // shape name in the nif, for the log only
+			uint32_t vertexCount = 0;
+			uint64_t positionHash = 0;  // FNV-1a 64 over the 12 position bytes of every vertex, in order
+			std::vector<uint8_t> rgba;  // 4 bytes per vertex
+		};
+
 		std::string name;
 		std::vector<std::string> models;  // lower case, backslashes, relative to the meshes folder
+		std::vector<MaskShape> mask;      // empty when the mask file is missing or unreadable
 
 		float branchAmplitude = 110.0f;  // travel of a branch with weight 1 in full wind
 		float branchSpeed = 0.36f;       // slow: one swing takes about 2 pi / (0.6 * 0.36) = 29 s in calm air
@@ -84,12 +94,16 @@ namespace TreeShapes
 	/**
 	 * @brief The bespoke profiles, read from every *.json in Data\SKSE\Plugins\CommunityShaders\TreeWind.
 	 *
-	 * File format (every value but Models is optional and defaults as in BespokeProfile; a model is its path under
-	 * the meshes folder as the base record gives it, any case, either slash):
+	 * File format (every value but Models and Mask is optional and defaults as in BespokeProfile; a model is its path
+	 * under the meshes folder as the base record gives it, any case, either slash; Mask is a file in the same folder):
 	 *   { "Trees": [ { "Name": "Tree of Life", "Models": [ "landscape/trees/tree of life/tree_of_life.nif" ],
+	 *       "Mask": "TreeOfLife.windmask",
 	 *       "Branch": { "Amplitude": 110, "Speed": 0.36, "Spread": 2.2, "Gust": 0.35, "Lift": 0.2 },
 	 *       "Leaves": { "Amplitude": 10, "Speed": 4 },
 	 *       "Ivy": { "Angle": 0.28, "Lean": 0.6, "Speed": 1.2, "Cross": 0.25, "Gust": 1, "ReferenceLength": 2000, "MaxAngle": 1.1 } } ] }
+	 *
+	 * Mask file (little endian): "TWMK", uint32 version 1, uint32 shape count, then per shape: uint32 name length,
+	 * name bytes, uint32 vertex count, uint64 position hash, vertex count x 4 bytes RGBA.
 	 */
 	class BespokeProfiles
 	{
@@ -163,7 +177,7 @@ namespace TreeShapes
 		std::unordered_map<const void*, Entry> entries;  // key = the shape's vertex buffer
 		size_t swayCount = 0;
 		size_t bespokeCount = 0;
-		std::unordered_set<std::string> warnedModels;  // profiles whose mesh has no mask, logged once
+		std::unordered_set<std::string> warnedModels;  // profiles whose mask does not fit the loaded mesh, logged once
 		uint budgetFrame = 0;
 		int64_t budgetSpentNs = 0;
 		uint64_t builtTrees = 0, loggedBuiltTrees = 0;

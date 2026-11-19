@@ -92,7 +92,6 @@ namespace TreeShapes
 			uint32_t stride = 0;
 			uint32_t count = 0;
 			const void* vertexBuffer = nullptr;
-			int32_t colorOffset = -1;  // byte offset of the RGBA8 vertex colour, -1 without one
 
 			RE::NiPoint3 operator()(uint32_t a_index) const
 			{
@@ -100,9 +99,18 @@ namespace TreeShapes
 				return { f[0], f[1], f[2] };
 			}
 
-			const uint8_t* Color(uint32_t a_index) const
+			// FNV-1a 64 over the position bytes of every vertex: the identity a bespoke wind mask is matched by
+			uint64_t PositionHash() const
 			{
-				return raw + static_cast<size_t>(a_index) * stride + colorOffset;
+				uint64_t h = 0xcbf29ce484222325ull;
+				for (uint32_t i = 0; i < count; ++i) {
+					const uint8_t* p = raw + static_cast<size_t>(i) * stride;
+					for (int k = 0; k < 12; ++k) {
+						h ^= p[k];
+						h *= 0x100000001b3ull;
+					}
+				}
+				return h;
 			}
 		};
 
@@ -120,11 +128,6 @@ namespace TreeShapes
 				return false;
 
 			a_out = { rendererData->rawVertexData, stride, triShape->GetTrishapeRuntimeData().vertexCount, rendererData->vertexBuffer };
-			if (desc.HasFlag(RE::BSGraphics::Vertex::Flags::VF_COLORS)) {
-				const uint32_t colorOffset = desc.GetAttributeOffset(RE::BSGraphics::Vertex::Attribute::VA_COLOR);
-				if (colorOffset >= 16 && colorOffset + 4 <= stride)
-					a_out.colorOffset = static_cast<int32_t>(colorOffset);
-			}
 			return a_out.count > 0;
 		}
 
@@ -475,6 +478,47 @@ namespace TreeShapes
 		{
 			return std::max(std::round(a_speed / a_step), 1.0f) * a_step;
 		}
+
+		// Reads a wind mask file (format in TreeShapes.h). Returns false and leaves a_out empty when it is not one.
+		bool ReadMaskFile(const std::filesystem::path& a_path, std::vector<BespokeProfile::MaskShape>& a_out)
+		{
+			a_out.clear();
+			std::ifstream stream(a_path, std::ios::binary);
+			if (!stream)
+				return false;
+			const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+			size_t at = 0;
+			const auto take = [&](void* a_to, size_t a_size) {
+				if (a_size > bytes.size() - at)
+					return false;
+				std::memcpy(a_to, bytes.data() + at, a_size);
+				at += a_size;
+				return true;
+			};
+			char magic[4];
+			uint32_t version = 0, shapeCount = 0;
+			if (!take(magic, 4) || std::memcmp(magic, "TWMK", 4) != 0 || !take(&version, 4) || version != 1 || !take(&shapeCount, 4) || shapeCount > 4096)
+				return false;
+			for (uint32_t s = 0; s < shapeCount; ++s) {
+				BespokeProfile::MaskShape shape;
+				uint32_t nameLength = 0;
+				if (!take(&nameLength, 4) || nameLength > 1024 || nameLength > bytes.size() - at) {
+					a_out.clear();
+					return false;
+				}
+				shape.name.assign(reinterpret_cast<const char*>(bytes.data() + at), nameLength);
+				at += nameLength;
+				if (!take(&shape.vertexCount, 4) || !take(&shape.positionHash, 8) || shape.vertexCount == 0 || shape.vertexCount > 0xFFFFu ||
+					static_cast<size_t>(shape.vertexCount) * 4 > bytes.size() - at) {
+					a_out.clear();
+					return false;
+				}
+				shape.rgba.assign(bytes.begin() + at, bytes.begin() + at + static_cast<size_t>(shape.vertexCount) * 4);
+				at += static_cast<size_t>(shape.vertexCount) * 4;
+				a_out.push_back(std::move(shape));
+			}
+			return true;
+		}
 	}
 
 	void BespokeProfiles::Load()
@@ -528,7 +572,19 @@ namespace TreeShapes
 					read("Ivy", "Gust", profile.ivyGust, 0.0f, 4.0f);
 					read("Ivy", "ReferenceLength", profile.ivyReferenceLength, 10.0f, 100000.0f);
 					read("Ivy", "MaxAngle", profile.ivyMaxAngle, 0.0f, 1.5f);
-					logger::info("[TreeWind] bespoke profile '{}' from {}: {} model(s), first '{}'", profile.name, file.filename().string(), profile.models.size(), profile.models.front());
+					// The mask sits next to the profile; a name with a folder in it is not accepted
+					const auto maskName = std::filesystem::path(tree.value("Mask", std::string())).filename();
+					size_t maskVertices = 0;
+					if (maskName.empty()) {
+						logger::warn("[TreeWind] bespoke profile '{}' names no Mask file", profile.name);
+					} else if (!ReadMaskFile(directory / maskName, profile.mask)) {
+						logger::warn("[TreeWind] bespoke profile '{}': mask file {} is missing or not a wind mask", profile.name, maskName.string());
+					} else {
+						for (const auto& shape : profile.mask)
+							maskVertices += shape.vertexCount;
+					}
+					logger::info("[TreeWind] bespoke profile '{}' from {}: {} model(s), first '{}', mask {} shapes / {} vertices", profile.name, file.filename().string(),
+						profile.models.size(), profile.models.front(), profile.mask.size(), maskVertices);
 					profiles.push_back(std::move(profile));
 				}
 			} catch (const std::exception& e) {
@@ -720,13 +776,34 @@ namespace TreeShapes
 			crownRadius = std::sqrt(radiusSq);
 		}
 
-		// A bespoke tree needs its painted mask on every shape; without it (the original mesh) it sways like any other tree
+		// A bespoke tree needs a mask for every shape, made for exactly these vertices (same count, same positions in
+		// the same order); with another version of the mesh it sways like any other tree
 		const BespokeProfile* profile = sways ? a_profiles.Find(a_root) : nullptr;
+		std::vector<const uint8_t*> masks(shapes.size(), nullptr);
 		if (profile) {
-			const bool masked = std::all_of(shapes.begin(), shapes.end(), [](const NearShape& a_shape) { return a_shape.vertices.colorOffset >= 0; });
-			if (!masked) {
+			size_t matched = 0;
+			for (size_t s = 0; s < shapes.size(); ++s) {
+				const auto& vertices = shapes[s].vertices;
+				uint64_t hash = 0;
+				bool hashed = false;
+				for (const auto& candidate : profile->mask) {
+					if (candidate.vertexCount != vertices.count || candidate.rgba.size() != static_cast<size_t>(vertices.count) * 4)
+						continue;
+					if (!hashed) {
+						hash = vertices.PositionHash();
+						hashed = true;
+					}
+					if (candidate.positionHash == hash) {
+						masks[s] = candidate.rgba.data();
+						++matched;
+						break;
+					}
+				}
+			}
+			if (matched != shapes.size()) {
 				if (warnedModels.insert(profile->name).second)
-					logger::warn("[TreeWind] bespoke profile '{}': not every shape of the loaded mesh has vertex colours, so the wind mask is missing; using the ordinary nearby-tree sway", profile->name);
+					logger::warn("[TreeWind] bespoke profile '{}': the wind mask fits {} of the {} shapes of the loaded mesh (it is made for one exact version of the mesh); using the ordinary nearby-tree sway",
+						profile->name, matched, shapes.size());
 				profile = nullptr;
 			}
 		}
@@ -778,7 +855,7 @@ namespace TreeShapes
 				};
 				std::memcpy(data.data(), header, sizeof(header));
 				for (uint32_t i = 0; i < shape.vertices.count; ++i) {
-					const uint8_t* color = shape.vertices.Color(i);
+					const uint8_t* color = masks[s] + static_cast<size_t>(i) * 4;
 					float* out = &data[static_cast<size_t>(i + kHeader) * 4];
 					const bool strand = color[3] >= 128;
 					const float g = color[1] / 255.0f;

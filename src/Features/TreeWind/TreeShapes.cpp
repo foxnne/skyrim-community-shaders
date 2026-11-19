@@ -4,11 +4,14 @@
 #include <cfloat>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <numeric>
 
 #include "Globals.h"
 #include "State.h"
 #include "Utils/D3D.h"
+#include "Utils/FileSystem.h"
 
 namespace TreeShapes
 {
@@ -89,11 +92,17 @@ namespace TreeShapes
 			uint32_t stride = 0;
 			uint32_t count = 0;
 			const void* vertexBuffer = nullptr;
+			int32_t colorOffset = -1;  // byte offset of the RGBA8 vertex colour, -1 without one
 
 			RE::NiPoint3 operator()(uint32_t a_index) const
 			{
 				const auto* f = reinterpret_cast<const float*>(raw + static_cast<size_t>(a_index) * stride);
 				return { f[0], f[1], f[2] };
+			}
+
+			const uint8_t* Color(uint32_t a_index) const
+			{
+				return raw + static_cast<size_t>(a_index) * stride + colorOffset;
 			}
 		};
 
@@ -111,6 +120,11 @@ namespace TreeShapes
 				return false;
 
 			a_out = { rendererData->rawVertexData, stride, triShape->GetTrishapeRuntimeData().vertexCount, rendererData->vertexBuffer };
+			if (desc.HasFlag(RE::BSGraphics::Vertex::Flags::VF_COLORS)) {
+				const uint32_t colorOffset = desc.GetAttributeOffset(RE::BSGraphics::Vertex::Attribute::VA_COLOR);
+				if (colorOffset >= 16 && colorOffset + 4 <= stride)
+					a_out.colorOffset = static_cast<int32_t>(colorOffset);
+			}
 			return a_out.count > 0;
 		}
 
@@ -441,6 +455,108 @@ namespace TreeShapes
 
 	namespace
 	{
+		// Model paths compare in lower case with backslashes and without a leading meshes folder
+		std::string NormalizeModelPath(std::string_view a_path)
+		{
+			std::string path(a_path);
+			for (auto& c : path)
+				c = c == '/' ? '\\' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+			while (!path.empty() && path.front() == '\\')
+				path.erase(path.begin());
+			constexpr std::string_view meshes = "meshes\\";
+			if (path.starts_with(meshes))
+				path.erase(0, meshes.size());
+			return path;
+		}
+
+		// The wind clock wraps at 200 pi, so every speed that multiplies it must be a multiple of a_step (0.01, or
+		// 0.02 where the shader also uses one and a half times the speed)
+		float RoundSpeed(float a_speed, float a_step)
+		{
+			return std::max(std::round(a_speed / a_step), 1.0f) * a_step;
+		}
+	}
+
+	void BespokeProfiles::Load()
+	{
+		profiles.clear();
+		const auto directory = Util::PathHelpers::GetCommunityShaderPath() / "TreeWind";
+		std::error_code error;
+		std::vector<std::filesystem::path> files;
+		for (std::filesystem::directory_iterator it(directory, error), end; !error && it != end; it.increment(error)) {
+			if (it->is_regular_file(error) && _stricmp(it->path().extension().string().c_str(), ".json") == 0)
+				files.push_back(it->path());
+		}
+		std::sort(files.begin(), files.end());
+
+		for (const auto& file : files) {
+			try {
+				std::ifstream stream(file);
+				const auto root = nlohmann::json::parse(stream, nullptr, true, true);
+				const auto trees = root.find("Trees");
+				if (trees == root.end() || !trees->is_array())
+					continue;
+				for (const auto& tree : *trees) {
+					BespokeProfile profile;
+					profile.name = tree.value("Name", file.stem().string());
+					if (const auto models = tree.find("Models"); models != tree.end() && models->is_array()) {
+						for (const auto& model : *models)
+							if (model.is_string())
+								profile.models.push_back(NormalizeModelPath(model.get<std::string>()));
+					}
+					if (profile.models.empty())
+						continue;
+					const auto read = [&tree](const char* a_section, const char* a_key, float& a_value, float a_min, float a_max) {
+						const auto section = tree.find(a_section);
+						if (section == tree.end() || !section->is_object())
+							return;
+						const auto value = section->find(a_key);
+						if (value != section->end() && value->is_number())
+							a_value = std::clamp(value->get<float>(), a_min, a_max);
+					};
+					read("Branch", "Amplitude", profile.branchAmplitude, 0.0f, 2000.0f);
+					read("Branch", "Speed", profile.branchSpeed, 0.02f, 4.0f);
+					read("Branch", "Spread", profile.branchSpread, 0.0f, 12.0f);
+					read("Branch", "Gust", profile.branchGust, 0.0f, 2.0f);
+					read("Branch", "Lift", profile.branchLift, 0.0f, 1.0f);
+					read("Leaves", "Amplitude", profile.leafAmplitude, 0.0f, 400.0f);
+					read("Leaves", "Speed", profile.leafSpeed, 0.01f, 20.0f);
+					read("Ivy", "Angle", profile.ivyAngle, 0.0f, 1.5f);
+					read("Ivy", "Lean", profile.ivyLean, 0.0f, 3.0f);
+					read("Ivy", "Speed", profile.ivySpeed, 0.05f, 10.0f);
+					read("Ivy", "Cross", profile.ivyCross, 0.0f, 1.0f);
+					read("Ivy", "Gust", profile.ivyGust, 0.0f, 4.0f);
+					read("Ivy", "ReferenceLength", profile.ivyReferenceLength, 10.0f, 100000.0f);
+					read("Ivy", "MaxAngle", profile.ivyMaxAngle, 0.0f, 1.5f);
+					logger::info("[TreeWind] bespoke profile '{}' from {}: {} model(s), first '{}'", profile.name, file.filename().string(), profile.models.size(), profile.models.front());
+					profiles.push_back(std::move(profile));
+				}
+			} catch (const std::exception& e) {
+				logger::warn("[TreeWind] bespoke profile file {} not read: {}", file.string(), e.what());
+			}
+		}
+	}
+
+	const BespokeProfile* BespokeProfiles::Find(RE::NiNode* a_root) const
+	{
+		if (profiles.empty() || !a_root)
+			return nullptr;
+		const auto reference = a_root->GetUserData();
+		const auto base = reference ? reference->GetBaseObject() : nullptr;
+		const auto model = base ? base->As<RE::TESModel>() : nullptr;
+		const char* path = model ? model->GetModel() : nullptr;
+		if (!path || !*path)
+			return nullptr;
+		const auto normalized = NormalizeModelPath(path);
+		for (const auto& profile : profiles)
+			for (const auto& candidate : profile.models)
+				if (candidate == normalized)
+					return &profile;
+		return nullptr;
+	}
+
+	namespace
+	{
 		struct NearShape
 		{
 			VertexView vertices;
@@ -494,8 +610,15 @@ namespace TreeShapes
 		}
 	}
 
-	ID3D11ShaderResourceView* NearTrees::Get(RE::BSGeometry* a_geometry, RE::NiNode* a_root, uint a_frame, float a_minHeight)
+	void NearTrees::Forget(const Entry& a_entry)
 	{
+		swayCount -= a_entry.srv != nullptr;
+		bespokeCount -= a_entry.srv != nullptr && a_entry.bespoke;
+	}
+
+	ID3D11ShaderResourceView* NearTrees::Get(RE::BSGeometry* a_geometry, RE::NiNode* a_root, uint a_frame, float a_minHeight, const BespokeProfiles& a_profiles, bool& a_bespoke)
+	{
+		a_bespoke = false;
 		VertexView vertices;
 		if (!a_geometry || !a_root || !GetVertices(a_geometry, vertices))
 			return nullptr;
@@ -505,10 +628,11 @@ namespace TreeShapes
 			auto& entry = it->second;
 			if (entry.vertexCount == vertices.count && entry.firstVertex[0] == firstVertex.x && entry.firstVertex[1] == firstVertex.y && entry.firstVertex[2] == firstVertex.z) {
 				entry.lastFrame = a_frame;
+				a_bespoke = entry.bespoke;
 				return entry.srv.get();
 			}
 			// The vertex buffer address was reused by another shape
-			swayCount -= entry.srv != nullptr;
+			Forget(entry);
 			entries.erase(it);
 		}
 
@@ -521,10 +645,12 @@ namespace TreeShapes
 		if (budgetSpentNs >= kNearBuildBudgetNs || swayCount >= kMaxNearShapes)
 			return nullptr;
 
-		Build(a_root, a_frame, a_minHeight);
+		Build(a_root, a_frame, a_minHeight, a_profiles);
 
-		if (auto it = entries.find(vertices.vertexBuffer); it != entries.end())
+		if (auto it = entries.find(vertices.vertexBuffer); it != entries.end()) {
+			a_bespoke = it->second.bespoke;
 			return it->second.srv.get();
+		}
 
 		// Not part of the tree as measured (for example a skinned shape): remembered as still
 		Entry still;
@@ -537,7 +663,7 @@ namespace TreeShapes
 		return nullptr;
 	}
 
-	void NearTrees::Build(RE::NiNode* a_root, uint a_frame, float a_minHeight)
+	void NearTrees::Build(RE::NiNode* a_root, uint a_frame, float a_minHeight, const BespokeProfiles& a_profiles)
 	{
 		ZoneScopedN("TreeWind::BuildNearTree");
 		const auto start = std::chrono::steady_clock::now();
@@ -594,8 +720,21 @@ namespace TreeShapes
 			crownRadius = std::sqrt(radiusSq);
 		}
 
+		// A bespoke tree needs its painted mask on every shape; without it (the original mesh) it sways like any other tree
+		const BespokeProfile* profile = sways ? a_profiles.Find(a_root) : nullptr;
+		if (profile) {
+			const bool masked = std::all_of(shapes.begin(), shapes.end(), [](const NearShape& a_shape) { return a_shape.vertices.colorOffset >= 0; });
+			if (!masked) {
+				if (warnedModels.insert(profile->name).second)
+					logger::warn("[TreeWind] bespoke profile '{}': not every shape of the loaded mesh has vertex colours, so the wind mask is missing; using the ordinary nearby-tree sway", profile->name);
+				profile = nullptr;
+			}
+		}
+		const bool bespoke = profile != nullptr;
+
 		const auto insert = [&](const VertexView& a_vertices, winrt::com_ptr<ID3D11Buffer> a_buffer, winrt::com_ptr<ID3D11ShaderResourceView> a_srv) {
 			Entry entry;
+			entry.bespoke = bespoke && a_srv;
 			entry.buffer = std::move(a_buffer);
 			entry.srv = std::move(a_srv);
 			entry.vertexCount = a_vertices.count;
@@ -605,8 +744,9 @@ namespace TreeShapes
 			entry.firstVertex[2] = first.z;
 			entry.lastFrame = a_frame;
 			if (const auto it = entries.find(a_vertices.vertexBuffer); it != entries.end())
-				swayCount -= it->second.srv != nullptr;
+				Forget(it->second);
 			swayCount += entry.srv != nullptr;
+			bespokeCount += entry.srv != nullptr && entry.bespoke;
 			entries.insert_or_assign(a_vertices.vertexBuffer, std::move(entry));
 		};
 
@@ -622,7 +762,52 @@ namespace TreeShapes
 			};
 			std::vector<Built> built(shapes.size());
 			bool created = true;
-			for (size_t s = 0; s < shapes.size() && created; ++s) {
+			for (size_t s = 0; s < shapes.size() && created && bespoke; ++s) {
+				// Layout in TreeShapes.h (NearTrees) and TreeWind.hlsli GetBespokeTree
+				constexpr uint32_t kHeader = 5;
+				const auto& shape = shapes[s];
+				const uint32_t elements = shape.vertices.count + kHeader;
+				std::vector<float> data(static_cast<size_t>(elements) * 4, 0.0f);
+				const auto origin = shape.toRoot.Invert() * RE::NiPoint3{ axisX, axisY, base };
+				const float header[kHeader][4] = {
+					{ origin.x, origin.y, origin.z, height / shape.toRoot.scale },
+					{ 1.0f / shape.toRoot.scale, profile->branchAmplitude, RoundSpeed(profile->branchSpeed, 0.02f), profile->branchSpread },
+					{ profile->branchGust, profile->branchLift, profile->leafAmplitude, RoundSpeed(profile->leafSpeed, 0.01f) },
+					{ profile->ivyAngle, profile->ivyLean, profile->ivySpeed, profile->ivyCross },
+					{ profile->ivyGust, profile->ivyReferenceLength, profile->ivyMaxAngle, 0.0f },
+				};
+				std::memcpy(data.data(), header, sizeof(header));
+				for (uint32_t i = 0; i < shape.vertices.count; ++i) {
+					const uint8_t* color = shape.vertices.Color(i);
+					float* out = &data[static_cast<size_t>(i + kHeader) * 4];
+					const bool strand = color[3] >= 128;
+					const float g = color[1] / 255.0f;
+					out[0] = color[0] / 255.0f;
+					// A strand stores its free length (negative, in root units) where the others store their flutter weight
+					out[1] = strand ? -std::max(16384.0f * g * g, 1.0f) : g;
+					out[2] = strand ? color[2] / 255.0f : 0.0f;
+					out[3] = (color[3] & 127) / 128.0f;
+				}
+
+				D3D11_BUFFER_DESC bufferDesc{};
+				bufferDesc.ByteWidth = static_cast<UINT>(data.size() * sizeof(float));
+				bufferDesc.Usage = D3D11_USAGE_IMMUTABLE;
+				bufferDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+				const D3D11_SUBRESOURCE_DATA initData{ data.data(), 0, 0 };
+				D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+				srvDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+				srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+				srvDesc.Buffer.NumElements = elements;
+				created = SUCCEEDED(globals::d3d::device->CreateBuffer(&bufferDesc, &initData, built[s].buffer.put())) &&
+				          SUCCEEDED(globals::d3d::device->CreateShaderResourceView(built[s].buffer.get(), &srvDesc, built[s].srv.put()));
+				if (created) {
+					Util::SetResourceName(built[s].buffer.get(), "TreeWind::BespokeTree");
+					Util::SetResourceName(built[s].srv.get(), "TreeWind::BespokeTree SRV");
+				}
+			}
+			if (bespoke)
+				logger::info("[TreeWind] bespoke tree '{}': {} shapes, height {:.0f}, trunk axis ({:.0f}, {:.0f}){}", profile->name, shapes.size(), height, axisX, axisY, created ? "" : ", buffers failed");
+			for (size_t s = 0; s < shapes.size() && created && !bespoke; ++s) {
 				const auto& shape = shapes[s];
 				const uint32_t elements = shape.vertices.count + 2;
 				std::vector<float> data(static_cast<size_t>(elements) * 2);
@@ -667,6 +852,8 @@ namespace TreeShapes
 	{
 		entries.clear();
 		swayCount = 0;
+		bespokeCount = 0;
+		warnedModels.clear();
 	}
 
 	void NearTrees::Evict(uint a_frame)
@@ -674,7 +861,7 @@ namespace TreeShapes
 		std::erase_if(entries, [&](const auto& a_entry) {
 			const bool old = a_frame - a_entry.second.lastFrame > kEvictFrames;
 			if (old)
-				swayCount -= a_entry.second.srv != nullptr;
+				Forget(a_entry.second);
 			return old;
 		});
 		if (builtTrees != loggedBuiltTrees) {

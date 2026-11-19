@@ -16,6 +16,10 @@
  * bend data measured from the whole tree, so they lean and gust like the LOD next to them. Skinned trees keep
  * the engine's own animation.
  *
+ * A tree with a bespoke profile and a painted wind mask (TreeShapes::BespokeProfiles) gets a fourth buffer (bespoke)
+ * and its own motion in the same vertex shaders: still trunk, slow branches, leaf flutter and swinging strands, on
+ * the same wind clock, direction and gusts.
+ *
  * The same per-draw test marks the crowns of object LOD trees (ExtraShaderDescriptors::LODTreeCrown), which
  * Lighting.hlsl lights as foliage: wrapped two-sided diffuse, softer screen-space shadow, brighter base colour.
  * Crowns that follow a trunk card also get per-vertex crown data (VS t121, TreeShapes::BendWeights::GetCrownData),
@@ -71,7 +75,7 @@ public:
 	struct alignas(16) WindCB
 	{
 		float4 Wind;    // phase, previous phase, wind speed 0-1, wind angle (radians)
-		float4 Params;  // amplitude, near distance, tree LOD draw, loaded tree draw
+		float4 Params;  // amplitude, near distance, tree LOD draw, loaded tree draw (1) or bespoke tree draw (2)
 		float4 Shape;   // bend exponent, use bend weights, flutter strength, per-tree phase spread
 		float4 Detail;  // flutter share, flutter speed, near scale, near ramp end
 		float4 Gusts;   // gust strength, gust rarity, loaded tree scale, crown data bound (t121)
@@ -157,15 +161,18 @@ private:
 	std::unique_ptr<ConstantBuffer> windOnCB;
 	std::unique_ptr<ConstantBuffer> windOffCB;
 	std::unique_ptr<ConstantBuffer> windNearCB;
+	std::unique_ptr<ConstantBuffer> windBespokeCB;
 	// As on and off, for tree LOD crown draws with crown data bound
 	std::unique_ptr<ConstantBuffer> windOnCrownCB;
 	std::unique_ptr<ConstantBuffer> windOffCrownCB;
 
 	TreeShapes::BendWeights bendWeights;
 	TreeShapes::NearTrees nearTrees;
+	TreeShapes::BespokeProfiles bespokeProfiles;
 	// Bend data of the tree LOD or loaded tree shape being drawn, nullptr for every other draw
 	ID3D11ShaderResourceView* drawBendWeights = nullptr;
 	bool drawNearTree = false;  // drawBendWeights belongs to a loaded tree
+	bool drawBespoke = false;   // ... and that tree has a bespoke profile: other data layout, other shader path
 	// Crown data of the tree LOD crown being drawn (Lighting draws flagged LODTreeCrown only), or nullptr
 	ID3D11ShaderResourceView* drawCrownData = nullptr;
 	bool swayActive = false;    // set once per frame in Reset: sway on and no map menu open

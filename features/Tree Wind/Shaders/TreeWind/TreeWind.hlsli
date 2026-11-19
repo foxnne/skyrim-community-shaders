@@ -9,7 +9,7 @@ namespace TreeWind
 	cbuffer TreeWindCB : register(b3)
 	{
 		float4 Wind;    // phase, previous phase, wind speed 0-1, wind angle (radians)
-		float4 Params;  // amplitude, near distance, tree LOD draw, loaded tree draw
+		float4 Params;  // amplitude, near distance, tree LOD draw, loaded tree draw (1) or bespoke tree draw (2)
 		float4 Shape;   // bend exponent, use bend weights, flutter strength, per-tree phase spread
 		float4 Detail;  // flutter share, flutter speed, near scale, near ramp end
 		float4 Gusts;   // gust strength, gust rarity, loaded tree scale, crown data bound (t121)
@@ -18,6 +18,7 @@ namespace TreeWind
 	// Tree LOD, per vertex: bend weight, tree random, tree scale, distance from the trunk.
 	// Loaded trees: [0] tree origin xy and [1] tree origin z, tree height, both in the shape's own space;
 	// then per vertex at [2 + vertex]: bend weight, distance from the trunk.
+	// Bespoke trees: five header elements, then the wind mask per vertex (see GetBespokeTree).
 	Buffer<float4> VertexData : register(t120);
 
 	// Tree LOD crowns, per vertex, for the pixel shader: xy = offset from the trunk (1 = widest point of that
@@ -33,7 +34,13 @@ namespace TreeWind
 	// The draw is a shape of a loaded tree (never set together with IsEnabled)
 	bool IsNearTree()
 	{
-		return Params.w > 0.5;
+		return Params.w > 0.5 && Params.w < 1.5;
+	}
+
+	// The draw is a shape of a loaded tree with a bespoke profile and wind mask (instead of IsNearTree)
+	bool IsBespokeTree()
+	{
+		return Params.w > 1.5;
 	}
 
 	float4 GetCrownData(uint vertexID)
@@ -192,6 +199,162 @@ namespace TreeWind
 
 		// The sway is horizontal in the world; the model may be rotated, tilted and scaled
 		precise float3 result = a_tree.toModelX * total.x + a_tree.toModelY * total.y;
+		return result;
+	}
+
+	// ---- Bespoke trees -----------------------------------------------------------------------------------
+	// One hand-masked tree model with its own profile (TreeShapes::BespokeProfiles): the trunk stands still,
+	// branches sway slowly by their painted weight, leaf cards flutter, hanging strands swing like banners.
+	// Same wind clock, direction, strength and gusts as every other tree. precise throughout, as above.
+	//
+	// Bend data: [0] tree origin xyz in the shape's space, tree height in shape units
+	//            [1] shape units per root unit, branch amplitude, branch speed, branch spread
+	//            [2] branch gust, branch lift, leaf amplitude, leaf speed
+	//            [3] ivy angle, ivy lean, ivy speed, ivy cross
+	//            [4] ivy gust, ivy reference length, ivy max angle, unused
+	//            [5 + vertex] branch weight, flutter weight (or minus the strand's free length in root units),
+	//                         strand swing parameter (0 pin, 1 free tip), phase id 0-1
+	// Amplitudes and lengths are in units of the nif root node; speeds multiply the wind clock.
+
+	struct BespokeTree
+	{
+		float3 originWS;    // tree origin, absolute world position
+		float random;       // timing offset of the tree, 0-1
+		float random2;      // gust timing, 0-1
+		float unit;         // world units per root unit (the scale of the reference)
+		float branch;       // world units of branch travel at full strength
+		float branchPhase;  // varies smoothly through the crown: a limb moves as one, the tip a little behind
+		float flutter;      // world units of leaf flutter
+		float length;       // free length of the strand in world units, 0 off strands
+		float swing;        // strand swing parameter
+		float phase;        // phase of the strand or leaf card, radians
+		float4 branchParams;  // amplitude, speed, spread, gust
+		float4 mixParams;     // branch gust, branch lift, leaf amplitude, leaf speed
+		float4 ivyParams;     // angle, lean, speed, cross
+		float4 ivyParams2;    // gust, reference length, max angle, unused
+		float3 toModelX;    // world axes in model space, for the offset
+		float3 toModelY;
+		float3 toModelZ;
+	};
+
+	BespokeTree GetBespokeTree(float3x4 a_world, float3 a_posAdjust, float3 a_positionMS, uint a_vertexID)
+	{
+		BespokeTree tree;
+
+		precise float4 header0 = VertexData.Load(0);
+		precise float4 header1 = VertexData.Load(1);
+		precise float4 header2 = VertexData.Load(2);
+		precise float4 header3 = VertexData.Load(3);
+		precise float4 header4 = VertexData.Load(4);
+		precise float4 mask = VertexData.Load(a_vertexID + 5);
+		tree.branchParams = header1;
+		tree.mixParams = header2;
+		tree.ivyParams = header3;
+		tree.ivyParams2 = header4;
+
+		precise float3 originMS = header0.xyz;
+		precise float3 originRel = mul(a_world, float4(originMS, 1.0));
+		precise float3 originWS = originRel + a_posAdjust;
+		tree.originWS = originWS;
+
+		precise float3 row0 = a_world[0].xyz;
+		precise float3 row1 = a_world[1].xyz;
+		precise float3 row2 = a_world[2].xyz;
+		precise float worldScale = length(float3(row0.x, row1.x, row2.x));
+		precise float heightWS = header0.w * worldScale;
+		precise float unit = header1.x * worldScale;
+		tree.unit = unit;
+
+		precise float random = Triangle(dot(originWS.xy, float2(0.0077, 0.0113)) + 0.37 * Triangle(dot(originWS.xy, float2(-0.0091, 0.0053))));
+		precise float random2 = Triangle(dot(originWS.xy, float2(0.0101, -0.0067)) + 0.5 * random);
+		tree.random = random;
+		tree.random2 = random2;
+
+		// The Sway slider scales this tree with all the others; 80 is its default
+		precise float master = Params.x / 80.0;
+
+		precise float3 fromOrigin = mul(float3x3(row0, row1, row2), a_positionMS - originMS);
+		precise float branchPhase = header1.w * dot(fromOrigin, float3(0.9, 0.6, 0.5)) / max(0.5 * heightWS, 1.0);
+		tree.branchPhase = branchPhase;
+		precise float branch = saturate(mask.x) * header1.y * unit * master;
+		tree.branch = branch;
+
+		precise float flutter = saturate(mask.y) * header2.z * unit * master;
+		tree.flutter = flutter;
+		precise float strandLength = max(-mask.y, 0.0) * unit;
+		tree.length = strandLength;
+		tree.swing = saturate(mask.z);
+		tree.phase = mask.w * 6.2831853;
+
+		// Exact inverse of the world rotation and scale: columns of the adjugate over the determinant
+		precise float3 inverse0 = cross(row1, row2);
+		precise float3 inverse1 = cross(row2, row0);
+		precise float3 inverse2 = cross(row0, row1);
+		precise float determinant = dot(row0, inverse0);
+		precise float inverseDeterminant = abs(determinant) > 1e-12 ? 1.0 / determinant : 0.0;
+		precise float3 toModelX = inverse0 * inverseDeterminant;
+		precise float3 toModelY = inverse1 * inverseDeterminant;
+		precise float3 toModelZ = inverse2 * inverseDeterminant;
+		tree.toModelX = toModelX;
+		tree.toModelY = toModelY;
+		tree.toModelZ = toModelZ;
+		return tree;
+	}
+
+	// Model-space offset of a bespoke tree vertex at a wind phase (Wind.x now, Wind.y last frame)
+	float3 GetBespokeOffset(BespokeTree a_tree, float a_phase)
+	{
+		precise float2 dir = float2(sin(Wind.w), cos(Wind.w));
+		precise float2 perp = float2(-dir.y, dir.x);
+		precise float strength = 0.35 + 0.65 * saturate(Wind.z);
+
+		// The gust signal an ordinary tree standing here follows, without its amplitude: along the wind it
+		// runs from about -0.35 to 1.35 times the strength
+		precise float2 gust = Sway(a_tree.originWS, a_phase + a_tree.random * Shape.w) / max(Params.x, 1e-3);
+		// The rare, short, strong gust of this tree, as for the loaded trees
+		precise float gustPulse = pow(saturate(sin(a_phase * 0.23 + a_tree.random2 * 6.2831853 + dot(a_tree.originWS.xy, float2(0.00031, 0.00027)))), max(Gusts.y, 1.0));
+
+		// Branches: heavy and slow. A share of the common gust signal keeps them in step with the trees around,
+		// the rest is their own long swing. The speed is a multiple of 0.02, so all three terms survive the
+		// wrap of the wind clock.
+		precise float branchSpeed = a_tree.branchParams.z;
+		precise float branchPhase = a_tree.branchPhase;
+		precise float along = a_tree.mixParams.x * dot(gust, dir) + strength * (0.5 * sin(branchSpeed * a_phase + branchPhase) + 0.2 * sin(2.0 * branchSpeed * a_phase + 1.7 * branchPhase + 1.3));
+		precise float across = a_tree.mixParams.x * dot(gust, perp) + strength * 0.3 * sin(1.5 * branchSpeed * a_phase + 1.3 * branchPhase + 0.7);
+		precise float bob = a_tree.mixParams.y * strength * 0.5 * sin(branchSpeed * a_phase + branchPhase + 1.5707963);
+		precise float branchScale = a_tree.branch * (1.0 + Gusts.x * gustPulse);
+		precise float3 branchOffset = float3(dir * along + perp * across, bob) * branchScale;
+
+		// Leaves: a small quick flap of the card's free edge, each card on its own timing and direction
+		precise float leafSpeed = a_tree.mixParams.w;
+		precise float leafPhase = a_tree.phase * 5.0;
+		precise float3 leafDirection = float3(sin(leafPhase * 1.3), cos(leafPhase * 1.3), 0.6 * sin(leafPhase * 0.7 + 1.0));
+		precise float3 leafDirection2 = float3(-leafDirection.y, leafDirection.x, 0.5);
+		precise float leafScale = a_tree.flutter * (0.4 + 0.6 * strength) * (1.0 + 0.5 * Gusts.x * gustPulse);
+		precise float3 leafOffset = (leafDirection * sin(leafSpeed * a_phase + leafPhase) + leafDirection2 * (0.4 * sin(2.0 * leafSpeed * a_phase + 2.3 * leafPhase))) * leafScale;
+
+		// Strands: a banner pinned at the top. The tilt of the tip leans downwind with the gust signal and
+		// swings about it, mostly along the wind; shorter strands swing faster, like a pendulum. The speeds are
+		// rounded to 0.01 for the wrap of the wind clock.
+		precise float strandLength = a_tree.length;
+		precise float lengthRatio = a_tree.ivyParams2.y * a_tree.unit / max(strandLength, 1.0);
+		precise float swingSpeed = max(round(a_tree.ivyParams.z * clamp(sqrt(lengthRatio), 0.4, 3.0) * 100.0), 5.0) * 0.01;
+		precise float crossSpeed = max(swingSpeed - 0.07, 0.03);
+		precise float2 tilt = a_tree.ivyParams.y * gust + strength * (dir * (0.5 * sin(swingSpeed * a_phase + a_tree.phase)) + perp * (a_tree.ivyParams.w * sin(crossSpeed * a_phase + 1.9 * a_tree.phase + 1.5707963)));
+		precise float2 tiltScaled = tilt * (a_tree.ivyParams.x * (1.0 + a_tree.ivyParams2.x * Gusts.x * gustPulse) * saturate(Params.x / 80.0));
+		precise float tiltLength = length(tiltScaled);
+		precise float angle = min(tiltLength, a_tree.ivyParams2.z);
+		precise float2 tiltDirection = tiltScaled / max(tiltLength, 1e-5);
+		// The slope of the strand grows from 0 at the pin to the tilt at the tip, slope(s) = s (2 - s): near the
+		// pin the sideways travel grows with the square of s, and the strand keeps its length because the tip
+		// is pulled up by what the slope costs: (1 - cos) times the integral of slope squared.
+		precise float s = a_tree.swing;
+		precise float out1 = s * s * (1.0 - s / 3.0);
+		precise float up1 = s * s * s * (4.0 / 3.0 - s + 0.2 * s * s);
+		precise float3 strandOffset = float3(tiltDirection * (sin(angle) * out1), (1.0 - cos(angle)) * up1) * strandLength;
+
+		precise float3 total = branchOffset + leafOffset + strandOffset;
+		precise float3 result = a_tree.toModelX * total.x + a_tree.toModelY * total.y + a_tree.toModelZ * total.z;
 		return result;
 	}
 }

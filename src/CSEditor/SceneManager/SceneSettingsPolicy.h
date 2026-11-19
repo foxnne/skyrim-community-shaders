@@ -85,6 +85,9 @@ namespace SceneSettingsPolicy
 		{ "ScreenSpaceReflections", "HalfRes" },
 		{ "ScreenSpaceReflections", "EnableREBLUR" },
 		{ "Upscaling", "streamlineLogLevel" },
+		// Resolution and step counts (the targets are reallocated) and a debug view: never a look.
+		{ "LightShafts", "Quality" },
+		{ "LightShafts", "DebugView" },
 		{ "VolumetricLighting" },
 		{ "ViewAtmosphere" },
 	};
@@ -109,6 +112,7 @@ namespace SceneSettingsPolicy
 		{ "GrassLighting" },
 		{ "GroundFog" },
 		{ "ImageBasedLighting" },
+		{ "LightShafts" },
 		{ "NeuralRendering" },
 		{ "PhysicalSky" },
 		{ "PostProcessing" },

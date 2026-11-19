@@ -16,6 +16,7 @@
 #include "Features/ExponentialHeightFog.h"
 #include "Features/FurShells.h"
 #include "Features/IBL.h"
+#include "Features/LightShafts.h"
 #include "Features/NRD.h"
 #include "Features/NeuralRendering.h"
 #include "Features/PhysicalSky.h"
@@ -754,6 +755,7 @@ void Deferred::Hooks::PostWater_SetCamera::thunk(void* graphicsState, RE::NiCame
 {
 	func(graphicsState, camera, flags);
 	globals::features::viewAtmosphere.CompositeAfterWater();
+	globals::features::lightShafts.Render();
 }
 
 void Deferred::Hooks::InstallPostWaterHook()

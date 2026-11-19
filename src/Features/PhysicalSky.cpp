@@ -155,7 +155,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	PhysicalSky::Settings::LightningSettings,
 	weatherMode, vanillaFallback, rate, distanceRange, radius,
 	cloudGlow, boltLuminance, boltWidth, boltGlow, channelRadius,
-	sceneIlluminance, sceneExposureLimit, fogScatter,
+	sceneIlluminance, sceneExposureLimit, fogScatter, reflection,
 	strokeCount, strokeDuration, strokeInterval, strokeDecay,
 	groundChance, cloudBaseChance, color)
 
@@ -1131,6 +1131,8 @@ void PhysicalSky::SettingsWeatherEffects()
 		Util::AddTooltip(T(TKEY("lightning_exposure_limit_desc"), "How far over mid-grey a flash may lift a mid-toned surface at the current exposure, so a strike at night cannot white out the view. The cloud glow may go 2.5 EV and the bolt core 5 EV further. Needs Linear Lighting with auto exposure; without it only the fixed limits apply."));
 		ImGui::SliderFloat(T(TKEY("lightning_fog_scatter"), "Air and Fog Glow"), &settings.lightning.fogScatter, 0.f, 2.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::AddTooltip(T(TKEY("lightning_fog_scatter_desc"), "Share of the scene light that air, haze and fog scatter back to the eye. Lower it if thick fog flashes too brightly."));
+		ImGui::SliderFloat(T(TKEY("lightning_reflection"), "Sky Reflection Share"), &settings.lightning.reflection, 0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::AddTooltip(T(TKEY("lightning_reflection_desc"), "How much of the bolt and cloud glow is drawn into the sky reflection cubemap. That cubemap also feeds sky ambient light and is refreshed over several frames, so anything above zero can light the whole scene a second time and linger after the flash."));
 		ImGui::DragFloat(T(TKEY("lightning_cloud_glow"), "Cloud Glow"), &settings.lightning.cloudGlow, 0.01f, 0.f, 50.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::AddTooltip(T(TKEY("lightning_cloud_glow_desc"), "Peak brightness of the cloud around the discharge."));
 		ImGui::DragFloat(T(TKEY("lightning_radius2"), "Lit Cloud Radius"), &settings.lightning.radius, 10.f, 10.f, 5000.f, "%.0f m", ImGuiSliderFlags_AlwaysClamp);

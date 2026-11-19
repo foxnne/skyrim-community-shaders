@@ -57,6 +57,7 @@ void PhysicalSky::Settings::SanitizeLightning()
 	lightning.sceneIlluminance = finiteClamp(lightning.sceneIlluminance, 0.f, SkyLightning::kMaxCameraIlluminance, 1.f);
 	lightning.sceneExposureLimit = finiteClamp(lightning.sceneExposureLimit, -2.f, 6.f, 2.f);
 	lightning.fogScatter = finiteClamp(lightning.fogScatter, 0.f, 2.f, 0.5f);
+	lightning.reflection = finiteClamp(lightning.reflection, 0.f, 1.f, 0.f);
 	lightning.strokeCount = std::clamp(lightning.strokeCount, 1, 1024);
 	lightning.strokeDuration = finiteClamp(lightning.strokeDuration, 1.f, 60000.f, 60.f);
 	lightning.strokeInterval = finiteClamp(lightning.strokeInterval, lightning.strokeDuration, 60000.f, 110.f);
@@ -471,7 +472,7 @@ void SkyLightning::Update(PhysicalSky& physicalSky, const std::string& currentWo
 	data.lightningPreparationControl = { 0.f, 0.f, static_cast<float>(activeLane), 0.f };
 	data.lightningPhotometry = { 0.f, 0.f, channelRadius, cloudBase ? 1.f : 0.f };
 	data.lightningScene = {};
-	data.lightningBolt = { settings.lightning.boltWidth, settings.lightning.boltGlow, 0.f, 0.f };
+	data.lightningBolt = { settings.lightning.boltWidth, settings.lightning.boltGlow, settings.lightning.reflection, 0.f };
 	data.lightningPlacement = { pendingDistanceRange.x, pendingDistanceRange.y, static_cast<float>(generation), pendingCloudBase ? 1.f : 0.f };
 	data.lightningControl = { static_cast<float>(generation), 0.f, 0.f, overrideWeather ? 1.f : 0.f };
 	if (!available) {
@@ -493,15 +494,16 @@ void SkyLightning::Update(PhysicalSky& physicalSky, const std::string& currentWo
 			nextEvent = time + 3.0;
 		}
 	}
+	const bool automatic = settings.lightning.rate > 0.f && (settings.lightning.weatherMode == 0 || readout.thunderWeather);
 	// Count storm activity during a discharge too, so high rates can run back to back.
-	if (time >= nextEvent)
+	// None accrues outside a thunder weather, so the first one does not open with a strike.
+	if (automatic && time >= nextEvent)
 		eventHazard += (time - previousTime) * settings.lightning.rate / 60.0;
 	// Estimate the mask lead time from the current frame interval. Preparing only
 	// near the end of a long burst avoids holding a source while its cloud moves away.
 	const double leadTime = std::clamp((time - previousTime) * 22.0, 0.1, 5.5);
 	const double remaining = phase == Phase::Flashing ? std::max(0.0, LightningPulse::Duration(pulseParameters) - (time - flashStart)) : 0.0;
 	const double rate = settings.lightning.rate / 60.0;
-	const bool automatic = settings.lightning.rate > 0.f && (settings.lightning.weatherMode == 0 || readout.thunderWeather);
 	if (!automatic && !replay) {
 		pendingPhase = Phase::Idle;
 		pendingPositionRadius = {};

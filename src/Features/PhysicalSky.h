@@ -199,6 +199,7 @@ struct PhysicalSky final : public Feature
 			float sceneIlluminance = 1.f;          // peak light on the scene from a strike 1 km away
 			float sceneExposureLimit = 2.f;        // EV over mid-grey that the flash may lift a mid-albedo surface to
 			float fogScatter = 0.5f;               // share of the scene light that air and fog scatter towards the eye
+			float reflection = 0.f;                // share of the bolt and cloud glow drawn into the sky reflection cubemap
 			int strokeCount = 3;
 			float strokeDuration = 60.f;   // milliseconds, full optical pulse duration
 			float strokeInterval = 110.f;  // milliseconds between stroke starts
@@ -301,7 +302,7 @@ struct PhysicalSky final : public Feature
 		float4 lightningPreparationPositionRadius;
 		float4 lightningPreparationControl;  // base mode, history valid, active mask lane, preparing
 		float4 lightningScene;               // illuminance at the cloud and channel emitters at full pulse, soft radius in game units, fog share
-		float4 lightningBolt;                // least angular half-width (rad), halo amount, unused, unused
+		float4 lightningBolt;                // least half-width (pixels at 1080p), halo amount, share drawn into sky reflections, unused
 		float4 diskAngularRadius;            // Sun, Masser, Secunda, directional light, in radians, independent of disc rendering mode.
 		float3 dirLightBodyDir;              // towards the body lighting the scene, blended while the light swings between two
 		uint dirLightDiskIndex;              // body whose disc phase the clouds show

@@ -206,10 +206,14 @@ namespace GroundFog
 	}
 
 	// Raises a ground sample to the water over it. ceiling: from WaterCeiling, or a large number to always look.
+	// water: how much of the surface is water. amount: what is left of the fog there; below 1 only where known
+	// water ends against a cell without any (the surface stays at the water's level and the fog on it thins out:
+	// lowering the surface instead would sink the fog under the water at once and leave a straight edge).
 	// Returns the texture reads it made.
-	uint ApplyWater(float2 xy, float2 uv, float lod, float ceiling, float terrain, inout float z, out float water)
+	uint ApplyWater(float2 xy, float2 uv, float lod, float ceiling, float terrain, inout float z, out float water, out float amount)
 	{
 		water = 0.0;
+		amount = 1.0;
 		float2 surface = 0.0;  // x: depth of the water over the terrain, y: validity
 		uint reads = 0u;
 		if (HasWaterMap()) {
@@ -222,8 +226,9 @@ namespace GroundFog
 			surface = LiveWater(xy, terrain);
 		}
 		if (surface.x > 0.0 && surface.y > 0.0) {
-			z = terrain + surface.x * surface.y;
-			water = surface.y * smoothstep(0.0, 1.0, surface.x * InvShoreDepth);
+			z = terrain + surface.x;
+			water = smoothstep(0.0, 1.0, surface.x * InvShoreDepth);
+			amount = lerp(1.0, surface.y, water);
 		}
 		return reads;
 	}
@@ -234,7 +239,10 @@ namespace GroundFog
 		const float2 uv = MapUv(xy);
 		const float terrain = TerrainZ(uv);
 		float z = terrain;
-		ApplyWater(xy, uv, 0.0, 1.0e30, terrain, z, water);
+		float amount;
+		ApplyWater(xy, uv, 0.0, 1.0e30, terrain, z, water, amount);
+		// The volume path has one factor for water; the thinning toward unknown water goes through it.
+		water *= amount;
 		return z;
 	}
 
@@ -249,6 +257,7 @@ namespace GroundFog
 		float z;        // absolute z of the surface the fog lies on
 		float terrain;  // absolute z of the land under it
 		float water;    // how much of that surface is water: 0 on land, rising to 1 over the shore depth
+		float amount;   // share of the fog left there: below 1 only where known water ends against unknown
 		uint reads;     // texture reads this sample took
 	};
 
@@ -267,7 +276,7 @@ namespace GroundFog
 		const float lod = GroundLod(reach);
 		ground.terrain = TerrainZ(uv, lod);
 		ground.z = ground.terrain;
-		ground.reads = 1u + ApplyWater(xy, uv, lod, waterCeiling, ground.terrain, ground.z, ground.water);
+		ground.reads = 1u + ApplyWater(xy, uv, lod, waterCeiling, ground.terrain, ground.z, ground.water, ground.amount);
 		return ground;
 	}
 
@@ -388,6 +397,15 @@ namespace GroundFog
 		return 1.0 + DriftStrength * 0.8 * (2.0 * n - 1.0) * (1.0 - fade);
 	}
 
+	// Value noise from two lattices turned against each other (by 31 and 68 degrees, the second 1.37 times finer),
+	// so that shapes cut out of it by a threshold do not show the square grid a single lattice has.
+	float TurnedNoise(float2 p)
+	{
+		const float2 a = float2(0.8572 * p.x - 0.5150 * p.y, 0.5150 * p.x + 0.8572 * p.y);
+		const float2 b = float2(0.3746 * p.x - 0.9272 * p.y, 0.9272 * p.x + 0.3746 * p.y) * 1.37 + 19.19;
+		return 0.5 * (ValueNoise(a) + ValueNoise(b));
+	}
+
 	// Fog over water, relative to its mean (about 1): thick and thin areas, patches and wisps, each carried by the
 	// wind at its own speed, so a lake does not hold an even sheet. Three sizes; each fades to its mean as the
 	// detail the caller can resolve (reach) grows past it, so the broad areas still show on a lake far away.
@@ -400,18 +418,18 @@ namespace GroundFog
 		float amount = 1.0;
 		float2 warp = 0.0;
 		if (keep.x > 0.0) {
-			const float n = ValueNoise((xyAbs - 0.6 * WindTravel) * InvSize.x + 41.3);
-			amount *= 1.0 + keep.x * 0.6 * (2.0 * smoothstep(0.2, 0.8, n) - 1.0);
+			const float n = TurnedNoise((xyAbs - 0.6 * WindTravel) * InvSize.x + 41.3);
+			amount *= 1.0 + keep.x * 0.6 * (2.0 * smoothstep(0.3, 0.7, n) - 1.0);
 		}
 		if (keep.y > 0.0) {
-			const float n = ValueNoise((xyAbs - WindTravel) * InvSize.y + 5.7);
-			amount *= 1.0 + keep.y * 0.75 * (2.0 * smoothstep(0.3, 0.7, n) - 1.0);
-			warp = float2(n, 1.0 - n) * 1.6;
+			const float n = TurnedNoise((xyAbs - WindTravel) * InvSize.y + 5.7);
+			amount *= 1.0 + keep.y * 0.75 * (2.0 * smoothstep(0.36, 0.64, n) - 1.0);
+			warp = float2(n, 1.0 - n) * 2.4;
 		}
 		if (keep.z > 0.0) {
-			// Bent by the patch it lies in, so the wisps curl instead of lining up with the noise grid.
-			const float n = ValueNoise((xyAbs - 1.5 * WindTravel) * InvSize.z + warp + 23.1);
-			amount *= 1.0 + keep.z * 0.55 * (2.0 * smoothstep(0.25, 0.75, n) - 1.0);
+			// Bent by the patch it lies in, so the wisps curl.
+			const float n = TurnedNoise((xyAbs - 1.5 * WindTravel) * InvSize.z + warp + 23.1);
+			amount *= 1.0 + keep.z * 0.55 * (2.0 * smoothstep(0.33, 0.67, n) - 1.0);
 		}
 		return amount;
 	}

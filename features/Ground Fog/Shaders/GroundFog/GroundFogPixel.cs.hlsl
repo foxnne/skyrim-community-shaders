@@ -102,10 +102,15 @@ namespace GroundFog
 		float around;
 		float tWater;  // the same for the highest water surface around the point
 		float waterCeiling;
-		float tSlope;  // the same for the lie of the land under the valley layer
-		float slope;   // rise over run of the land around the point
-		float error;   // how far the coarse ground the march reads may be off the land there, game units
+		// The lie of the land under the valley layer (x: rise over run, y: how far the coarse ground the march
+		// reads may be off the land, game units), read at distances LieBase * LieStep^k along the ray and
+		// interpolated between the two around a joint: lieNear at k = lieIndex, lieFar at k + 1.
+		int lieIndex;
+		float2 lieNear;
+		float2 lieFar;
 	};
+	static const float LieBase = 4096.0;
+	static const float LieStep = 1.5;
 	static const float SlowStep = 420.0;
 
 	bool Stale(float last, float t)
@@ -204,22 +209,41 @@ namespace GroundFog
 		return ray.valleyLength > 0.0 ? saturate((t - ray.tValley) / ray.valleyLength) : 0.0;
 	}
 
-	// The lie of the land under the valley layer at a point, from three reads of the terrain one level coarser
-	// than the march reads it, a reach apart around the point. slope: rise over run of the plane through them.
-	// error: how far the ground the march read lies from their mean, which is what the coarse read can be off by
-	// where the land bends (a slope foot, a gully, a ridge).
-	void LandLie(float2 xy, float reach, float terrain, out float slope, out float error)
+	// The lie of the land at a distance along the ray: the terrain as the march reads it there, and three reads one
+	// level coarser a reach apart around the point. x: rise over run of the plane through the three. y: how far
+	// the march's ground lies from their mean, which is what the coarse read can be off by where the land bends (a
+	// slope foot, a gully, a ridge). Four reads.
+	float2 LandLie(Ray ray, float t, inout uint taps)
 	{
-		const float2 uv = MapUv(xy);
-		const float lod = GroundLod(reach) + 1.0;
+		const float reach = max(t * StepGrowth, StepMin);
+		const float2 uv = MapUv(ray.dir.xy * t);
+		const float lod = GroundLod(reach);
 		const float2 du = float2(reach * MapScaleOffset.x, 0.0);
 		const float2 dv = float2(0.0, reach * MapScaleOffset.y);
-		const float a = TerrainZ(uv + du, lod);
-		const float b = TerrainZ(uv - 0.5 * du + 0.8660254 * dv, lod);
-		const float c = TerrainZ(uv - 0.5 * du - 0.8660254 * dv, lod);
+		const float a = TerrainZ(uv + du, lod + 1.0);
+		const float b = TerrainZ(uv - 0.5 * du + 0.8660254 * dv, lod + 1.0);
+		const float c = TerrainZ(uv - 0.5 * du - 0.8660254 * dv, lod + 1.0);
+		taps += 4u;
 		const float2 gradient = float2((2.0 * a - b - c) / 3.0, (b - c) / 1.7320508) / reach;
-		slope = length(gradient);
-		error = abs(terrain - (a + b + c) / 3.0);
+		return float2(length(gradient), abs(TerrainZ(uv, lod) - (a + b + c) / 3.0));
+	}
+
+	// The same at a joint, from the reads at the two fixed distances around it. The distances are the same for
+	// every ray, so the result changes smoothly from pixel to pixel and along the ray; a new read is made only
+	// when the ray passes into the next interval (one in every LieStep times the distance).
+	float2 LandLieAt(Ray ray, float t, inout Slow slow, inout uint taps)
+	{
+		const int index = int(floor(log2(max(t, LieBase) / LieBase) / log2(LieStep)));
+		const float tNear = LieBase * pow(LieStep, float(index));
+		if (index != slow.lieIndex) {
+			if (index == slow.lieIndex + 1)
+				slow.lieNear = slow.lieFar;
+			else
+				slow.lieNear = LandLie(ray, tNear, taps);
+			slow.lieFar = LandLie(ray, tNear * LieStep, taps);
+			slow.lieIndex = index;
+		}
+		return lerp(slow.lieNear, slow.lieFar, saturate((t - tNear) / (tNear * (LieStep - 1.0))));
 	}
 
 	// Hollows hold more, rises less: the terrain averaged around the point against the terrain at it.
@@ -301,7 +325,7 @@ namespace GroundFog
 			// Shared by the sheet and the near volume: they are one body of fog, thin far away and tall close by.
 			// Over water: WaterPreference times as much, through the water's own drifting patches. ground.water
 			// rises from 0 at the waterline over the shore depth, so the change has the shape of the shore.
-			float place = coverage * BurnOff(BurnSunlitNear, joint.shade);
+			float place = coverage * ground.amount * BurnOff(BurnSunlitNear, joint.shade);
 			if (ground.water > 0.0)
 				place *= lerp(1.0, WaterPreference * WaterPatches(xyAbs, reach), ground.water);
 			if (place > 0.0 && BasinStrength > 0.0) {
@@ -335,21 +359,17 @@ namespace GroundFog
 			// Broad banks, travelling with the wind like the sheet's.
 			const float bank = lerp(0.7, 1.25, ValueNoise((xyAbs - WindTravel) * InvBankScale * 0.25 + 7.3));
 			joint.valley.top = max(FarThickness * (0.35 + 0.65 * pool) * bank, 1.0);
-			float place = coverage * valleyFade * pool * BurnOff(BurnSunlitFar, joint.shade);
+			float place = coverage * ground.amount * valleyFade * pool * BurnOff(BurnSunlitFar, joint.shade);
 			if (place > 0.0) {
 				// It pools on level low ground and does not climb hillsides. And the ground it is laid on is
 				// read coarsely this far out: where that ground may be off the land by more than the layer is
 				// thick, the layer would hang over the land or sink into it in bands, so it thins out there,
 				// except near the end of a ray, where its ground is the surface the pixel shows. Water is
-				// level and exactly known. Both terms change over many joints and are held like the shade.
+				// level and exactly known.
 				if (ground.water < 1.0) {
-					if (slow.tSlope < 0.0 || joint.t - slow.tSlope > 0.3 * joint.t) {
-						LandLie(xy, reach, ground.terrain, slow.slope, slow.error);
-						slow.tSlope = joint.t;
-						taps += 3u;
-					}
-					const float level = 1.0 - smoothstep(0.12, 0.35, slow.slope);
-					const float sure = 1.0 - smoothstep(0.5, 1.5, slow.error / joint.valley.top);
+					const float2 lie = LandLieAt(ray, joint.t, slow, taps);
+					const float level = 1.0 - smoothstep(0.12, 0.35, lie.x);
+					const float sure = 1.0 - smoothstep(0.5, 1.5, lie.y / joint.valley.top);
 					place *= lerp(level * lerp(sure, 1.0, ValleyAnchorAt(ray, joint.t)), 1.0, ground.water);
 				}
 				if (ground.water > 0.0)
@@ -404,7 +424,15 @@ namespace GroundFog
 			return;
 		const bool both = la.inside && lb.inside;
 		const float top = both ? 0.5 * (la.top + lb.top) : (la.inside ? la.top : lb.top);
-		const float place = both ? 0.5 * (la.place + lb.place) : (la.inside ? la.place : lb.place);
+		float place = both ? 0.5 * (la.place + lb.place) : (la.inside ? la.place : lb.place);
+		if (valley && both) {
+			// The valley layer's placement can differ a lot between two joints (it is anchored at the end of the
+			// ray). A joint that has only just come within reach of the layer must not count for half at once, or
+			// the fog would step from one pixel to the next: each joint counts by how far inside the reach it is.
+			const float2 h = float2(ha, hb);
+			const float2 weight = max(saturate((ValleyTopMax() - h) / max(ValleyTopMax() - top, 0.05 * ValleyTopMax())) * saturate((h + fill + 64.0) / 64.0), 1e-4);
+			place = (la.place * weight.x + lb.place * weight.y) / (weight.x + weight.y);
+		}
 		const Profile profile = MakeProfile(top, fill);
 		const float tau = extinction * place * LineMean(profile, ha, hb) * (b.t - a.t);
 		if (tau <= 0.0)
@@ -650,8 +678,10 @@ namespace GroundFog
 	const float2 uvStep = dir.xy * GroundFog::MapScaleOffset.xy;
 
 	GroundFog::Slow slow;
-	slow.tShade = slow.tAround = slow.tWater = slow.tSlope = -1.0;
-	slow.shade = slow.around = slow.slope = slow.error = 0.0;
+	slow.tShade = slow.tAround = slow.tWater = -1.0;
+	slow.shade = slow.around = 0.0;
+	slow.lieIndex = -1000;
+	slow.lieNear = slow.lieFar = 0.0;
 	slow.waterCeiling = 1.0e30;
 	GroundFog::Joint a = GroundFog::MakeJoint(ray, 0.0, GroundFog::StepMin, slow, taps);
 

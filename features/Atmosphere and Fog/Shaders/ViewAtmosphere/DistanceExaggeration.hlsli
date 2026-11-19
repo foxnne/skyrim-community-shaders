@@ -8,6 +8,11 @@
 // perspective. Surfaces therefore see the air between them and the camera as if the path were longer. This is done
 // by adding air (never fog) to each interval of the ray, in a second copy of the integrated medium that only
 // surfaces read; sky, clouds and celestial bodies keep the physical copy.
+// Optical depth (strongest channel) at which the added air stops; a define so it can be tuned by shader reload.
+#ifndef DISTANCE_EXAGGERATION_LIMIT
+#	define DISTANCE_EXAGGERATION_LIMIT 1.0
+#endif
+
 namespace ViewAtmosphere
 {
 	/// Extra path per unit of real path at a distance (game units) along a camera ray: x for air (Rayleigh), y for
@@ -36,7 +41,7 @@ namespace ViewAtmosphere
 		const float3 hazeExtinction = sky.aerosolScatter + sky.aerosolAbsorption;
 		const float2 strongest = float2(max(sky.rayleighScatter.x, max(sky.rayleighScatter.y, sky.rayleighScatter.z)),
 			max(hazeExtinction.x, max(hazeExtinction.y, hazeExtinction.z)));
-		column = min(column, 1.0 / max(strongest, 1e-12));
+		column = min(column, DISTANCE_EXAGGERATION_LIMIT / max(strongest, 1e-12));
 		const float2 climb = clamp(distance * sinElevation * falloff, -4.0, 30.0);
 		const float2 meanDensity = float2(
 			abs(climb.x) < 1e-3 ? 1.0 - 0.5 * climb.x : (1.0 - exp(-climb.x)) / climb.x,

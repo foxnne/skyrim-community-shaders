@@ -285,8 +285,11 @@ PS_OUTPUT main(PS_INPUT input)
 
 #			if defined(PHYSICAL_SKY)
 	if (SharedData::physSkyData.enabled) {
-		diffuseColor *= PhysSky::SampleDirLightTr(SampShadowMaskSampler);
-		diffuseColor *= PhysSky::GetDirlightTransmittance(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, SampShadowMaskSampler, true);
+		const float3 lightTransmittance = PhysSky::SampleDirLightTr(SampShadowMaskSampler);
+		const float3 cloudTransmittance = PhysSky::GetDirlightTransmittance(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, SampShadowMaskSampler, true);
+		// foxnne heavy sky: soft light from the cloud deck where the cloud took the beam (0 unless Deck Ground Light is on).
+		const float3 deckGroundColor = dirLightColor * lightTransmittance * PhysSky::GetCloudDeckGroundLight(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, cloudTransmittance.x);
+		diffuseColor = diffuseColor * lightTransmittance * cloudTransmittance + ShadowSampling::GetDeckGroundLighting(deckGroundColor, normal);
 	}
 #			endif
 
@@ -364,8 +367,11 @@ PS_OUTPUT main(PS_INPUT input)
 
 #			if defined(PHYSICAL_SKY)
 	if (SharedData::physSkyData.enabled) {
-		diffuseColor *= PhysSky::SampleDirLightTr(SampShadowMaskSampler);
-		diffuseColor *= PhysSky::GetDirlightTransmittance(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, SampShadowMaskSampler, true);
+		const float3 lightTransmittance = PhysSky::SampleDirLightTr(SampShadowMaskSampler);
+		const float3 cloudTransmittance = PhysSky::GetDirlightTransmittance(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, SampShadowMaskSampler, true);
+		// foxnne heavy sky: soft light from the cloud deck where the cloud took the beam (0 unless Deck Ground Light is on).
+		const float3 deckGroundColor = dirLightColor * lightTransmittance * PhysSky::GetCloudDeckGroundLight(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, cloudTransmittance.x);
+		diffuseColor = diffuseColor * lightTransmittance * cloudTransmittance + ShadowSampling::GetDeckGroundLighting(deckGroundColor, normal);
 	}
 #			endif
 

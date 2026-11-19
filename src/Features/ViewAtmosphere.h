@@ -68,6 +68,12 @@ public:
 	void Render();
 	/** @brief Builds and binds a small omnidirectional medium before the six reflection faces. */
 	void RenderReflection();
+	/**
+	 * @brief Binds to the compute stage what ViewAtmosphere/MediumLighting.hlsli reads, as this frame's volume used it.
+	 * For passes that light their own medium like the volume does. Valid after Render() in the same frame; the
+	 * volume's parameters (Bind(true)), the shared constant buffers and a linear sampler at s0 are the caller's.
+	 */
+	void BindLightingInputs(ID3D11DeviceContext* context);
 	/** @brief Binds the integrated medium to a shader stage. */
 	void Bind(bool compute = false);
 	/** @brief Removes shared medium bindings from both shader stages. */
@@ -114,6 +120,11 @@ private:
 	winrt::com_ptr<ID3D11ComputeShader> reflectionCS, reflectionSkyCS;
 	winrt::com_ptr<ID3D11SamplerState> reflectionSampler;
 	bool reflectionShadersRequested = false;
+	// What the injection pass lit the volume with this frame; the flags in `data` describe exactly these.
+	struct LightingInputs
+	{
+		winrt::com_ptr<ID3D11ShaderResourceView> shadowMap, shadowData, cloudLayer, terrainShadow;
+	} lightingInputs;
 	uint32_t mediumCompositeFrame = UINT32_MAX;
 	bool mediumShaderRequested = false;
 	bool prepared = false;

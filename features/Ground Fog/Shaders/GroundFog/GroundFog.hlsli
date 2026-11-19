@@ -1,11 +1,14 @@
 #ifndef GROUND_FOG_HLSLI
 #define GROUND_FOG_HLSLI
 
-// Ground Fog: a thin sheet of fog that follows the terrain, injected into the shared atmosphere volume.
+// Ground Fog: a thin sheet of fog that follows the terrain.
 //
-// A froxel cell is often taller than the layer, so the density is never point sampled. Each cell gets the exact
-// mean of the height profile over the heights the cell covers, which keeps the layer's optical mass whatever the
-// cell size and needs no jitter.
+// This file holds what both ways of drawing it share: the constants, the ground source, the shaping noise and the
+// height profile with its closed-form integrals.
+// - GroundFogPixel.cs.hlsl integrates the layer along each pixel's view ray (the default).
+// - EvaluateCell below injects it into the shared atmosphere volume (setting VolumeInjection). A froxel cell is
+//   often taller than the layer, so the density is never point sampled there: each cell gets the exact mean of the
+//   height profile over the heights the cell covers.
 //
 // The idea of a noise-shaped column top with an exponential profile integrated in closed form comes from
 // Iwillbewarlock's GroundFog (GPL-3.0). No code is shared with it.
@@ -38,12 +41,33 @@ namespace GroundFog
 		float SunScale;
 		float SkyAmbientScale;
 		float SelfShadow;
-		uint Flags;      // bit 0: raise the ground to the water surface
-		uint DebugMode;  // 0 off, 1 slab, 2 ground height, 3 layer mask
-		float2 Padding;
+		uint Flags;      // bit 0: raise the ground to the water surface, bit 1: the pixel pass runs at half resolution
+		uint DebugMode;  // 0 off, 1 slab, 2 ground height, 3 layer mask, 4 tap count
+		// Pixel pass only.
+		float SurfaceBlend;  // length of the end of the view ray over which the ground becomes the visible surface
+		float SurfaceLift;   // a surface up to this far above the mapped ground is ground, game units
+		float StepMin;       // smallest reach of a ground read, game units
+		float StepGrowth;    // reach of a ground read as a share of the distance from the camera
+		uint MaxSteps;
+		float WaterTop;       // highest water surface near the camera, absolute z
+		float2 PyramidSize;   // texels of the first level of HeightPyramid
+		float PyramidLevels;  // number of levels of HeightPyramid
+		float MapTexel;       // game units per height map texel
+		float2 MapSize;       // texels of HeightMap
+		// The valley layer: deeper fog in hollows and over water, from where the sheet fades out to FarEnd.
+		float FarExtinction;  // extinction at the ground, per game unit, amount included; 0 = none
+		float FarThickness;   // game units
+		float FarEnd;         // game units
+		float FarBasinRadius;
+		float InvFarBasinDepth;
+		float CloudDarkening;  // how much cloud overhead dims the sky light the fog takes
 	};
 
 	Texture2D<float> HeightMap : register(t6);
+	// Coarser copies of HeightMap for the pixel pass. Level 0 has half the size of the map. x: mean height, for
+	// taps that stand for a long stretch of the ray. y: the highest height in and around the texel, which bounds the
+	// ground under a whole stretch from above (see GroundMaxAlong).
+	Texture2D<float2> HeightPyramid : register(t7);
 
 	static const float TopLimit = 0.3;  // banks raise the layer by at most this share per unit of BankStrength
 
@@ -80,6 +104,21 @@ namespace GroundFog
 		return lerp(MapZ.x, MapZ.y, HeightMap.SampleLevel(LinearSampler, uv, 0));
 	}
 
+	// The terrain at a level of detail: 0 is the height map, each level above it has texels twice as long. Continuous
+	// in lod, so the ground a ray is integrated over changes smoothly with distance.
+	float TerrainZ(float2 uv, float lod)
+	{
+		float height;
+		if (lod >= 1.0) {
+			height = HeightPyramid.SampleLevel(LinearSampler, uv, lod - 1.0).x;
+		} else {
+			height = HeightMap.SampleLevel(LinearSampler, uv, 0);
+			if (lod > 0.0)
+				height = lerp(height, HeightPyramid.SampleLevel(LinearSampler, uv, 0).x, lod);
+		}
+		return lerp(MapZ.x, MapZ.y, height);
+	}
+
 	// Absolute z of the surface the fog lies on at a camera-relative xy; water is 1 where that surface is water.
 	float Ground(float2 xy, out float water)
 	{
@@ -94,6 +133,82 @@ namespace GroundFog
 		}
 		return z;
 	}
+
+	// ---------------------------------------------------------------------------------------------------------
+	// Ground source for the pixel pass. The march learns about the ground only through GroundAt, GroundMaxAlong and
+	// GroundAround (and MapCoverage for where the source has data), all taking camera-relative xy. Today they read
+	// the terrain height map. Another source (a floor found from the depth buffer for interiors, a simulation
+	// texture) only has to supply these.
+
+	struct GroundSample
+	{
+		float z;        // absolute z of the surface the fog lies on
+		float terrain;  // absolute z of the land under it
+		float water;    // 1 where that surface is water
+	};
+
+	float GroundLod(float reach)
+	{
+		return max(log2(reach / MapTexel), 0.0);
+	}
+
+	// reach: the size of terrain feature this read should still see, game units; it grows with distance from the
+	// camera. The march puts its joints on the texel grid of the level this selects (GroundCell), so between two
+	// joints the ground read here is straight.
+	GroundSample GroundAt(float2 xy, float reach)
+	{
+		GroundSample ground;
+		ground.terrain = TerrainZ(MapUv(xy), GroundLod(reach));
+		ground.z = ground.terrain;
+		ground.water = 0.0;
+		if (Flags & 1u) {
+			const float camZ = FrameBuffer::CameraPosAdjust.z;
+			const float surface = SharedData::GetWaterData(float3(xy, ground.terrain - camZ)).w + camZ;
+			ground.water = saturate((surface - ground.terrain) / 16.0);
+			ground.z = max(ground.terrain, surface);
+		}
+		return ground;
+	}
+
+	// No ground between a and b is higher than this. One point read of the level whose texels are at least as
+	// long as the stretch: such a texel holds the highest terrain within one texel of its centre in every direction,
+	// and the whole stretch lies inside that.
+	float GroundMaxAlong(float2 a, float2 b)
+	{
+		const float2 span = abs(b - a);
+		const float level = clamp(ceil(log2(max(max(span.x, span.y) / MapTexel, 2.0))), 1.0, PyramidLevels);
+		const int mip = int(level) - 1;
+		const int2 size = max(int2(PyramidSize) >> mip, 1);
+		const int2 texel = clamp(int2(MapUv(0.5 * (a + b)) * size), 0, size - 1);
+		float z = lerp(MapZ.x, MapZ.y, HeightPyramid.Load(int3(texel, mip)).y);
+		if (Flags & 1u)
+			z = max(z, WaterTop);
+		return z;
+	}
+
+	// Texels across the ground source at the level whose grid the march walks for this reach: the coarsest level
+	// that GroundAt(xy, reach) blends in is twice as coarse, so its kinks all lie on this grid.
+	float2 GroundCells(float reach)
+	{
+		const int level = int(min(floor(GroundLod(reach)), PyramidLevels));
+		return level == 0 ? MapSize : float2(max(int2(PyramidSize) >> (level - 1), 1));
+	}
+
+	// The mean terrain height within about radius of a point.
+	float GroundAround(float2 xy, float radius)
+	{
+		return TerrainZ(MapUv(xy), log2(radius / MapTexel) + 0.5);
+	}
+
+	// HOOK (later phase): near-camera wind / fluid simulation. A 2D world-space lookup that scales the density,
+	// and later the layer top, where the simulation covers the point; 1 outside it. Called once per march joint
+	// inside the layer with the absolute xy, so a simulation texture needs only its own uv mapping here.
+	float DensityModifier(float2 xyAbs)
+	{
+		return 1.0;
+	}
+
+	// ---------------------------------------------------------------------------------------------------------
 
 	float Hash(int2 cell)
 	{
@@ -151,14 +266,19 @@ namespace GroundFog
 		return t < 0.25 ? t * t * (0.5 - t * (1.0 / 6.0 - t * (1.0 / 24.0 - t * (1.0 / 120.0 - t * (1.0 / 720.0))))) : t - 1.0 + exp(-t);
 	}
 
-	Profile MakeProfile(float top)
+	Profile MakeProfile(float top, float fill)
 	{
 		Profile profile;
-		profile.fill = GroundFill;
+		profile.fill = fill;
 		profile.top = top;
 		profile.scale = top / max(Steepness, 0.02);
 		profile.total = profile.fill + profile.scale * OneMinusExp(profile.top / profile.scale);
 		return profile;
+	}
+
+	Profile MakeProfile(float top)
+	{
+		return MakeProfile(top, GroundFill);
 	}
 
 	// Relative density at height h above the ground: 1 from -fill to 0, exp(-h / scale) up to top, 0 above. Space
@@ -174,6 +294,20 @@ namespace GroundFog
 		return float4(below + profile.scale * OneMinusExp(t),
 			0.5 * below * below + profile.fill * inside + profile.scale * profile.scale * ExpRemainder(t) + above * profile.total,
 			counted, 0.5 * counted * counted);
+	}
+
+	// Mean relative density along a thin ray whose height above the ground runs straight from ha to hb.
+	float LineMean(Profile profile, float ha, float hb)
+	{
+		const float low = min(ha, hb);
+		const float high = max(ha, hb);
+		if (high <= -profile.fill || low >= profile.top)
+			return 0.0;
+		if (high - low < 1.0) {
+			const float mid = 0.5 * (low + high);
+			return mid < -profile.fill || mid > profile.top ? 0.0 : (mid < 0.0 ? 1.0 : exp(-mid / profile.scale));
+		}
+		return (Antiderivatives(profile, high).x - Antiderivatives(profile, low).x) / (high - low);
 	}
 
 	// For a ray segment whose height above the ground runs from ha to hb, widened to the cell's vertical half size r:

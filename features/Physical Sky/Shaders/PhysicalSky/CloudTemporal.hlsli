@@ -240,6 +240,45 @@ bool ReconstructCloudSurface(float2 position, float sceneDepth, out CloudTempora
 		}
 		found = true;
 	}
+	// A pixel whose four trace texels all belong to another surface (a sky gap
+	// inside foliage, a twig against the sky) still has rays of its own surface
+	// close by. Take those instead of the unrelated 2x2: first the 4x4, then the
+	// 8x8 ring. Depth matching keeps sky cloud off the foreground and vice versa.
+	[loop] for (int radius = 2; radius <= 4 && !found; radius += 2)
+	{
+		[loop] for (int y = 1 - radius; y <= radius; ++y)
+		{
+			[loop] for (int x = 1 - radius; x <= radius; ++x)
+			{
+				const int2 pixel = base + int2(x, y);
+				// The 2x2 never matched and the ring pass has already seen the 4x4.
+				if (all(int2(x, y) >= (radius == 2 ? 0 : -1)) && all(int2(x, y) <= (radius == 2 ? 1 : 2)))
+					continue;
+				if (any(pixel < 0) || any(pixel > maximum))
+					continue;
+				const float4 metadata = TexVolLowAux[pixel];
+				if (abs(metadata.y - sceneDepth) > 0.064)
+					continue;
+				const float4 color = TexVolLowLum[pixel];
+				const float transmittance = TexVolLowTr[pixel];
+				depthRange = float2(min(depthRange.x, metadata.x), max(depthRange.y, metadata.x));
+				sampleMinimum = min(sampleMinimum, float4(color.rgb, transmittance));
+				sampleMaximum = max(sampleMaximum, float4(color.rgb, transmittance));
+				const float2 offset = float2(pixel) - position;
+				const float weight = exp2(-dot(offset, offset));
+				result.transmittance += transmittance * weight;
+				result.color += color * weight;
+				result.metadata += metadata * weight;
+				result.lightning += TexLightningTrace[pixel] * weight;
+				stormMotion += TexVolLowStormMotion[pixel] * weight;
+				weightSum += weight;
+				const float motionWeight = color.a * weight;
+				motionDepthSum += metadata.x * motionWeight;
+				motionWeightSum += motionWeight;
+				found = true;
+			}
+		}
+	}
 	if (weightSum > 0.0) {
 		result.transmittance = clamp(result.transmittance / weightSum, sampleMinimum.w, sampleMaximum.w);
 		result.color /= weightSum;
@@ -253,6 +292,51 @@ bool ReconstructCloudSurface(float2 position, float sceneDepth, out CloudTempora
 	// Empty rays carry boundary distances rather than cloud motion.
 	motionDepth = motionWeightSum > 0.0 ? motionDepthSum / motionWeightSum : result.metadata.x;
 	return found;
+}
+
+// History is resolved per pixel for the surface that pixel showed. A bilinear tap
+// across a silhouette mixes two surfaces, and its filtered scene depth matches
+// neither, so use only the taps that were resolved for this pixel's surface.
+bool ReconstructCloudHistory(float2 position, int2 maximum, float sceneDepth, out CloudTemporalSample result)
+{
+	position = clamp(position, 0.0, float2(maximum));
+	const int2 base = int2(floor(position));
+	const float2 fraction = position - floor(position);
+	int2 pixels[4];
+	float4 weights;
+	[unroll] for (uint i = 0u; i < 4u; ++i)
+	{
+		pixels[i] = min(base + int2(i & 1u, i >> 1u), maximum);
+		// The floor lets a matching neighbour stand in when the tap sits on a rejected texel.
+		weights[i] = abs(TexVolHistoryAux[pixels[i]].y - sceneDepth) <= 0.064 ?
+		                 ((i & 1u) != 0u ? fraction.x : 1.0 - fraction.x) * (i >= 2u ? fraction.y : 1.0 - fraction.y) + 1e-4 :
+		                 0.0;
+	}
+	result = (CloudTemporalSample)0;
+	const float weightSum = dot(weights, 1.0);
+	[branch] if (all(weights > 0.0))
+	{
+		result = ReconstructCloud(TexVolHistoryTr, TexVolHistoryLum, TexVolHistoryAux, TexLightningHistory, position, maximum, false);
+	}
+	else
+	{
+		float2 transmittanceRange = float2(1, 0);
+		[unroll] for (uint tap = 0u; tap < 4u; ++tap)
+		{
+			[branch] if (weights[tap] > 0.0)
+			{
+				const float weight = weights[tap] / weightSum;
+				const float transmittance = TexVolHistoryTr[pixels[tap]];
+				transmittanceRange = float2(min(transmittanceRange.x, transmittance), max(transmittanceRange.y, transmittance));
+				result.transmittance += transmittance * weight;
+				result.color += TexVolHistoryLum[pixels[tap]] * weight;
+				result.metadata += TexVolHistoryAux[pixels[tap]] * weight;
+				result.lightning += TexLightningHistory[pixels[tap]] * weight;
+			}
+		}
+		result.transmittance = clamp(result.transmittance, transmittanceRange.x, transmittanceRange.y);
+	}
+	return weightSum > 0.0;
 }
 
 float3 RebaseCloudHistoryDepth(inout CloudTemporalSample history, float3 direction, float3 previousPosition, float3 cameraDelta)
@@ -431,13 +515,11 @@ void RenderUpperViewPixel(uint2 tid)
 	CloudTemporalSample result;
 	bool useHistory = info.historyValid != 0u && all(info.previousFrameDim > 0.0) && clip.w > 0.0 && all(previousUv == saturate(previousUv));
 	if (useHistory) {
-		result = ReconstructCloud(TexVolHistoryTr, TexVolHistoryLum, TexVolHistoryAux, TexLightningHistory,
-			previousUv * info.previousFrameDim - 0.5, int2(info.previousFrameDim) - 1, false);
+		// History of another surface is never blended in, not even into the traced
+		// phase: an empty foreground history would halve the cloud in a sky gap.
+		useHistory = ReconstructCloudHistory(previousUv * info.previousFrameDim - 0.5, int2(info.previousFrameDim) - 1, sceneDepth, result);
 		const float3 historyPosition = RebaseCloudHistoryDepth(result, ray, previousPosition, cameraDelta);
 		const bool traced = all((pixel & 3u) == CloudPhaseOffset());
-		// The traced phase supplies its own current surface sample. The
-		// background-depth rejection only governs the other checkerboard phases.
-		useHistory = traced || abs(sceneDepth - result.metadata.y) <= 0.064;
 		// Sparse phase neighbours are not a visibility change in a static medium.
 		// Keep their changing bounds from overwriting the other 15 history phases.
 		float localRotationConfidence = 0.0;

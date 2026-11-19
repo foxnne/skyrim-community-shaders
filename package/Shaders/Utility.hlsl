@@ -160,6 +160,9 @@ VS_OUTPUT main(VS_INPUT input)
 	if (TreeWind::IsNearTree()) {
 		TreeWind::NearTree nearTree = TreeWind::GetNearTree(float3x4(World[0], World[1], World[2]), FrameBuffer::CameraPosAdjust.xyz, input.PositionMS.xyz, vertexID);
 		positionMS.xyz += TreeWind::GetNearOffset(nearTree, TreeWind::Wind.x);
+	} else if (TreeWind::IsBespokeTree()) {
+		TreeWind::BespokeTree bespokeTree = TreeWind::GetBespokeTree(float3x4(World[0], World[1], World[2]), FrameBuffer::CameraPosAdjust.xyz, input.PositionMS.xyz, vertexID);
+		positionMS.xyz += TreeWind::GetBespokeOffset(bespokeTree, TreeWind::Wind.x);
 	}
 #		endif
 

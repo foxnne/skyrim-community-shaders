@@ -260,6 +260,11 @@ VS_OUTPUT main(VS_INPUT input)
 		TreeWind::NearTree nearTree = TreeWind::GetNearTree(World, CameraPosAdjust.xyz, input.Position.xyz, vertexID);
 		inputPosition.xyz += TreeWind::GetNearOffset(nearTree, TreeWind::Wind.x);
 		previousInputPosition.xyz += TreeWind::GetNearOffset(nearTree, TreeWind::Wind.y);
+	} else if (TreeWind::IsBespokeTree()) {
+		// A hand-masked tree with its own profile: this frame and the last, so the motion vectors follow it
+		TreeWind::BespokeTree bespokeTree = TreeWind::GetBespokeTree(World, CameraPosAdjust.xyz, input.Position.xyz, vertexID);
+		inputPosition.xyz += TreeWind::GetBespokeOffset(bespokeTree, TreeWind::Wind.x);
+		previousInputPosition.xyz += TreeWind::GetBespokeOffset(bespokeTree, TreeWind::Wind.y);
 	}
 #	endif
 

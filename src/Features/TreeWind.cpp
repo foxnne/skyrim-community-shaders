@@ -67,6 +67,9 @@ void TreeWind::DrawSettings()
 	ImGui::Text("%s", std::vformat(T(TKEY("status_shapes"), "Tree LOD shapes with bend data: {}"), std::make_format_args(shapeCount)).c_str());
 	const size_t nearCount = nearTrees.Count();
 	ImGui::Text("%s", std::vformat(T(TKEY("status_near"), "Nearby tree shapes that sway: {}"), std::make_format_args(nearCount)).c_str());
+	const size_t profileCount = bespokeProfiles.Count();
+	const size_t bespokeCount = nearTrees.BespokeCount();
+	ImGui::Text("%s", std::vformat(T(TKEY("status_bespoke"), "Bespoke tree profiles: {}   shapes moving with one: {}"), std::make_format_args(profileCount, bespokeCount)).c_str());
 
 	ImGui::SeparatorText(T(TKEY("presets"), "Presets"));
 	if (ImGui::Button(T(TKEY("preset_gentle"), "Gentle")))
@@ -125,6 +128,14 @@ void TreeWind::DrawSettings()
 		T(TKEY("near_tree_scale_tooltip"), "Sway of the loaded trees. The same value as Near-Band Sway makes them match the LOD trees behind them."));
 	SliderWithTooltip(T(TKEY("near_tree_min_height"), "Smallest Tree"), &settings.NearTreeMinHeight, 0.0f, 1000.0f, "%.0f",
 		T(TKEY("near_tree_min_height_tooltip"), "Trees and plants shorter than this stay as they are. 250 leaves shrubs and ferns alone."));
+	if (ImGui::Button(T(TKEY("reload_bespoke"), "Reload Bespoke Tree Profiles"))) {
+		bespokeProfiles.Load();
+		nearTrees.Clear();
+	}
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s", T(TKEY("reload_bespoke_tooltip"),
+							  "Reads the profile files in SKSE/Plugins/CommunityShaders/TreeWind again. A profile gives one hand-masked tree model its own motion: still trunk, slow branches, leaf flutter, swinging vines. Needs Nearby Trees Sway."));
+	}
 
 	ImGui::SeparatorText(T(TKEY("tree_mods"), "Tree Mods"));
 	ImGui::Checkbox(T(TKEY("tree_mod_support"), "Tree Mod Support"), &settings.TreeModSupport);
@@ -307,6 +318,7 @@ void TreeWind::BeginDraw(RE::BSRenderPass* a_pass, bool a_lighting)
 	constexpr auto crownFlag = static_cast<uint32_t>(State::ExtraShaderDescriptors::LODTreeCrown);
 	drawBendWeights = nullptr;
 	drawNearTree = false;
+	drawBespoke = false;
 	drawCrownData = nullptr;
 	auto& extraDescriptor = globals::state->permutationData.ExtraShaderDescriptor;
 	extraDescriptor &= ~crownFlag;
@@ -319,7 +331,7 @@ void TreeWind::BeginDraw(RE::BSRenderPass* a_pass, bool a_lighting)
 		// Not tree LOD: a loaded tree sways with bend data measured from its whole model
 		if (nearActive) {
 			if (const auto root = TreeShapes::FindNearTreeRoot(a_pass)) {
-				drawBendWeights = nearTrees.Get(a_pass->geometry, root, globals::state->frameCount, settings.NearTreeMinHeight);
+				drawBendWeights = nearTrees.Get(a_pass->geometry, root, globals::state->frameCount, settings.NearTreeMinHeight, bespokeProfiles, drawBespoke);
 				drawNearTree = drawBendWeights != nullptr;
 			}
 		}
@@ -347,6 +359,7 @@ void TreeWind::EndDraw()
 {
 	drawBendWeights = nullptr;
 	drawNearTree = false;
+	drawBespoke = false;
 	drawCrownData = nullptr;
 	globals::state->permutationData.ExtraShaderDescriptor &= ~static_cast<uint32_t>(State::ExtraShaderDescriptors::LODTreeCrown);
 }
@@ -371,6 +384,8 @@ void TreeWind::SetupResources()
 	windOnCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<WindCB>(), "TreeWind::WindOn");
 	windOffCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<WindCB>(), "TreeWind::WindOff");
 	windNearCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<WindCB>(), "TreeWind::WindNear");
+	windBespokeCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<WindCB>(), "TreeWind::WindBespoke");
+	bespokeProfiles.Load();
 	windOnCrownCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<WindCB>(), "TreeWind::WindOnCrown");
 	windOffCrownCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<WindCB>(), "TreeWind::WindOffCrown");
 }
@@ -457,6 +472,9 @@ void TreeWind::Reset()
 	// Loaded trees: the tree LOD path stays off and the loaded tree path is on
 	data.Params.w = nearActive ? 1.0f : 0.0f;
 	windNearCB->Update(data);
+	// A tree with a bespoke profile: its own path, which reads another data layout
+	data.Params.w = nearActive ? 2.0f : 0.0f;
+	windBespokeCB->Update(data);
 
 	if (bendWeightsTreeModSupport != settings.TreeModSupport) {
 		bendWeights.Clear();
@@ -496,7 +514,7 @@ void TreeWind::SetShaderResources(ID3D11DeviceContext* a_context)
 	// A loaded tree is never a tree LOD crown, so the near buffer needs no crown variant
 	ID3D11Buffer* buffer = drawCrownData ? windOffCrownCB->CB() : windOffCB->CB();
 	if (drawBendWeights)
-		buffer = drawNearTree ? windNearCB->CB() : (drawCrownData ? windOnCrownCB->CB() : windOnCB->CB());
+		buffer = drawNearTree ? (drawBespoke ? windBespokeCB->CB() : windNearCB->CB()) : (drawCrownData ? windOnCrownCB->CB() : windOnCB->CB());
 	a_context->VSSetConstantBuffers(3, 1, &buffer);
 	if (drawBendWeights)
 		a_context->VSSetShaderResources(120, 1, &drawBendWeights);

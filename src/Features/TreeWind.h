@@ -12,6 +12,10 @@
  * so the colour, depth and shadow passes move together. The object LOD vertex shaders cannot tell tree
  * LOD apart at compile time, so each draw gets either the swaying (on) or the still (off) buffer.
  *
+ * Loaded trees (TREE references drawn with their full model) get a third buffer (near): the same wind, with
+ * bend data measured from the whole tree, so they lean and gust like the LOD next to them. Skinned trees keep
+ * the engine's own animation.
+ *
  * The same per-draw test marks the crowns of object LOD trees (ExtraShaderDescriptors::LODTreeCrown), which
  * Lighting.hlsl lights as foliage: wrapped two-sided diffuse, softer screen-space shadow, brighter base colour.
  */
@@ -52,18 +56,21 @@ public:
 		float LODTreeShadowSoftening = 0.7f;
 		float LODTreeNormalUpBias = 0.3f;
 		float LODTreeBrightness = 1.7f;
+		bool NearTrees = true;
+		float NearTreeScale = 0.6f;  // same as NearScale, so both sides of the full-model/LOD swap match
+		float NearTreeMinHeight = 250.0f;
 	};
 
 	/** @brief Mirrors TreeWindCB in TreeWind.hlsli. */
 	struct alignas(16) WindCB
 	{
 		float4 Wind;    // phase, previous phase, wind speed 0-1, wind angle (radians)
-		float4 Params;  // amplitude, near distance, enabled, unused
+		float4 Params;  // amplitude, near distance, tree LOD draw, loaded tree draw
 		float4 Shape;   // bend exponent, use bend weights, flutter strength, per-tree phase spread
 		float4 Detail;  // flutter share, flutter speed, near scale, near ramp end
-		float4 Gusts;   // gust strength, gust rarity, unused, unused
+		float4 Gusts;   // gust strength, gust rarity, loaded tree scale, unused
 	};
-	static_assert(sizeof(WindCB) % 16 == 0);
+	static_assert(sizeof(WindCB) == 80);
 
 	/** @brief Mirrors LODTreeLightingSettings in SharedData.hlsli. Read by the pixel shader for draws flagged LODTreeCrown. */
 	struct alignas(16) LODTreeLightingData
@@ -125,7 +132,7 @@ public:
 	LODTreeLightingData GetCommonBufferData() const;
 
 	/**
-	 * @brief Picks out the tree LOD draws between SetupGeometry and RestoreGeometry of the Lighting and Utility shaders.
+	 * @brief Picks out the tree LOD and loaded tree draws between SetupGeometry and RestoreGeometry of the Lighting and Utility shaders.
 	 * @param a_lighting True for a Lighting draw, which also gets the LODTreeCrown flag when it draws a tree crown.
 	 */
 	void BeginDraw(RE::BSRenderPass* a_pass, bool a_lighting);
@@ -139,11 +146,15 @@ private:
 
 	std::unique_ptr<ConstantBuffer> windOnCB;
 	std::unique_ptr<ConstantBuffer> windOffCB;
+	std::unique_ptr<ConstantBuffer> windNearCB;
 
 	TreeShapes::BendWeights bendWeights;
-	// Bend data of the tree LOD shape being drawn, nullptr for every other draw
+	TreeShapes::NearTrees nearTrees;
+	// Bend data of the tree LOD or loaded tree shape being drawn, nullptr for every other draw
 	ID3D11ShaderResourceView* drawBendWeights = nullptr;
-	bool swayActive = false;  // set once per frame in Reset: sway on and no map menu open
+	bool drawNearTree = false;  // drawBendWeights belongs to a loaded tree
+	bool swayActive = false;    // set once per frame in Reset: sway on and no map menu open
+	bool nearActive = false;    // set once per frame in Reset: loaded trees sway too (outdoors only)
 
 	double phase = 0.0;
 	double prevPhase = 0.0;
@@ -155,4 +166,6 @@ private:
 
 	// Bend data built with the other tree-mod setting is freed
 	bool bendWeightsTreeModSupport = true;
+	// Loaded tree data built with another minimum height is freed
+	float nearTreesMinHeight = 250.0f;
 };

@@ -38,7 +38,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	LODTreeTransmission,
 	LODTreeShadowSoftening,
 	LODTreeNormalUpBias,
-	LODTreeBrightness)
+	LODTreeBrightness,
+	NearTrees,
+	NearTreeScale,
+	NearTreeMinHeight)
 
 namespace
 {
@@ -58,6 +61,8 @@ void TreeWind::DrawSettings()
 						  .c_str());
 	const size_t shapeCount = bendWeights.Count();
 	ImGui::Text("%s", std::vformat(T(TKEY("status_shapes"), "Tree LOD shapes with bend data: {}"), std::make_format_args(shapeCount)).c_str());
+	const size_t nearCount = nearTrees.Count();
+	ImGui::Text("%s", std::vformat(T(TKEY("status_near"), "Nearby tree shapes that sway: {}"), std::make_format_args(nearCount)).c_str());
 
 	ImGui::SeparatorText(T(TKEY("presets"), "Presets"));
 	if (ImGui::Button(T(TKEY("preset_gentle"), "Gentle")))
@@ -105,6 +110,17 @@ void TreeWind::DrawSettings()
 		T(TKEY("gust_strength_storm_tooltip"), "Extra sway during a gust in rain or snow."));
 	SliderWithTooltip(T(TKEY("gust_rarity_storm"), "Gust Rarity, Storms"), &settings.GustRarityStorm, 2.0f, 60.0f, "%.0f",
 		T(TKEY("gust_rarity_storm_tooltip"), "Higher = rarer, shorter gusts in storms."));
+
+	ImGui::SeparatorText(T(TKEY("near_trees"), "Nearby Trees"));
+	ImGui::Checkbox(T(TKEY("near_trees_enabled"), "Nearby Trees Sway"), &settings.NearTrees);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s", T(TKEY("near_trees_enabled_tooltip"),
+							  "Fully loaded trees lean and gust like the distant ones, leaves and trunk together, on top of their own leaf flutter. Trees animated by the game itself (with bones) are left alone. Needs Trees Sway."));
+	}
+	SliderWithTooltip(T(TKEY("near_tree_scale"), "Nearby Tree Sway"), &settings.NearTreeScale, 0.0f, 1.5f, "%.2f",
+		T(TKEY("near_tree_scale_tooltip"), "Sway of the loaded trees. The same value as Near-Band Sway makes them match the LOD trees behind them."));
+	SliderWithTooltip(T(TKEY("near_tree_min_height"), "Smallest Tree"), &settings.NearTreeMinHeight, 0.0f, 1000.0f, "%.0f",
+		T(TKEY("near_tree_min_height_tooltip"), "Trees and plants shorter than this stay as they are. 250 leaves shrubs and ferns alone."));
 
 	ImGui::SeparatorText(T(TKEY("tree_mods"), "Tree Mods"));
 	ImGui::Checkbox(T(TKEY("tree_mod_support"), "Tree Mod Support"), &settings.TreeModSupport);
@@ -278,6 +294,7 @@ void TreeWind::BeginDraw(RE::BSRenderPass* a_pass, bool a_lighting)
 {
 	constexpr auto crownFlag = static_cast<uint32_t>(State::ExtraShaderDescriptors::LODTreeCrown);
 	drawBendWeights = nullptr;
+	drawNearTree = false;
 	auto& extraDescriptor = globals::state->permutationData.ExtraShaderDescriptor;
 	extraDescriptor &= ~crownFlag;
 
@@ -285,8 +302,16 @@ void TreeWind::BeginDraw(RE::BSRenderPass* a_pass, bool a_lighting)
 	if (!swayActive && !lightCrowns)
 		return;
 	const auto kind = TreeShapes::Classify(a_pass, settings.TreeModSupport);
-	if (kind == TreeShapes::Kind::None)
+	if (kind == TreeShapes::Kind::None) {
+		// Not tree LOD: a loaded tree sways with bend data measured from its whole model
+		if (nearActive) {
+			if (const auto root = TreeShapes::FindNearTreeRoot(a_pass)) {
+				drawBendWeights = nearTrees.Get(a_pass->geometry, root, globals::state->frameCount, settings.NearTreeMinHeight);
+				drawNearTree = drawBendWeights != nullptr;
+			}
+		}
 		return;
+	}
 	if (swayActive)
 		drawBendWeights = bendWeights.Get(a_pass->geometry, kind, globals::state->frameCount, settings.TreeModSupport);
 	// Only shapes that kept their LOD model's flags: other two-sided object LOD is not a tree.
@@ -301,6 +326,7 @@ void TreeWind::BeginDraw(RE::BSRenderPass* a_pass, bool a_lighting)
 void TreeWind::EndDraw()
 {
 	drawBendWeights = nullptr;
+	drawNearTree = false;
 	globals::state->permutationData.ExtraShaderDescriptor &= ~static_cast<uint32_t>(State::ExtraShaderDescriptors::LODTreeCrown);
 }
 
@@ -319,6 +345,7 @@ void TreeWind::SetupResources()
 {
 	windOnCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<WindCB>(), "TreeWind::WindOn");
 	windOffCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<WindCB>(), "TreeWind::WindOff");
+	windNearCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<WindCB>(), "TreeWind::WindNear");
 }
 
 float TreeWind::GetStorminess(const RE::TESWeather* a_weather) const
@@ -378,23 +405,37 @@ void TreeWind::Reset()
 	// The map menus draw the LOD too, and it should stand still there. While off, the draws skip all
 	// per-draw work; both buffers then read as off, whatever is still bound at VS b3.
 	swayActive = settings.Enabled && !globals::state->isMapMenuOpen;
+	// Loaded trees sway only under the open sky: plants in interiors stay still
+	const auto sky = globals::game::sky;
+	nearActive = swayActive && settings.NearTrees && sky && sky->mode.get() == RE::Sky::Mode::kFull;
 
 	WindCB data{};
 	data.Wind = { static_cast<float>(phase), static_cast<float>(prevPhase), windSpeed, windAngle };
 	data.Params = { settings.Amplitude, settings.MinDistance, swayActive ? 1.0f : 0.0f, 0.0f };
 	data.Shape = { settings.BendExponent, 1.0f, settings.Flutter, settings.TreeSpread };
 	data.Detail = { settings.FlutterShare, settings.FlutterSpeed, settings.NearScale, settings.NearRampEnd };
-	data.Gusts = { gustStrength, gustRarity, 0.0f, 0.0f };
+	data.Gusts = { gustStrength, gustRarity, std::max(settings.NearTreeScale, 0.0f), 0.0f };
 	windOnCB->Update(data);
 
 	data.Params.z = 0.0f;
 	windOffCB->Update(data);
+
+	// Loaded trees: the tree LOD path stays off and the loaded tree path is on
+	data.Params.w = nearActive ? 1.0f : 0.0f;
+	windNearCB->Update(data);
 
 	if (bendWeightsTreeModSupport != settings.TreeModSupport) {
 		bendWeights.Clear();
 		bendWeightsTreeModSupport = settings.TreeModSupport;
 	} else if (globals::state->frameCount % 300 == 0) {
 		bendWeights.Evict(globals::state->frameCount);
+	}
+
+	if (nearTreesMinHeight != settings.NearTreeMinHeight) {
+		nearTrees.Clear();
+		nearTreesMinHeight = settings.NearTreeMinHeight;
+	} else if (globals::state->frameCount % 300 == 150) {
+		nearTrees.Evict(globals::state->frameCount);
 	}
 }
 
@@ -416,7 +457,9 @@ void TreeWind::SetShaderResources(ID3D11DeviceContext* a_context)
 	if (type != RE::BSShader::Type::Lighting && type != RE::BSShader::Type::Utility)
 		return;
 
-	ID3D11Buffer* buffer = drawBendWeights ? windOnCB->CB() : windOffCB->CB();
+	ID3D11Buffer* buffer = windOffCB->CB();
+	if (drawBendWeights)
+		buffer = drawNearTree ? windNearCB->CB() : windOnCB->CB();
 	a_context->VSSetConstantBuffers(3, 1, &buffer);
 	if (drawBendWeights)
 		a_context->VSSetShaderResources(120, 1, &drawBendWeights);

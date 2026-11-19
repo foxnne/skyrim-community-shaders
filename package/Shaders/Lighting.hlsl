@@ -125,6 +125,15 @@ struct VS_OUTPUT
 };
 #ifdef VSHADER
 
+// Tree LOD sways only with vertex colours and without TREE_ANIM (TREE_WIND_NEAR_ONLY otherwise); loaded trees
+// sway in every permutation a tree shape can use. Both are picked per draw by the Tree Wind buffer.
+#	if defined(TREE_WIND) && !defined(LOD) && !defined(LODLANDSCAPE) && !defined(LANDSCAPE) && !defined(SKINNED) && !defined(EYE)
+#		define TREE_WIND_VS
+#		if !defined(VC) || defined(TREE_ANIM)
+#			define TREE_WIND_NEAR_ONLY
+#		endif
+#	endif
+
 cbuffer PerTechnique : register(b0)
 {
 	float4 HighDetailRange : packoffset(c0);  // loaded cells center in xy, size in zw
@@ -161,6 +170,8 @@ cbuffer VS_PerFrame : register(b12)
 #	if defined(SKINNED)
 	float3 BonesPivot : packoffset(c40);
 	float3 PreviousBonesPivot : packoffset(c41);
+#	elif defined(TREE_WIND_VS)
+	float4 CameraPosAdjust : packoffset(c40);  // as in FrameBuffer.hlsli, which is this same buffer
 #	endif  // SKINNED
 };
 
@@ -175,8 +186,7 @@ float2 GetTreeShiftVector(float4 position, float4 color)
 }
 #	endif  // TREE_ANIM
 
-#	if defined(TREE_WIND) && defined(VC) && !defined(TREE_ANIM) && !defined(LOD) && !defined(LODLANDSCAPE) && !defined(LANDSCAPE) && !defined(SKINNED) && !defined(EYE)
-#		define TREE_WIND_VS
+#	if defined(TREE_WIND_VS)
 #		include "TreeWind/TreeWind.hlsli"
 #	endif
 
@@ -218,14 +228,27 @@ VS_OUTPUT main(VS_INPUT input)
 	float3 normal = -1.0.xxx + 2.0.xxx * input.Normal.xyz;
 
 	inputPosition.xyz += normal.xyz * treeShiftVector.x;
+#		if defined(TREE_WIND_VS)
+	// As without Tree Wind, the previous position carries the current leaf flutter (see previousWorldPosition)
+	previousInputPosition.xyz += normal.xyz * treeShiftVector.x;
+#		else
 	previousInputPosition.xyz += normal.xyz * treeShiftVector.y;
+#		endif
 #	endif
 
 #	if defined(TREE_WIND_VS)
+#		if !defined(TREE_WIND_NEAR_ONLY)
 	if (TreeWind::IsEnabled()) {
 		float nearScale = TreeWind::GetNearScale(World, input.Position.xyz);
 		inputPosition.xy += TreeWind::GetOffset(input.Position.xyz, TreeWind::Wind.x, vertexID, nearScale);
 		previousInputPosition.xy += TreeWind::GetOffset(input.Position.xyz, TreeWind::Wind.y, vertexID, nearScale);
+	}
+#		endif
+	// Loaded trees: after the engine's leaf flutter, the same offset for this frame and the last
+	if (TreeWind::IsNearTree()) {
+		TreeWind::NearTree nearTree = TreeWind::GetNearTree(World, CameraPosAdjust.xyz, input.Position.xyz, vertexID);
+		inputPosition.xyz += TreeWind::GetNearOffset(nearTree, TreeWind::Wind.x);
+		previousInputPosition.xyz += TreeWind::GetNearOffset(nearTree, TreeWind::Wind.y);
 	}
 #	endif
 

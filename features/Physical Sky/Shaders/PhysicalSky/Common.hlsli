@@ -835,13 +835,16 @@ Texture2D<float4> TexSkyTail : register(t66);
 	float GetCloudDeckGroundLight(float3 worldPosAbs, float directTransmittance)
 	{
 		const SharedData::PhysSkyData data = SharedData::physSkyData;
-		[branch] if (data.deckGroundLight <= 0.0 || !data.enableVolumetricClouds || data.volCloudLowThickness <= 0.0)
-			return 0.0;
-		if (CloudShadowVolume::MeanProfile.Load(int3(0, 0, 0)).w == 0.0)
-			return 0.0;
-		const float altitude = worldPosAbs.z - data.zBottom;
-		const float below = 1.0 - smoothstep(data.volCloudLowBottom, data.volCloudLowBottom + 0.25 * data.volCloudLowThickness, altitude);
-		return data.deckGroundLight * below * (1.0 - saturate(directTransmittance)) * CloudShadowVolume::SampleDeckLight(worldPosAbs.xy, data.shadowVolumeRange);
+		float light = 0.0;
+		[branch] if (data.deckGroundLight > 0.0 && data.enableVolumetricClouds && data.volCloudLowThickness > 0.0)
+		{
+			// Row 0 of the profile column is its valid flag: no map before the first shadow pass.
+			const float valid = CloudShadowVolume::MeanProfile.Load(int3(0, 0, 0)).w;
+			const float altitude = worldPosAbs.z - data.zBottom;
+			const float below = 1.0 - smoothstep(data.volCloudLowBottom, data.volCloudLowBottom + 0.25 * data.volCloudLowThickness, altitude);
+			light = (valid != 0.0 ? data.deckGroundLight : 0.0) * below * (1.0 - saturate(directTransmittance)) * CloudShadowVolume::SampleDeckLight(worldPosAbs.xy, data.shadowVolumeRange);
+		}
+		return light;
 	}
 #endif
 

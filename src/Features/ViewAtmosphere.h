@@ -43,10 +43,18 @@ public:
 		float shadowBias = 0.002f;
 		float depthDistribution = 8.0f;
 		float lookupJitter = 1.0f;
+		// Distance exaggeration: haze between the camera and a surface as if the path were this many times longer.
+		// 1 is physical. Sky, clouds and celestial bodies never use it.
+		float distanceExaggeration = 1.0f;
+		float distanceExaggerationStart = 150.0f;  // metres: physical up to here
+		float distanceExaggerationFull = 1500.0f;  // metres: full factor from here on
+		float distanceExaggerationHaze = 0.35f;    // share of the factor given to aerosol haze (air always gets all of it)
 		float padding = 0.0f;
 	} settings;
 	STATIC_ASSERT_ALIGNAS_16(Settings);
-	static_assert(sizeof(Settings) == 64);
+	static_assert(sizeof(Settings) == 80);
+	/** @brief True when surfaces read the exaggerated copy of the integrated medium. */
+	bool DistanceExaggerationActive() const { return settings.distanceExaggeration > 1.0005f; }
 
 	/** @brief Prepares the shared volume before standalone fog selects its path. */
 	bool Prepare();

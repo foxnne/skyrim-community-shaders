@@ -667,7 +667,8 @@ Texture2D<float4> TexSkyTail : register(t66);
 	ViewAtmosphere::Medium SampleReflectionMedium(float3 viewDir, float2 skyCoord, float distance, SamplerState samp, bool skyRay)
 	{
 		const float2 uv = SkyViewLutTexel(skyCoord, 32u);
-		ViewAtmosphere::Medium medium = ViewAtmosphere::SampleReflection(uv, distance, samp);
+		// A reflected surface sees distance-exaggerated air like a directly viewed one; the sky and the cloud in front of it stay physical.
+		ViewAtmosphere::Medium medium = ViewAtmosphere::SampleReflection(uv, distance, samp, skyRay ? 0.0 : ViewAtmosphere::SurfaceSet());
 		if (SharedData::physSkyData.enableVolumetricClouds) {
 			const float depth = TexVolCubeDepth.SampleLevel(samp, viewDir, 0).x * 1000.0 / GAME_UNIT_TO_M;
 			const float visibility = skyRay ? 1.0 : saturate((distance - depth) * GAME_UNIT_TO_M * 0.025);

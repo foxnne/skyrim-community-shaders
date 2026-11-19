@@ -37,7 +37,11 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	sampleJitter,
 	shadowBias,
 	depthDistribution,
-	lookupJitter)
+	lookupJitter,
+	distanceExaggeration,
+	distanceExaggerationStart,
+	distanceExaggerationFull,
+	distanceExaggerationHaze)
 
 void ViewAtmosphere::LoadSettings(json& value)
 {
@@ -61,6 +65,10 @@ void ViewAtmosphere::LoadSettings(json& value)
 	settings.shadowBias = bounded(settings.shadowBias, defaults.shadowBias, 0.0f, 0.05f);
 	settings.depthDistribution = bounded(settings.depthDistribution, defaults.depthDistribution, 1.0f, 128.0f);
 	settings.lookupJitter = bounded(settings.lookupJitter, defaults.lookupJitter, 0.0f, 1.0f);
+	settings.distanceExaggeration = bounded(settings.distanceExaggeration, defaults.distanceExaggeration, 1.0f, 12.0f);
+	settings.distanceExaggerationStart = bounded(settings.distanceExaggerationStart, defaults.distanceExaggerationStart, 0.0f, 2000.0f);
+	settings.distanceExaggerationFull = bounded(settings.distanceExaggerationFull, defaults.distanceExaggerationFull, 100.0f, 8000.0f);
+	settings.distanceExaggerationHaze = bounded(settings.distanceExaggerationHaze, defaults.distanceExaggerationHaze, 0.0f, 1.0f);
 	lastFrame = UINT32_MAX;
 }
 
@@ -119,6 +127,13 @@ void ViewAtmosphere::DrawSettings()
 	ImGui::SliderFloat(T(TKEY("sample_jitter"), "Sample Jitter"), &settings.sampleJitter, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	ImGui::SliderFloat(T(TKEY("shadow_bias"), "Directional Shadow Bias"), &settings.shadowBias, 0.0f, 0.05f, "%.4f", ImGuiSliderFlags_AlwaysClamp);
 	ImGui::TextWrapped("%s", T(TKEY("sampling_hint"), "More history reduces noise but reacts more slowly. Sample jitter moves lighting samples inside each cell. Excessive shadow bias can cause light leaks."));
+	ImGui::SeparatorText(T(TKEY("distance_exaggeration_header"), "Distance Exaggeration"));
+	ImGui::TextWrapped("%s", T(TKEY("distance_exaggeration_hint"), "The game world is only a few kilometres across, so physically sized air barely tints distant terrain. This thickens the air in front of terrain, objects and water as if they were several times farther away, building up with distance. The sky, clouds, sun and moons are not changed, and neither are height fog and ground fog. 1 is physical."));
+	ImGui::SliderFloat(T(TKEY("distance_exaggeration"), "Distance Exaggeration"), &settings.distanceExaggeration, 1.0f, 12.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+	ImGui::SliderFloat(T(TKEY("distance_exaggeration_start"), "Exaggeration Start"), &settings.distanceExaggerationStart, 0.0f, 2000.0f, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
+	ImGui::SliderFloat(T(TKEY("distance_exaggeration_full"), "Exaggeration Full"), &settings.distanceExaggerationFull, 100.0f, 8000.0f, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
+	ImGui::SliderFloat(T(TKEY("distance_exaggeration_haze"), "Exaggeration Haze Share"), &settings.distanceExaggerationHaze, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	ImGui::TextWrapped("%s", T(TKEY("distance_exaggeration_ranges_hint"), "Everything nearer than the start keeps physical air; the full factor applies beyond the second distance. Haze share is how much of the factor also thickens the grey aerosol haze: blue air gives depth, haze flattens."));
 	if (!IsReady() && ImGui::TreeNode(T(TKEY("standalone_sampling"), "Standalone Fog Sampling"))) {
 		ImGui::TextWrapped("%s", T(TKEY("standalone_hint"), "These controls only affect the separate volumetric fog path."));
 		ImGui::SliderFloat(T(TKEY("depth_distribution"), "Depth Distribution Scale"), &settings.depthDistribution, 1.0f, 128.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
@@ -231,11 +246,13 @@ bool ViewAtmosphere::Prepare()
 	const bool resized = !source || std::memcmp(&data.atlas, &next.atlas, sizeof(next.atlas)) != 0;
 	const bool changed = resized || std::memcmp(data.grids, next.grids, sizeof(next.grids)) != 0 || data.flags.y != uint32_t(useFog);
 	if (resized) {
-		auto makeVolume = [&](const char* name) {
+		// The integrated volumes hold two copies stacked in depth: the physical medium, and above it the copy with
+		// distance exaggeration that surfaces read. Shaders address them through ViewAtmosphere::IntegratedUvw.
+		auto makeVolume = [&](const char* name, uint32_t copies = 1u) {
 			D3D11_TEXTURE3D_DESC desc{};
 			desc.Width = next.atlas.x;
 			desc.Height = next.atlas.y;
-			desc.Depth = next.atlas.z;
+			desc.Depth = next.atlas.z * copies;
 			desc.MipLevels = 1;
 			desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 			desc.Usage = D3D11_USAGE_DEFAULT;
@@ -255,8 +272,8 @@ bool ViewAtmosphere::Prepare()
 		};
 		source = makeVolume("ViewAtmosphere::Source");
 		history = makeVolume("ViewAtmosphere::History");
-		integratedLum = makeVolume("ViewAtmosphere::Luminance");
-		integratedTr = makeVolume("ViewAtmosphere::Transmittance");
+		integratedLum = makeVolume("ViewAtmosphere::Luminance", 2u);
+		integratedTr = makeVolume("ViewAtmosphere::Transmittance", 2u);
 		const float zero[4]{};
 		const float one[4]{ 1, 1, 1, 1 };
 		globals::d3d::context->ClearUnorderedAccessViewFloat(source->uav.get(), zero);
@@ -269,7 +286,8 @@ bool ViewAtmosphere::Prepare()
 	const float historyWeight = std::clamp(settings.historyWeight, 0.0f, 0.99f);
 	next.history = { !changed && lastFrame != UINT32_MAX && lastFrame + 1u == globals::state->frameCount && temporal ? historyWeight : 0.0f,
 		temporal && historyWeight > 0.0f ? 1.0f : 0.0f,
-		temporal && historyWeight > 0.0f ? std::clamp(settings.sampleJitter, 0.0f, 1.0f) : 0.0f, 0 };
+		temporal && historyWeight > 0.0f ? std::clamp(settings.sampleJitter, 0.0f, 1.0f) : 0.0f,
+		DistanceExaggerationActive() ? 1.0f : 0.0f };  // w: surfaces read the exaggerated copy
 	next.clipToWorld = globals::game::frameBufferCached.GetCameraViewProjUnjittered().Invert();
 	data = next;
 	prepared = true;
@@ -420,7 +438,8 @@ void ViewAtmosphere::RenderReflection()
 		reflectionParameters->CreateSRV();
 		auto makeVolume = [](const char* name) {
 			D3D11_TEXTURE3D_DESC desc{};
-			desc.Width = desc.Height = desc.Depth = 32;
+			desc.Width = desc.Height = 32;
+			desc.Depth = 64;  // physical copy, then the copy with distance exaggeration for reflected surfaces
 			desc.MipLevels = 1;
 			desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 			desc.Usage = D3D11_USAGE_DEFAULT;
@@ -482,6 +501,8 @@ void ViewAtmosphere::RenderReflection()
 	reflection.grids[0].depth = { 0, distance, offset, std::log2(1.0f + distance / offset) };
 	reflection.atlas = { 32, 32, 32, 0 };
 	reflection.flags = { 1u, uint32_t(useFog), (useIBL ? 4u : 0u) | (skylighting.loaded && skylighting.texProbeArray ? 8u : 0u) | (terrainReady ? 256u : 0u) | (cloudLayer ? 512u : 0u), 1u };
+	const bool exaggerate = DistanceExaggerationActive() && dispatchCB;
+	reflection.history = { 0.0f, 0.0f, 0.0f, exaggerate ? 1.0f : 0.0f };
 	reflectionParameters->Update(&reflection, sizeof(reflection));
 	auto bind = [&](UINT slot, ID3D11ShaderResourceView* srv) { context->CSSetShaderResources(slot, 1, &srv); };
 	ID3D11Buffer* shared[] = { globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
@@ -521,7 +542,16 @@ void ViewAtmosphere::RenderReflection()
 	globals::profiler->BeginPass("ViewAtmosphere::ReflectionMedium");
 	context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
 	context->CSSetShader(reflectionCS.get(), nullptr, 0);
-	context->Dispatch(16, 32, 1);
+	// Second pass only while distance exaggeration is on: the same medium with extra air, for reflected surfaces.
+	auto* dispatch = dispatchCB ? dispatchCB->CB() : nullptr;
+	context->CSSetConstantBuffers(0, 1, &dispatch);
+	for (uint32_t set = 0; set < (exaggerate ? 2u : 1u); ++set) {
+		if (dispatchCB)
+			dispatchCB->Update(DirectX::XMUINT4{ set, 0, 0, 0 });
+		context->Dispatch(16, 32, 1);
+	}
+	dispatch = nullptr;
+	context->CSSetConstantBuffers(0, 1, &dispatch);
 	context->CSSetUnorderedAccessViews(0, 2, nullOutputs, nullptr);
 	globals::profiler->EndPass();
 	for (UINT slot : { 2u, 25u, 50u, 60u, 61u, 62u, 63u, 67u, 69u, 70u, 76u, 77u, 112u, 114u, 115u, 127u })

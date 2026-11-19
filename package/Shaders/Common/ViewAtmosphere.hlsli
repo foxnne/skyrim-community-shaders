@@ -66,6 +66,20 @@ namespace ViewAtmosphere
 		return float3(xy, clamp(slice + 0.5, 0.5, float(grid.size.z) + 0.5)) / Data[0].atlas.xyz;
 	}
 
+	// The integrated volumes are twice the atlas depth and hold two copies: the physical medium in the lower half
+	// and, when distance exaggeration is on, the same medium with extra air in the upper half. `set` picks one.
+	// Halving is exact, so set 0 addresses the same texels with the same weights as an undoubled volume.
+	float3 IntegratedUvw(float3 uvw, float set)
+	{
+		return float3(uvw.xy, uvw.z * 0.5 + set * 0.5);
+	}
+
+	/// The copy surfaces read: 1 (exaggerated) while distance exaggeration is on, otherwise 0 (physical).
+	float SurfaceSet()
+	{
+		return Data[0].history.w;
+	}
+
 	float3 Position(Grid grid, uint3 coord, float3 offset)
 	{
 		const float2 uv = (coord.xy + offset.xy) / grid.size.xy;
@@ -99,13 +113,13 @@ namespace ViewAtmosphere
 		return source.SampleLevel(samp, uvw, 0).rgb;
 	}
 
-	Medium SampleReflection(float2 uv, float distance, SamplerState samp)
+	Medium SampleReflection(float2 uv, float distance, SamplerState samp, float set)
 	{
 		const float end = clamp(distance, 0.0, Data[0].grids[0].depth.y);
 		const float slice = min(floor(31.0 * log2(1.0 + end / Data[0].grids[0].depth.z) / Data[0].grids[0].depth.w), 30.0);
 		const float fraction = saturate((end - ReflectionDistance(slice)) / max(ReflectionDistance(slice + 1.0) - ReflectionDistance(slice), 1e-6));
-		const float3 nearUv = float3(uv, (slice + 0.5) / 32.0);
-		const float3 farUv = float3(uv, (slice + 1.5) / 32.0);
+		const float3 nearUv = IntegratedUvw(float3(uv, (slice + 0.5) / 32.0), set);
+		const float3 farUv = IntegratedUvw(float3(uv, (slice + 1.5) / 32.0), set);
 		const float3 nearL = SampleReflectionTexture(Luminance, nearUv, samp);
 		const float3 farL = SampleReflectionTexture(Luminance, farUv, samp);
 		const float3 nearT = SampleReflectionTexture(Transmittance, nearUv, samp);
@@ -122,7 +136,13 @@ namespace ViewAtmosphere
 		return result;
 	}
 
-	Medium Sample(float2 uv, float distance, SamplerState samp)
+	/// Physical medium of the reflection cache: sky, clouds and celestial bodies.
+	Medium SampleReflection(float2 uv, float distance, SamplerState samp)
+	{
+		return SampleReflection(uv, distance, samp, 0.0);
+	}
+
+	Medium Sample(float2 uv, float distance, SamplerState samp, float set)
 	{
 		Medium result = Identity();
 		// Not unrolled: callers inline this several times and unrolling triples each copy.
@@ -132,7 +152,7 @@ namespace ViewAtmosphere
 			if (distance <= grid.depth.x)
 				break;
 			if (distance >= grid.depth.y) {
-				const float3 uvw = AtlasUv(grid, uv, grid.size.z);
+				const float3 uvw = IntegratedUvw(AtlasUv(grid, uv, grid.size.z), set);
 				result.luminance += result.transmittance * Luminance.SampleLevel(samp, uvw, 0).rgb;
 				result.transmittance *= Transmittance.SampleLevel(samp, uvw, 0).rgb;
 				continue;
@@ -142,8 +162,8 @@ namespace ViewAtmosphere
 			const float nearDistance = Distance(grid, slice);
 			const float farDistance = Distance(grid, slice + 1.0);
 			const float fraction = saturate((end - nearDistance) / max(farDistance - nearDistance, 1e-6));
-			const float3 nearUv = AtlasUv(grid, uv, slice);
-			const float3 farUv = AtlasUv(grid, uv, slice + 1.0);
+			const float3 nearUv = IntegratedUvw(AtlasUv(grid, uv, slice), set);
+			const float3 farUv = IntegratedUvw(AtlasUv(grid, uv, slice + 1.0), set);
 			const float3 nearL = Luminance.SampleLevel(samp, nearUv, 0).rgb;
 			const float3 farL = Luminance.SampleLevel(samp, farUv, 0).rgb;
 			const float3 nearT = Transmittance.SampleLevel(samp, nearUv, 0).rgb;
@@ -160,6 +180,12 @@ namespace ViewAtmosphere
 			result.transmittance *= tr;
 		}
 		return result;
+	}
+
+	/// Physical medium: sky, clouds, celestial bodies and anything that is not a surface.
+	Medium Sample(float2 uv, float distance, SamplerState samp)
+	{
+		return Sample(uv, distance, samp, 0.0);
 	}
 }
 #endif

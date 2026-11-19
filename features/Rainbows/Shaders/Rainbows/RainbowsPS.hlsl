@@ -94,7 +94,7 @@ float4 main(Rainbows::Interpolants input) :
 #if defined(PHYSICAL_SKY) || defined(EXP_HEIGHT_FOG)
 	if (SharedData::PostWaterComposite) {
 		float2 uv = input.Position.xy / RenderSize;
-		float3 medium = ViewMedium::SampleViewMedium(direction * max(scatterDistance, 1.0), uv, LinearSampler).transmittance;
+		float3 medium = ViewMedium::SampleViewMedium(direction * max(scatterDistance, 1.0), uv, LinearSampler, false, false).transmittance;
 		transmittance = lerp(1.0, medium, FogAbsorption);
 	}
 #endif

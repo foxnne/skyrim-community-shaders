@@ -17,12 +17,14 @@ Texture2D<float4> TexMediumCloudDepth : register(t116);
 
 namespace ViewMedium
 {
-	ViewAtmosphere::Medium SampleHeightMedium(float3 position, float2 screenUV, SamplerState samplerState)
+	// `surface`: the position is on a surface (terrain, objects, water, particles), which sees distance-exaggerated
+	// air when that is on. Sky, clouds, celestial bodies and light paths pass false and stay physical.
+	ViewAtmosphere::Medium SampleHeightMedium(float3 position, float2 screenUV, SamplerState samplerState, bool surface)
 	{
 		if (ViewAtmosphere::Enabled()) {
 			const float4 clip = mul(FrameBuffer::CameraViewProjUnjittered, float4(position, 1));
 			const float2 volumeUv = clip.xy / max(clip.w, 1e-6) * float2(0.5, -0.5) + 0.5;
-			return ViewAtmosphere::Sample(volumeUv, length(position), samplerState);
+			return ViewAtmosphere::Sample(volumeUv, length(position), samplerState, surface ? ViewAtmosphere::SurfaceSet() : 0.0);
 		}
 		ViewAtmosphere::Medium result = ViewAtmosphere::Identity();
 #ifdef EXP_HEIGHT_FOG
@@ -35,11 +37,16 @@ namespace ViewMedium
 		return result;
 	}
 
-	ViewAtmosphere::Medium SampleViewMedium(float3 position, float2 screenUV, SamplerState samplerState, bool fullCloudRay)
+	ViewAtmosphere::Medium SampleHeightMedium(float3 position, float2 screenUV, SamplerState samplerState)
+	{
+		return SampleHeightMedium(position, screenUV, samplerState, false);
+	}
+
+	ViewAtmosphere::Medium SampleViewMedium(float3 position, float2 screenUV, SamplerState samplerState, bool fullCloudRay, bool surface)
 	{
 		if (fullCloudRay && ViewAtmosphere::Enabled())
 			position = normalize(position) * ViewAtmosphere::Data[0].grids[2].depth.y;
-		ViewAtmosphere::Medium medium = SampleHeightMedium(position, screenUV, samplerState);
+		ViewAtmosphere::Medium medium = SampleHeightMedium(position, screenUV, samplerState, surface && !fullCloudRay);
 
 #ifdef PHYSICAL_SKY
 		if (!SharedData::physSkyData.enabled || !SharedData::physSkyData.enableVolumetricClouds)
@@ -65,9 +72,16 @@ namespace ViewMedium
 		return medium;
 	}
 
+	/// A full sky ray, or a surface at `position`.
+	ViewAtmosphere::Medium SampleViewMedium(float3 position, float2 screenUV, SamplerState samplerState, bool fullCloudRay)
+	{
+		return SampleViewMedium(position, screenUV, samplerState, fullCloudRay, !fullCloudRay);
+	}
+
+	/// A surface at `position`.
 	ViewAtmosphere::Medium SampleViewMedium(float3 position, float2 screenUV, SamplerState samplerState)
 	{
-		return SampleViewMedium(position, screenUV, samplerState, false);
+		return SampleViewMedium(position, screenUV, samplerState, false, true);
 	}
 
 	float3 CompositeViewMedium(float3 color, float3 position, float2 screenUV, SamplerState samplerState, bool fullCloudRay)

@@ -480,6 +480,10 @@ namespace SharedData
 		float shadowBias;
 		float depthDistribution;
 		float lookupJitter;
+		float distanceExaggeration;
+		float distanceExaggerationStart;
+		float distanceExaggerationFull;
+		float distanceExaggerationHaze;
 		float padding;
 	};
 

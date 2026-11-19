@@ -68,8 +68,14 @@ groupshared float3 ClearSky[256];
 	}
 }
 #else
+#	include "ViewAtmosphere/DistanceExaggeration.hlsli"
 RWTexture3D<float4> ReflectionLuminance : register(u0);
 RWTexture3D<float4> ReflectionTransmittance : register(u1);
+cbuffer ReflectionDispatch : register(b0)
+{
+	uint ReflectionSet;  // 0: physical medium. 1: with distance exaggeration, written above it for reflected surfaces.
+	uint3 ReflectionPadding;
+};
 groupshared float3 SegmentL[128], SegmentT[128];
 groupshared float3 AngularRayleigh[2], AngularMie[2];
 groupshared float AngularFog[2];
@@ -230,6 +236,15 @@ float3 FogSource(float3 position, float3 direction, float visibility, float phas
 	const float stepKm = max(farDistance - nearDistance, 0.0) * GAME_UNIT_TO_M / 1000.0;
 	float3 rayleigh, mie, extinction;
 	PhysSky::GetMediumCoefficients(position, rayleigh, mie, extinction);
+	if (ReflectionSet != 0u) {
+		// More air and haze in this interval, lit below exactly like the air already there. Fog is added afterwards.
+		const float2 extraPath = ViewAtmosphere::ExtraPath(length(position), direction.z);
+		const float3 extraAir = extraPath.x * rayleigh;
+		const float3 extraHaze = extraPath.y * mie;
+		extinction += extraAir + extraHaze * (1.0 + SharedData::physSkyData.aerosolAbsorption / max(SharedData::physSkyData.aerosolScatter, 1e-20));
+		rayleigh += extraAir;
+		mie += extraHaze;
+	}
 	const float directVisibility = DirectVisibility(position);
 	const float3 diffuseVisibility = SkyVisibility(position, direction, 0.0) * PhysSky::GetCloudDiffuseTransmittance(position + FrameBuffer::CameraPosAdjust.xyz);
 	const SharedData::PhysSkyData sky = SharedData::physSkyData;
@@ -266,13 +281,14 @@ float3 FogSource(float3 position, float3 direction, float visibility, float phas
 		}
 		bank = 64u - bank;
 	}
+	const uint firstSlice = ReflectionSet != 0u ? 32u : 0u;
 	if (thread.x == 0u) {
-		ReflectionLuminance[uint3(pixel, 0)] = 0.0;
-		ReflectionTransmittance[uint3(pixel, 0)] = 1.0;
+		ReflectionLuminance[uint3(pixel, firstSlice)] = 0.0;
+		ReflectionTransmittance[uint3(pixel, firstSlice)] = 1.0;
 	}
 	if (thread.x < 31u) {
-		ReflectionLuminance[uint3(pixel, thread.x + 1u)] = float4(min(lum, 65504.0), 0.0);
-		ReflectionTransmittance[uint3(pixel, thread.x + 1u)] = float4(tr, 1.0);
+		ReflectionLuminance[uint3(pixel, firstSlice + thread.x + 1u)] = float4(min(lum, 65504.0), 0.0);
+		ReflectionTransmittance[uint3(pixel, firstSlice + thread.x + 1u)] = float4(tr, 1.0);
 	}
 }
 #endif

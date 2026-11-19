@@ -12,13 +12,18 @@ namespace TreeWind
 		float4 Params;  // amplitude, near distance, tree LOD draw, loaded tree draw
 		float4 Shape;   // bend exponent, use bend weights, flutter strength, per-tree phase spread
 		float4 Detail;  // flutter share, flutter speed, near scale, near ramp end
-		float4 Gusts;   // gust strength, gust rarity, loaded tree scale, unused
+		float4 Gusts;   // gust strength, gust rarity, loaded tree scale, crown data bound (t121)
 	};
 
 	// Tree LOD, per vertex: bend weight, tree random, tree scale, distance from the trunk.
 	// Loaded trees: [0] tree origin xy and [1] tree origin z, tree height, both in the shape's own space;
 	// then per vertex at [2 + vertex]: bend weight, distance from the trunk.
 	Buffer<float4> VertexData : register(t120);
+
+	// Tree LOD crowns, per vertex, for the pixel shader: xy = offset from the trunk (1 = widest point of that
+	// tree's crown), z = height inside the crown 0-1, w = 0 without data, else (1 + 126 * tree random) / 127.
+	// Bound only while Gusts.w is set.
+	Buffer<float4> CrownData : register(t121);
 
 	bool IsEnabled()
 	{
@@ -29,6 +34,14 @@ namespace TreeWind
 	bool IsNearTree()
 	{
 		return Params.w > 0.5;
+	}
+
+	float4 GetCrownData(uint vertexID)
+	{
+		float4 data = 0.0;
+		[branch] if (Gusts.w > 0.5)
+			data = CrownData.Load(vertexID);
+		return data;
 	}
 
 	float2 Sway(float3 positionMS, float phase)

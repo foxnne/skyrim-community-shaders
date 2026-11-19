@@ -191,7 +191,9 @@ namespace TreeShapes
 			if (twin) {
 				a_card.random = twin->random;
 				a_card.scale = twin->scale;
+				a_card.tree = twin->tree;
 			} else {
+				a_card.tree = static_cast<int>(a_block.cards.size());
 				a_card.random = Hash01(a_card.x, a_card.y);
 				a_card.scale = TreeScale(a_card.top - a_card.base, a_worldScale, Hash01(a_card.y * 1.37f + 11.0f, a_card.x * 0.71f - 5.0f));
 			}
@@ -285,6 +287,73 @@ namespace TreeShapes
 				q.cy += p.y * 0.25f;
 			}
 			return q;
+		}
+
+		// Crown data for the pixel shader, see BendWeights::GetCrownData. a_vertexTree gives each vertex the index
+		// of its tree's first trunk card in the block, or -1. The crown extent of a tree is measured from the
+		// vertices of this shape that follow it.
+		void BuildCrownData(const VertexView& a_vertices, const std::vector<int32_t>& a_vertexTree, const BendWeights::Block& a_block,
+			winrt::com_ptr<ID3D11Buffer>& a_buffer, winrt::com_ptr<ID3D11ShaderResourceView>& a_srv)
+		{
+			struct Extent
+			{
+				float zMin = FLT_MAX, zMax = -FLT_MAX, radiusSq = 0.0f;
+			};
+			std::vector<Extent> extents(a_block.cards.size());
+			bool any = false;
+			for (uint32_t i = 0; i < a_vertices.count; ++i) {
+				const int32_t tree = a_vertexTree[i];
+				if (tree < 0 || static_cast<size_t>(tree) >= extents.size())
+					continue;
+				const auto p = a_vertices(i);
+				const auto& card = a_block.cards[tree];
+				auto& extent = extents[tree];
+				extent.zMin = std::min(extent.zMin, p.z);
+				extent.zMax = std::max(extent.zMax, p.z);
+				extent.radiusSq = std::max(extent.radiusSq, (p.x - card.x) * (p.x - card.x) + (p.y - card.y) * (p.y - card.y));
+				any = true;
+			}
+			if (!any)
+				return;
+
+			const auto toSnorm = [](float a_value) {
+				return static_cast<int8_t>(std::lround(std::clamp(a_value, -1.0f, 1.0f) * 127.0f));
+			};
+			std::vector<int8_t> data(static_cast<size_t>(a_vertices.count) * 4, 0);
+			for (uint32_t i = 0; i < a_vertices.count; ++i) {
+				const int32_t tree = a_vertexTree[i];
+				if (tree < 0 || static_cast<size_t>(tree) >= extents.size())
+					continue;
+				const auto p = a_vertices(i);
+				const auto& card = a_block.cards[tree];
+				const auto& extent = extents[tree];
+				const float radius = std::max(std::sqrt(extent.radiusSq), 1.0f);
+				const float height = std::max(extent.zMax - extent.zMin, 1.0f);
+				const size_t at = static_cast<size_t>(i) * 4;
+				data[at + 0] = toSnorm((p.x - card.x) / radius);
+				data[at + 1] = toSnorm((p.y - card.y) / radius);
+				data[at + 2] = toSnorm((p.z - extent.zMin) / height);
+				data[at + 3] = static_cast<int8_t>(1 + std::lround(std::clamp(card.random, 0.0f, 1.0f) * 126.0f));
+			}
+
+			D3D11_BUFFER_DESC bufferDesc{};
+			bufferDesc.ByteWidth = static_cast<UINT>(data.size());
+			bufferDesc.Usage = D3D11_USAGE_IMMUTABLE;
+			bufferDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			const D3D11_SUBRESOURCE_DATA initData{ data.data(), 0, 0 };
+			D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+			srvDesc.Format = DXGI_FORMAT_R8G8B8A8_SNORM;
+			srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+			srvDesc.Buffer.NumElements = a_vertices.count;
+			winrt::com_ptr<ID3D11Buffer> buffer;
+			winrt::com_ptr<ID3D11ShaderResourceView> srv;
+			if (FAILED(globals::d3d::device->CreateBuffer(&bufferDesc, &initData, buffer.put())) ||
+				FAILED(globals::d3d::device->CreateShaderResourceView(buffer.get(), &srvDesc, srv.put())))
+				return;
+			Util::SetResourceName(buffer.get(), "TreeWind::CrownData");
+			Util::SetResourceName(srv.get(), "TreeWind::CrownData SRV");
+			a_buffer = std::move(buffer);
+			a_srv = std::move(srv);
 		}
 	}
 
@@ -616,6 +685,15 @@ namespace TreeShapes
 		}
 	}
 
+	ID3D11ShaderResourceView* BendWeights::GetCrownData(RE::BSGeometry* a_geometry) const
+	{
+		const auto rendererData = a_geometry ? a_geometry->GetGeometryRuntimeData().rendererData : nullptr;
+		if (!rendererData || !rendererData->vertexBuffer)
+			return nullptr;
+		const auto it = entries.find(rendererData->vertexBuffer);
+		return it != entries.end() ? it->second.crownSrv.get() : nullptr;
+	}
+
 	ID3D11ShaderResourceView* BendWeights::Get(RE::BSGeometry* a_geometry, Kind a_kind, uint a_frame, bool a_treeModSupport)
 	{
 		VertexView vertices;
@@ -661,6 +739,8 @@ namespace TreeShapes
 				Entry reused;
 				reused.buffer = record.buffer;
 				reused.srv = record.srv;
+				reused.crownBuffer = record.crownBuffer;
+				reused.crownSrv = record.crownSrv;
 				reused.vertexCount = vertices.count;
 				reused.firstVertex[0] = firstVertex.x;
 				reused.firstVertex[1] = firstVertex.y;
@@ -742,6 +822,8 @@ namespace TreeShapes
 			data[a_index * 4 + 2] = DirectX::PackedVector::XMConvertFloatToHalf(a_scale);
 			data[a_index * 4 + 3] = DirectX::PackedVector::XMConvertFloatToHalf(std::clamp(a_radial, 0.0f, 1.0f));
 		};
+		// Crown vertices that follow a trunk card: the first card of their tree, for the crown data
+		std::vector<int32_t> vertexTree;
 
 		if (a_kind == Kind::Trunk) {
 			// First vertex of each trunk card
@@ -916,6 +998,7 @@ namespace TreeShapes
 				const BendWeights::TrunkCard* card = nullptr;
 			};
 			std::vector<Piece> pieces(pieceCount);
+			vertexTree.assign(vertices.count, -1);
 			for (uint32_t i = 0; i < vertices.count; ++i) {
 				const auto p = vertices(i);
 				auto& piece = pieces[roots[i]];
@@ -961,6 +1044,7 @@ namespace TreeShapes
 					const float height = std::max(card->top - card->base, 1.0f);
 					const float radial = std::sqrt((p.x - card->x) * (p.x - card->x) + (p.y - card->y) * (p.y - card->y)) / crownRadius;
 					put(i, (p.z - card->base) / height, card->random, card->scale, radial);
+					vertexTree[i] = card->tree;
 				}
 			}
 			if (matched == 0)
@@ -970,12 +1054,14 @@ namespace TreeShapes
 			if (block.cards.empty())
 				return nullptr;
 			const float crownRadius = kCrownRadius * 4.0f / std::max(worldScale, 0.01f);
+			vertexTree.assign(vertices.count, -1);
 			for (uint32_t i = 0; i < vertices.count; ++i) {
 				const auto p = vertices(i);
 				if (const auto* card = NearestCard(block, p.x, p.y)) {
 					const float height = std::max(card->top - card->base, 1.0f);
 					const float radial = std::sqrt((p.x - card->x) * (p.x - card->x) + (p.y - card->y) * (p.y - card->y)) / crownRadius;
 					put(i, (p.z - card->base) / height, card->random, card->scale, radial);
+					vertexTree[i] = card->tree;
 				} else {
 					put(i, 0.6f, Hash01(p.x * 0.01f, p.y * 0.01f), 1.0f, 0.5f);
 				}
@@ -999,8 +1085,15 @@ namespace TreeShapes
 			return nullptr;
 		Util::SetResourceName(entry.srv.get(), "TreeWind::BendWeights SRV");
 
+		// Without it (nothing followed a card, or the buffer could not be created) the crown keeps its plain shading
+		if (!vertexTree.empty())
+			BuildCrownData(vertices, vertexTree, block, entry.crownBuffer, entry.crownSrv);
+
 		entry.generation = block.generation;
-		shared.insert_or_assign(signature, Shared{ entry.buffer, entry.srv, block.generation, a_frame });
+		Shared record{ entry.buffer, entry.srv, block.generation, a_frame };
+		record.crownBuffer = entry.crownBuffer;
+		record.crownSrv = entry.crownSrv;
+		shared.insert_or_assign(signature, std::move(record));
 		return entries.insert_or_assign(vertices.vertexBuffer, std::move(entry)).first->second.srv.get();
 	}
 

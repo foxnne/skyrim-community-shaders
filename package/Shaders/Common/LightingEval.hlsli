@@ -171,7 +171,8 @@ void EvaluateLighting(DirectContext context, MaterialProperties material, float3
 	// rest of the diffuse light, which tints the transmitted part like a leaf.
 	[branch] if ((Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::LODTreeCrown) != 0)
 	{
-		float2 diffuseCosines = PBR::GetThinSurfaceDiffuseCosines(NdotL, SharedData::lodTreeLightingSettings.Wrap);
+		// LODTreeWrapScale: less wrap on front-lit crowns that carry crown data, set in Lighting.hlsl
+		float2 diffuseCosines = PBR::GetThinSurfaceDiffuseCosines(NdotL, SharedData::lodTreeLightingSettings.Wrap * LODTreeWrapScale);
 		lightingOutput.diffuse = (diffuseCosines.x * diffuseLightColor + diffuseCosines.y * SharedData::lodTreeLightingSettings.Transmission * softLightColor) * Color::BRDFScale;
 	}
 #	endif

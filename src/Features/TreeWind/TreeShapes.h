@@ -8,6 +8,9 @@
  * takes the nearest trunk card of its LOD block. Billboard-only shapes bend each card or piece
  * from its own foot.
  *
+ * Crown vertices that follow a trunk card also get crown data for the pixel shader (LOD tree crown
+ * shading): where the vertex sits in its tree's crown, measured from the trunk and the crown's own extent.
+ *
  * Tree-mod support covers 3D LOD built differently from DynDOLOD's own models (Happy Little Trees,
  * Nature of the Wild Lands, Ulvenwald): trunk cards mixed with 3D trunks and stumps in one shape,
  * and crowns without rim or soft lighting.
@@ -98,6 +101,17 @@ namespace TreeShapes
 		 */
 		ID3D11ShaderResourceView* Get(RE::BSGeometry* a_geometry, Kind a_kind, uint a_frame, bool a_treeModSupport);
 
+		/**
+		 * @brief Crown data of a shape whose bend data Get has built, for the LOD tree crown shading.
+		 *
+		 * Buffer layout (R8G8B8A8_SNORM, one element per vertex), mirrored by TreeWind.hlsli GetCrownData:
+		 *   x, y  horizontal offset from the tree's trunk, 1 = the widest point of that tree's crown
+		 *   z     height inside the tree's crown, 0 lowest crown vertex, 1 top
+		 *   w     0 = no data for this vertex, otherwise (1 + 126 * tree random) / 127
+		 * @return nullptr for shapes without it: billboards, trunks, crowns with no trunk card to follow.
+		 */
+		ID3D11ShaderResourceView* GetCrownData(RE::BSGeometry* a_geometry) const;
+
 		/** @brief Frees the bend data of shapes not drawn for a while, and the blocks left without shapes. */
 		void Evict(uint a_frame);
 
@@ -111,6 +125,7 @@ namespace TreeShapes
 			float x, y, base, top;
 			float random = 0.0f;  // timing offset and flutter choice, shared by a tree's crossed cards
 			float scale = 1.0f;   // sway scale from the tree height
+			int tree = -1;        // index of the first card of this tree in its block: crossed cards share it
 		};
 
 		struct Block
@@ -134,6 +149,8 @@ namespace TreeShapes
 			uint64_t signature = 0;
 			uint32_t generation = 0;
 			bool crown = false;
+			winrt::com_ptr<ID3D11Buffer> crownBuffer;
+			winrt::com_ptr<ID3D11ShaderResourceView> crownSrv;  // nullptr without crown data
 		};
 
 		// Bend data by shape content. The game re-creates the render data of object LOD shapes (new vertex buffer,
@@ -144,6 +161,8 @@ namespace TreeShapes
 			winrt::com_ptr<ID3D11ShaderResourceView> srv;  // nullptr for a shape left still
 			uint32_t generation = 0;
 			uint lastFrame = 0;
+			winrt::com_ptr<ID3D11Buffer> crownBuffer;
+			winrt::com_ptr<ID3D11ShaderResourceView> crownSrv;
 		};
 
 		std::unordered_map<uint64_t, Block> blocks;      // key = the block's world translate

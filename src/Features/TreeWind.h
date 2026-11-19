@@ -18,6 +18,8 @@
  *
  * The same per-draw test marks the crowns of object LOD trees (ExtraShaderDescriptors::LODTreeCrown), which
  * Lighting.hlsl lights as foliage: wrapped two-sided diffuse, softer screen-space shadow, brighter base colour.
+ * Crowns that follow a trunk card also get per-vertex crown data (VS t121, TreeShapes::BendWeights::GetCrownData),
+ * which the vertex shader hands to the pixel shader for a rounded normal and a self-shadow gradient per tree.
  */
 struct TreeWind : Feature
 {
@@ -56,6 +58,10 @@ public:
 		float LODTreeShadowSoftening = 0.7f;
 		float LODTreeNormalUpBias = 0.3f;
 		float LODTreeBrightness = 1.7f;
+		float LODTreeRoundNormal = 0.6f;
+		float LODTreeCrownOcclusion = 0.5f;
+		float LODTreeWrapFrontLit = 0.2f;
+		float LODTreeVariation = 0.08f;
 		bool NearTrees = true;
 		float NearTreeScale = 0.6f;  // same as NearScale, so both sides of the full-model/LOD swap match
 		float NearTreeMinHeight = 250.0f;
@@ -68,7 +74,7 @@ public:
 		float4 Params;  // amplitude, near distance, tree LOD draw, loaded tree draw
 		float4 Shape;   // bend exponent, use bend weights, flutter strength, per-tree phase spread
 		float4 Detail;  // flutter share, flutter speed, near scale, near ramp end
-		float4 Gusts;   // gust strength, gust rarity, loaded tree scale, unused
+		float4 Gusts;   // gust strength, gust rarity, loaded tree scale, crown data bound (t121)
 	};
 	static_assert(sizeof(WindCB) == 80);
 
@@ -80,9 +86,13 @@ public:
 		float ShadowSoftening;  // 0 = full screen-space shadow, 1 = none
 		float NormalUpBias;     // added to the normal's up component before lighting
 		float Brightness;       // base colour multiplier
+		float RoundNormal;      // blend of the shading normal toward the rounded crown normal
+		float CrownOcclusion;   // darkening of the lower and inner crown
+		float WrapFrontLit;     // share of Wrap and NormalUpBias kept with the sun behind the viewer
+		float Variation;        // per-tree brightness and hue variation
 		float pad0[3];
 	};
-	static_assert(sizeof(LODTreeLightingData) == 32);
+	static_assert(sizeof(LODTreeLightingData) == 48);
 
 	enum class Preset
 	{
@@ -147,13 +157,19 @@ private:
 	std::unique_ptr<ConstantBuffer> windOnCB;
 	std::unique_ptr<ConstantBuffer> windOffCB;
 	std::unique_ptr<ConstantBuffer> windNearCB;
+	// As on and off, for tree LOD crown draws with crown data bound
+	std::unique_ptr<ConstantBuffer> windOnCrownCB;
+	std::unique_ptr<ConstantBuffer> windOffCrownCB;
 
 	TreeShapes::BendWeights bendWeights;
 	TreeShapes::NearTrees nearTrees;
 	// Bend data of the tree LOD or loaded tree shape being drawn, nullptr for every other draw
 	ID3D11ShaderResourceView* drawBendWeights = nullptr;
 	bool drawNearTree = false;  // drawBendWeights belongs to a loaded tree
+	// Crown data of the tree LOD crown being drawn (Lighting draws flagged LODTreeCrown only), or nullptr
+	ID3D11ShaderResourceView* drawCrownData = nullptr;
 	bool swayActive = false;    // set once per frame in Reset: sway on and no map menu open
+	bool crownActive = false;   // set once per frame in Reset: crown data is in use and no map menu open
 	bool nearActive = false;    // set once per frame in Reset: loaded trees sway too (outdoors only)
 
 	double phase = 0.0;

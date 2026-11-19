@@ -86,7 +86,22 @@ namespace SceneSettingsPolicy
 		{ "ScreenSpaceReflections", "EnableREBLUR" },
 		{ "Upscaling", "streamlineLogLevel" },
 		{ "VolumetricLighting" },
-		{ "ViewAtmosphere" },
+		// View Atmosphere: only the distance exaggeration values may be driven per weather / time of day.
+		{ "ViewAtmosphere", "depthDistribution" },
+		{ "ViewAtmosphere", "distantPixelSize" },
+		{ "ViewAtmosphere", "distantSlices" },
+		{ "ViewAtmosphere", "enabled" },
+		{ "ViewAtmosphere", "historyMissSamples" },
+		{ "ViewAtmosphere", "historyWeight" },
+		{ "ViewAtmosphere", "localRange" },
+		{ "ViewAtmosphere", "lookupJitter" },
+		{ "ViewAtmosphere", "middlePixelSize" },
+		{ "ViewAtmosphere", "middleSlices" },
+		{ "ViewAtmosphere", "nearPixelSize" },
+		{ "ViewAtmosphere", "nearRange" },
+		{ "ViewAtmosphere", "nearSlices" },
+		{ "ViewAtmosphere", "sampleJitter" },
+		{ "ViewAtmosphere", "shadowBias" },
 	};
 
 	inline const std::vector<SettingPolicyPath> kLocationFeatureWhitelist = {
@@ -116,6 +131,7 @@ namespace SceneSettingsPolicy
 		{ "ScreenSpaceShadows" },
 		{ "Skylighting" },
 		{ "SubsurfaceScattering" },
+		{ "ViewAtmosphere" },
 		{ "WetnessEffects" },
 	};
 }

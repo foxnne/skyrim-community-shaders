@@ -78,7 +78,7 @@ struct GroundFog : Feature
 		// The valley layer: deeper fog in hollows and over water, beyond the sheet.
 		float FarAmount = 1.0f;
 		float FarDensity = 0.003f;     // extinction at the ground per meter, at FarAmount 1
-		float FarThickness = 25.0f;    // meters
+		float FarThickness = 12.0f;    // meters
 		float FarEnd = 6000.0f;        // meters
 		float CloudDarkening = 0.75f;  // how much cloud overhead dims the sky light the fog takes
 		bool VolumeInjection = false;  // draw through the shared atmosphere volume instead of per pixel

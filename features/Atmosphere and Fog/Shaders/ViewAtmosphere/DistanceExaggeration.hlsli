@@ -10,7 +10,7 @@
 // surfaces read; sky, clouds and celestial bodies keep the physical copy.
 // Optical depth (strongest channel) at which the added air stops; a define so it can be tuned by shader reload.
 #ifndef DISTANCE_EXAGGERATION_LIMIT
-#	define DISTANCE_EXAGGERATION_LIMIT 1.0
+#	define DISTANCE_EXAGGERATION_LIMIT 5.0
 #endif
 
 namespace ViewAtmosphere

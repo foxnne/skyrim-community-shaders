@@ -154,6 +154,12 @@ Texture3D<float4> TexAerialPerspective : register(t2);
 Texture2D<float> TexDepth : register(t3);
 
 Texture3D<unorm float4> TexCloudShapeNoise : register(t4);
+#ifndef CLOUD_DETILE_AMOUNT
+#	define CLOUD_DETILE_AMOUNT 0.19  // horizontal slide of the puff pattern (noise tiles); 0.19 keeps local stretch under ~35%; 0 = original repeating pattern
+#endif
+#ifndef CLOUD_DETILE_SLICE
+#	define CLOUD_DETILE_SLICE 0.2  // vertical slide: neighbouring puffs take noise slices ~0.25 tile apart; 0 = off
+#endif
 Texture3D<float4> NoiseVoxel : register(t76);
 Texture2D<float4> TexCloudHeight : register(t5);
 Texture2D<float3> TexCloudModeling : register(t6);
@@ -890,8 +896,19 @@ float sampleWeatherCloudDensity(
 		const float2 displacement = TexCloudAdjustmentLUT.SampleLevel(TileableSampler, xy * 0.004, 0).gb;
 		noiseXY += (displacement * 2.0 - 1.0) * (0.125 - bottomFade * 0.125);
 	}
+	// foxnne: the shape noise tiles every 230 m (1 / 0.0043545), so identical puffs repeat in rows across the sky.
+	// Slide the noise domain with a smooth field whose periods (1.3 - 4.1 km) share no factor with the tile, so each
+	// puff takes a different piece of the noise volume. No extra texture samples.
+	{
+		const float2 q = xy * 0.001;
+		const float2 slide = float2(
+			sin(q.x * 1.53 + 1.7 * sin(q.y * 2.11 + 0.6)) + 0.6 * sin(q.y * 4.73 + 2.1),
+			sin(q.y * 1.87 + 1.4 * sin(q.x * 2.57 + 4.0)) + 0.6 * sin(q.x * 4.31 + 0.9));
+		noiseXY += slide * CLOUD_DETILE_AMOUNT;
+	}
 	density_context.noise_coordinates = float3(noiseXY,
-		(pos.z * GAME_UNIT_TO_M - 20.0 + bottomFade * 10.0) * 0.0034834063 - info.cloudEvolution.x * (1.0 / 6.283185307179586));
+		(pos.z * GAME_UNIT_TO_M - 20.0 + bottomFade * 10.0) * 0.0034834063 - info.cloudEvolution.x * (1.0 / 6.283185307179586)
+		+ sin(xy.x * 0.00213 + 2.0 * sin(xy.y * 0.00167)) * CLOUD_DETILE_SLICE);
 	density_context.eye_distance = viewDistance;
 	return sampleCloudDensityFromContext(density_context, mipBias, minimumMip);
 }

@@ -517,7 +517,6 @@ void SceneManager::DrawSettings()
 		T("feature.scene_manager.time_of_day_transition_tooltip",
 			"Hours spent blending between time of day periods, kept inside the sky's own colour transitions.\n"
 			"0 switches between periods instantly.\n"
-			"Used by the clock periods only: periods that follow the sun blend by its elevation.\n"
 			"The active preset supplies this until you set your own."),
 		T("feature.scene_manager.time_of_day_transition_reset", "Reset##TimeOfDayTransition"));
 
@@ -527,7 +526,8 @@ void SceneManager::DrawSettings()
 	Util::AddTooltip(T("feature.scene_manager.periods_follow_sun_tooltip",
 		"Time of day periods come from the sun's elevation on Sky Sync's path: Night below the night elevation,\n"
 		"Dawn and Dusk up to the horizon, Sunrise and Sunset up to the day elevation, Day above it.\n"
-		"Off, or where Sky Sync places no sun, the periods follow the climate's clock timing."));
+		"Off, or where Sky Sync places no sun, the periods follow the climate's clock timing and blend over the\n"
+		"Time of Day Transition above; periods that follow the sun blend by its elevation instead."));
 	if (GetUserTransitionControl(TransitionControl::SunPeriods) &&
 		DrawResetButton(T("feature.scene_manager.periods_follow_sun_reset", "Reset##PeriodsFollowSun"),
 			T("feature.scene_manager.transition_reset_tooltip",

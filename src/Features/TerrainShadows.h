@@ -85,6 +85,22 @@ public:
 	/** @brief Checks whether shadows are enabled and the shadow height texture is computed for the current heightmap. */
 	bool IsShadowMapReady();
 
+	/** @brief The raw terrain height map of the current worldspace and what a shader needs to read world z from it. */
+	struct HeightMapBinding
+	{
+		ID3D11ShaderResourceView* srv = nullptr;
+		float4 scaleOffset{};  // uv = absolute xy * xy + zw, texel centres on terrain vertices
+		float2 zBlackWhite{};  // world z at texel value 0 and 1
+		DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+		uint32_t width = 0;
+		uint32_t height = 0;
+	};
+	/**
+	 * @brief Describes the height map for other features. Does not depend on terrain shadows being enabled.
+	 * @return False when the current worldspace has no loaded height map; a_binding is left untouched.
+	 */
+	bool GetHeightMapBinding(HeightMapBinding& a_binding);
+
 	/** @brief Scans for heightmap DDS files and creates constant buffers and compute shaders. */
 	virtual void SetupResources() override;
 

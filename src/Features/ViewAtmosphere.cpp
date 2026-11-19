@@ -8,6 +8,7 @@
 #include "Features/CloudShadows.h"
 #include "Features/DynamicCubemaps.h"
 #include "Features/ExponentialHeightFog.h"
+#include "Features/GroundFog.h"
 #include "Features/IBL.h"
 #include "Features/LightLimitFix.h"
 #include "Features/PhysicalSky.h"
@@ -161,6 +162,8 @@ bool ViewAtmosphere::Prepare()
 			defines.emplace_back("TERRAIN_SHADOWS", "");
 		if (globals::features::cloudShadows.loaded)
 			defines.emplace_back("CLOUD_SHADOWS", "");
+		if (globals::features::groundFog.loaded)
+			defines.emplace_back("GROUND_FOG", "");
 		if (!injectCS)
 			injectCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\ViewAtmosphere\\LightScattering.cs.hlsl", defines, "cs_5_0")));
 		if (!integrateCS)
@@ -295,11 +298,15 @@ void ViewAtmosphere::Render()
 	auto* shadowData = globals::deferred->directionalShadowLights ? globals::deferred->directionalShadowLights->srv.get() : nullptr;
 	const bool terrainReady = terrain.IsShadowMapReady();
 	auto* cloudLayer = clouds.loaded ? clouds.texCloudShadowLayers[CloudShadows::kMaxCloudLayers - 1] : nullptr;
-	const auto previousShadowFlags = data.flags.z & (1u | 256u | 512u);
+	// Ground fog: its constants and the terrain height map stay bound for the injection dispatches only.
+	auto& groundFog = globals::features::groundFog;
+	const bool groundFogActive = groundFog.BindForVolume(context);
+	const auto previousShadowFlags = data.flags.z & (1u | 256u | 512u | 2048u);
 	data.flags.z = (shadowView && shadowData ? 1u : 0u) | (useIBL ? 4u : 0u) |
 	               (skylighting.loaded && skylighting.texProbeArray ? 8u : 0u) | (localLights ? 32u : 0u) |
-	               (localShadows ? 64u : 0u) | (engineShadows ? 128u : 0u) | (terrainReady ? 256u : 0u) | (cloudLayer ? 512u : 0u) | (environment ? 1024u : 0u);
-	if ((data.flags.z & (1u | 256u | 512u)) != previousShadowFlags)
+	               (localShadows ? 64u : 0u) | (engineShadows ? 128u : 0u) | (terrainReady ? 256u : 0u) | (cloudLayer ? 512u : 0u) | (environment ? 1024u : 0u) |
+	               (groundFogActive ? 2048u : 0u);
+	if ((data.flags.z & (1u | 256u | 512u | 2048u)) != previousShadowFlags)
 		data.history.x = 0.0f;
 	parameters->Update(&data, sizeof(data));
 	auto* paramSrv = parameters->SRV();
@@ -346,6 +353,7 @@ void ViewAtmosphere::Render()
 		context->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
 	}
 	globals::profiler->EndPass();
+	groundFog.UnbindForVolume(context);
 	bind(0, source->srv.get());
 	globals::profiler->BeginPass("ViewAtmosphere::Integration");
 	for (uint32_t level = 0; level < 3; ++level) {

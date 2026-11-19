@@ -351,6 +351,22 @@ bool TerrainShadows::IsShadowMapReady()
 	return loaded && settings.EnableTerrainShadow && IsHeightMapReady() && texShadowHeight && !needPrecompute;
 }
 
+bool TerrainShadows::GetHeightMapBinding(HeightMapBinding& a_binding)
+{
+	if (!IsHeightMapReady() || !texHeightMap->srv)
+		return false;
+	// The same mapping the shadow shaders use, so both read the same texel for a world position.
+	const auto frame = GetCommonBufferData();
+	a_binding.srv = texHeightMap->srv.get();
+	a_binding.scaleOffset = { frame.Scale.x, frame.Scale.y, frame.Offset.x, frame.Offset.y };
+	// What the shadow update decodes heights with (ShadowUpdateCB::PosRange).
+	a_binding.zBlackWhite = { cachedHeightmap->pos0.z, cachedHeightmap->pos1.z };
+	a_binding.format = texHeightMap->desc.Format;
+	a_binding.width = texHeightMap->desc.Width;
+	a_binding.height = texHeightMap->desc.Height;
+	return true;
+}
+
 TerrainShadows::PerFrame TerrainShadows::GetCommonBufferData()
 {
 	bool isHeightmapReady = IsHeightMapReady();

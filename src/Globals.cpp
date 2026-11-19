@@ -24,6 +24,7 @@
 #include "Features/HairSpecular.h"
 #include "Features/HeatHaze.h"
 #include "Features/Rainbows.h"
+#include "Features/GroundFog.h"
 #include "Features/HiZOcclusion.h"
 #include "Features/HorizonFix.h"
 #include "Features/IBL.h"
@@ -141,6 +142,7 @@ namespace globals
 		ProceduralNightSky proceduralNightSky{};
 		HeatHaze heatHaze{};
 		Rainbows rainbows{};
+		GroundFog groundFog{};
 		CameraFX cameraFX{};
 		CapsuleShadows capsuleShadows{};
 		NeuralRendering neuralRendering{};

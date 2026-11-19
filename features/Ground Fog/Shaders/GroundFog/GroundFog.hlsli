@@ -79,7 +79,11 @@ namespace GroundFog
 		float BurnSunlitFar;
 		float BurnShaded;
 		float BurnRetention;  // share of the way from the sunlit to the shaded amount that shadow gives; 0 at night
-		float3 Reserved;
+		// Water. With a baked water map (WaterTexel > 0) the surface is known wherever the height map reaches;
+		// without one it comes from the engine's data for the cells around the camera (Flags bit 0).
+		float InvShoreDepth;    // 1 / the water depth over which fog over water comes in at a shore, per game unit
+		float WaterPatchiness;  // how uneven the fog over water is
+		float WaterTexel;       // game units per texel of WaterMap; 0 = no map
 		float4 FlowWindow;  // reactive flow map: uv = camera-relative xy * z + xy; w = strength, 0 = none
 	};
 
@@ -88,6 +92,12 @@ namespace GroundFog
 	// taps that stand for a long stretch of the ray. y: the highest height in and around the texel, which bounds the
 	// ground under a whole stretch from above (see GroundMaxAlong).
 	Texture2D<float2> HeightPyramid : register(t7);
+
+	// The baked water map of the worldspace (terrain-heightmap/build_watermap.py), over the same rectangle as the
+	// height map, with mips. x: the water surface, encoded like HeightMap. y: 1 where the cell has water; 0 where it
+	// has none, fading inside the wet side where water runs into a cell without any. z: the highest water surface
+	// in and around the texel (one texel on every side), 0 = none.
+	Texture2D<float4> WaterMap : register(t9);
 
 	static const float TopLimit = 0.3;  // banks raise the layer by at most this share per unit of BankStrength
 
@@ -139,32 +149,107 @@ namespace GroundFog
 		return lerp(MapZ.x, MapZ.y, height);
 	}
 
-	// Absolute z of the surface the fog lies on at a camera-relative xy; water is 1 where that surface is water.
+	// ---------------------------------------------------------------------------------------------------------
+	// Water. The fog lies on max(terrain, water). How much of a place is water is not a per-cell yes or no: it is
+	// the water's depth over the terrain there, so shorelines follow the terrain, and the fog over water comes in
+	// over the first 1 / InvShoreDepth of depth.
+
+	bool HasWaterMap()
+	{
+		return WaterTexel > 0.0;
+	}
+
+	// The water map covers the height map's rectangle, but its texels are areas where the height map's are terrain
+	// vertices (MapUv is shifted by half a height map texel for that).
+	float2 WaterUv(float2 uv)
+	{
+		return uv - float2(0.5, -0.5) / MapSize;
+	}
+
+	// No water surface within `hold` of a point, nor in anything a filtered read there touches, is higher than
+	// this (absolute z); far below everything where there is no water. One point read of a coarse level.
+	float WaterCeiling(float2 uv, float hold)
+	{
+		uint width, height, levels;
+		WaterMap.GetDimensions(0u, width, height, levels);
+		const int mip = int(clamp(ceil(log2(8.0 * max(hold, 1.0) / WaterTexel)), 0.0, float(levels) - 1.0));
+		const int2 size = max(int2(width, height) >> mip, 1);
+		const int2 texel = clamp(int2(WaterUv(uv) * float2(size)), 0, size - 1);
+		const float highest = WaterMap.Load(int3(texel, mip)).z;
+		return highest > 0.0 ? lerp(MapZ.x, MapZ.y, highest) : -1.0e30;
+	}
+
+	// The engine's water for the cells around the camera, for worldspaces without a water map. x: how far the
+	// surface lies above the terrain (0 or less: none), y: 1 inside the known cells, fading to 0 toward every edge
+	// that borders a cell without data, so the fog does not end in the outline of a cell.
+	float2 LiveWater(float2 xy, float terrain)
+	{
+		const float2 cellPosition = (xy + FrameBuffer::CameraPosAdjust.xy) / 4096.0;
+		const float2 cellFloor = floor(cellPosition);
+		const float2 f = cellPosition - cellFloor;
+		const int2 cell = int2(cellFloor - floor(FrameBuffer::CameraPosAdjust.xy / 4096.0)) + 2;
+		const float own = SharedData::GetWaterTile(cell).w;
+		if (own < -1.0e6)
+			return 0.0;
+		float reach = 1.0;
+		[unroll] for (int dy = -1; dy <= 1; ++dy)
+		{
+			[unroll] for (int dx = -1; dx <= 1; ++dx)
+			{
+				if ((dx != 0 || dy != 0) && SharedData::GetWaterTile(cell + int2(dx, dy)).w < -1.0e6) {
+					const float2 away = float2(dx < 0 ? f.x : (dx > 0 ? 1.0 - f.x : 0.0), dy < 0 ? f.y : (dy > 0 ? 1.0 - f.y : 0.0));
+					reach = min(reach, length(away));
+				}
+			}
+		}
+		return float2(own + FrameBuffer::CameraPosAdjust.z - terrain, smoothstep(0.0, 0.35, reach));
+	}
+
+	// Raises a ground sample to the water over it. ceiling: from WaterCeiling, or a large number to always look.
+	// Returns the texture reads it made.
+	uint ApplyWater(float2 xy, float2 uv, float lod, float ceiling, float terrain, inout float z, out float water)
+	{
+		water = 0.0;
+		float2 surface = 0.0;  // x: depth of the water over the terrain, y: validity
+		uint reads = 0u;
+		if (HasWaterMap()) {
+			if (terrain < ceiling) {
+				const float4 texel = WaterMap.SampleLevel(LinearSampler, WaterUv(uv), max(lod - log2(WaterTexel / MapTexel), 0.0));
+				surface = float2(lerp(MapZ.x, MapZ.y, texel.x) - terrain, texel.y);
+				reads = 1u;
+			}
+		} else if (Flags & 1u) {
+			surface = LiveWater(xy, terrain);
+		}
+		if (surface.x > 0.0 && surface.y > 0.0) {
+			z = terrain + surface.x * surface.y;
+			water = surface.y * smoothstep(0.0, 1.0, surface.x * InvShoreDepth);
+		}
+		return reads;
+	}
+
+	// Absolute z of the surface the fog lies on at a camera-relative xy; water: how much of that surface is water.
 	float Ground(float2 xy, out float water)
 	{
-		float z = TerrainZ(MapUv(xy));
-		water = 0.0;
-		if (Flags & 1u) {
-			// Known for the 5x5 cells around the camera only; far below the terrain elsewhere.
-			const float camZ = FrameBuffer::CameraPosAdjust.z;
-			const float surface = SharedData::GetWaterData(float3(xy, z - camZ)).w + camZ;
-			water = saturate((surface - z) / 16.0);
-			z = max(z, surface);
-		}
+		const float2 uv = MapUv(xy);
+		const float terrain = TerrainZ(uv);
+		float z = terrain;
+		ApplyWater(xy, uv, 0.0, 1.0e30, terrain, z, water);
 		return z;
 	}
 
 	// ---------------------------------------------------------------------------------------------------------
 	// Ground source for the pixel pass. The march learns about the ground only through GroundAt, GroundMaxAlong and
 	// GroundAround (and MapCoverage for where the source has data), all taking camera-relative xy. Today they read
-	// the terrain height map. Another source (a floor found from the depth buffer for interiors, a simulation
-	// texture) only has to supply these.
+	// the terrain height map and the water map. Another source (a floor found from the depth buffer for interiors,
+	// a simulation texture) only has to supply these.
 
 	struct GroundSample
 	{
 		float z;        // absolute z of the surface the fog lies on
 		float terrain;  // absolute z of the land under it
-		float water;    // 1 where that surface is water
+		float water;    // how much of that surface is water: 0 on land, rising to 1 over the shore depth
+		uint reads;     // texture reads this sample took
 	};
 
 	float GroundLod(float reach)
@@ -174,25 +259,27 @@ namespace GroundFog
 
 	// reach: the size of terrain feature this read should still see, game units; it grows with distance from the
 	// camera. The march puts its joints on the texel grid of the level this selects (GroundCell), so between two
-	// joints the ground read here is straight.
-	GroundSample GroundAt(float2 xy, float reach)
+	// joints the ground read here is straight. waterCeiling: see ApplyWater.
+	GroundSample GroundAt(float2 xy, float reach, float waterCeiling)
 	{
 		GroundSample ground;
-		ground.terrain = TerrainZ(MapUv(xy), GroundLod(reach));
+		const float2 uv = MapUv(xy);
+		const float lod = GroundLod(reach);
+		ground.terrain = TerrainZ(uv, lod);
 		ground.z = ground.terrain;
-		ground.water = 0.0;
-		if (Flags & 1u) {
-			const float camZ = FrameBuffer::CameraPosAdjust.z;
-			const float surface = SharedData::GetWaterData(float3(xy, ground.terrain - camZ)).w + camZ;
-			ground.water = saturate((surface - ground.terrain) / 16.0);
-			ground.z = max(ground.terrain, surface);
-		}
+		ground.reads = 1u + ApplyWater(xy, uv, lod, waterCeiling, ground.terrain, ground.z, ground.water);
 		return ground;
+	}
+
+	GroundSample GroundAt(float2 xy, float reach)
+	{
+		return GroundAt(xy, reach, 1.0e30);
 	}
 
 	// No ground between a and b is higher than this. One point read of the level whose texels are at least as
 	// long as the stretch: such a texel holds the highest terrain within one texel of its centre in every direction,
-	// and the whole stretch lies inside that.
+	// and the whole stretch lies inside that. With a water map the water surfaces are in that level already
+	// (HeightPyramid.cs.hlsl); without one the highest water near the camera stands in for them.
 	float GroundMaxAlong(float2 a, float2 b)
 	{
 		const float2 span = abs(b - a);
@@ -201,7 +288,7 @@ namespace GroundFog
 		const int2 size = max(int2(PyramidSize) >> mip, 1);
 		const int2 texel = clamp(int2(MapUv(0.5 * (a + b)) * size), 0, size - 1);
 		float z = lerp(MapZ.x, MapZ.y, HeightPyramid.Load(int3(texel, mip)).y);
-		if (Flags & 1u)
+		if (!HasWaterMap() && (Flags & 1u))
 			z = max(z, WaterTop);
 		return z;
 	}
@@ -299,6 +386,34 @@ namespace GroundFog
 		const float2 p2 = (xyAbs - 1.7 * WindTravel) * InvDriftScale * 2.3 + 11.9;
 		const float n = smoothstep(0.25, 0.75, 0.62 * ValueNoise(p) + 0.38 * ValueNoise(p2));
 		return 1.0 + DriftStrength * 0.8 * (2.0 * n - 1.0) * (1.0 - fade);
+	}
+
+	// Fog over water, relative to its mean (about 1): thick and thin areas, patches and wisps, each carried by the
+	// wind at its own speed, so a lake does not hold an even sheet. Three sizes; each fades to its mean as the
+	// detail the caller can resolve (reach) grows past it, so the broad areas still show on a lake far away.
+	float WaterPatches(float2 xyAbs, float reach)
+	{
+		if (WaterPatchiness <= 0.0)
+			return 1.0;
+		static const float3 InvSize = 1.0 / float3(28000.0, 4900.0, 1260.0);  // 400 m, 70 m, 18 m
+		const float3 keep = (1.0 - saturate(reach * InvSize - 0.5)) * WaterPatchiness;
+		float amount = 1.0;
+		float2 warp = 0.0;
+		if (keep.x > 0.0) {
+			const float n = ValueNoise((xyAbs - 0.6 * WindTravel) * InvSize.x + 41.3);
+			amount *= 1.0 + keep.x * 0.6 * (2.0 * smoothstep(0.2, 0.8, n) - 1.0);
+		}
+		if (keep.y > 0.0) {
+			const float n = ValueNoise((xyAbs - WindTravel) * InvSize.y + 5.7);
+			amount *= 1.0 + keep.y * 0.75 * (2.0 * smoothstep(0.3, 0.7, n) - 1.0);
+			warp = float2(n, 1.0 - n) * 1.6;
+		}
+		if (keep.z > 0.0) {
+			// Bent by the patch it lies in, so the wisps curl instead of lining up with the noise grid.
+			const float n = ValueNoise((xyAbs - 1.5 * WindTravel) * InvSize.z + warp + 23.1);
+			amount *= 1.0 + keep.z * 0.55 * (2.0 * smoothstep(0.25, 0.75, n) - 1.0);
+		}
+		return amount;
 	}
 
 	// Slow rise and fall of the near volume's top, out of step from place to place.
@@ -547,7 +662,7 @@ namespace GroundFog
 			return false;
 		const float mean = min(sum.x / sum.y, 1.0);
 
-		float placement = coverage * distanceFade * lerp(1.0, WaterPreference, midWater);
+		float placement = coverage * distanceFade * lerp(1.0, WaterPreference * WaterPatches(midXY + FrameBuffer::CameraPosAdjust.xy, cellLength), midWater);
 		float basin = 1.0;
 		if (BasinStrength > 0.0) {
 			basin = BasinFactor(midXY, TerrainZ(MapUv(midXY)));

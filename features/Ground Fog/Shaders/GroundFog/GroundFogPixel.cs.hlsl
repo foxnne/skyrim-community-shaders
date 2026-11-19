@@ -15,7 +15,13 @@
 //   air from any direction: a level ray at eye height runs through it. Near the camera the joints are one height
 //   map texel (under 2 m) apart, and each segment is integrated in closed form.
 // - the sheet: thin, on the ground, out to FadeEnd.
-// - the valley layer: deeper, in hollows and over water, from where the sheet fades out to kilometers away.
+// - the valley layer: deeper, in hollows and over water, from where the sheet fades out to kilometers away. It lies
+//   on level low ground only: far ground is read coarsely, so it fades out on slopes and where the coarse ground
+//   is off by more than the layer is thick, and where the ray ends on a surface it is anchored to that surface.
+//
+// Water: the ground is max(terrain, water surface), the water from the baked water map (or, without one, the
+// engine's data for the cells around the camera). Fog over water comes in with the water's depth at the shore and
+// is broken up by its own drifting patches.
 //
 // What the pixel shows is ground only if it faces up (normal rebuilt from the full-resolution depth around the
 // pixel). Then the fog's ground meets it over the end of the ray. Walls, trunks, rock sides and undersides never
@@ -67,6 +73,7 @@ namespace GroundFog
 		float ground;  // absolute z of the ground under it
 		float h;       // height above that ground
 		float hn;      // height above the near volume's ground, which also follows floors
+		float hv;      // height above the valley layer's ground, which meets a far surface at the end of the ray
 		float shade;   // how much the terrain keeps the sun off this place
 		Layer sheet;
 		Layer valley;
@@ -93,6 +100,11 @@ namespace GroundFog
 		float shade;
 		float tAround;  // the same for the terrain averaged around the point
 		float around;
+		float tWater;  // the same for the highest water surface around the point
+		float waterCeiling;
+		float tSlope;  // the same for the lie of the land under the valley layer
+		float slope;   // rise over run of the land around the point
+		float error;   // how far the coarse ground the march reads may be off the land there, game units
 	};
 	static const float SlowStep = 420.0;
 
@@ -117,6 +129,11 @@ namespace GroundFog
 		float tFloor;
 		float tFloorEnd;
 		float floorLength;
+		// Valley layer: its ground moves by valleyOffset over the valleyLength of the ray before its end, where
+		// the pixel shows the real ground and the coarse far ground does not matter any more.
+		float valleyOffset;
+		float tValley;
+		float valleyLength;
 	};
 
 	float TopMax()
@@ -181,6 +198,30 @@ namespace GroundFog
 		return ray.surfaceOffset * saturate((t - ray.tBlend) / max(ray.blendLength, 1e-3));
 	}
 
+	// How much of the way to the visible surface the valley layer's ground has gone at a point of the ray.
+	float ValleyAnchorAt(Ray ray, float t)
+	{
+		return ray.valleyLength > 0.0 ? saturate((t - ray.tValley) / ray.valleyLength) : 0.0;
+	}
+
+	// The lie of the land under the valley layer at a point, from three reads of the terrain one level coarser
+	// than the march reads it, a reach apart around the point. slope: rise over run of the plane through them.
+	// error: how far the ground the march read lies from their mean, which is what the coarse read can be off by
+	// where the land bends (a slope foot, a gully, a ridge).
+	void LandLie(float2 xy, float reach, float terrain, out float slope, out float error)
+	{
+		const float2 uv = MapUv(xy);
+		const float lod = GroundLod(reach) + 1.0;
+		const float2 du = float2(reach * MapScaleOffset.x, 0.0);
+		const float2 dv = float2(0.0, reach * MapScaleOffset.y);
+		const float a = TerrainZ(uv + du, lod);
+		const float b = TerrainZ(uv - 0.5 * du + 0.8660254 * dv, lod);
+		const float c = TerrainZ(uv - 0.5 * du - 0.8660254 * dv, lod);
+		const float2 gradient = float2((2.0 * a - b - c) / 3.0, (b - c) / 1.7320508) / reach;
+		slope = length(gradient);
+		error = abs(terrain - (a + b + c) / 3.0);
+	}
+
 	// Hollows hold more, rises less: the terrain averaged around the point against the terrain at it.
 	float Basin(float around, float terrain)
 	{
@@ -218,7 +259,7 @@ namespace GroundFog
 	}
 
 	// No fog lies higher than this above the mapped ground anywhere between two distances along the ray.
-	float SlabTop(float from, float to, float lift, float floorLift)
+	float SlabTop(float from, float to, float lift, float floorLift, float valleyLift)
 	{
 		float top = -1.0e30;
 		if (from < FadeEnd)
@@ -226,12 +267,12 @@ namespace GroundFog
 		if (NearExtinction > 0.0 && from < NearEnd)
 			top = max(top, NearTopMax() + floorLift);
 		if (FarExtinction > 0.0 && to > FadeStart)
-			top = max(top, ValleyTopMax());
+			top = max(top, ValleyTopMax() + valleyLift);
 		return top;
 	}
 
 	// Fills in what a joint needs to hold fog. Joints clear of all layers cost nothing more than their ground read.
-	void Shade(inout Joint joint, float2 xy, GroundSample ground, float reach, inout Slow slow, inout uint taps)
+	void Shade(inout Joint joint, Ray ray, float2 xy, GroundSample ground, float reach, inout Slow slow, inout uint taps)
 	{
 		const float2 xyAbs = xy + FrameBuffer::CameraPosAdjust.xy;
 		const float sheetFade = 1.0 - smoothstep(FadeStart, FadeEnd, joint.t);
@@ -242,7 +283,7 @@ namespace GroundFog
 		joint.sheet.inside = sheetFade > 0.0 && joint.h < TopMax() && joint.h > -GroundFill - 64.0;
 		joint.sheet.top = Thickness;
 		joint.sheet.place = 0.0;
-		joint.valley.inside = valleyFade > 0.0 && joint.h < ValleyTopMax() && joint.h > -ValleyFill() - 64.0;
+		joint.valley.inside = valleyFade > 0.0 && joint.hv < ValleyTopMax() && joint.hv > -ValleyFill() - 64.0;
 		joint.valley.top = FarThickness;
 		joint.valley.place = 0.0;
 		joint.near.inside = nearFade > 0.0 && joint.hn < NearTopMax() && joint.hn > -NearFill() - 64.0;
@@ -258,7 +299,11 @@ namespace GroundFog
 		joint.shade = slow.shade;
 		if (joint.sheet.inside || joint.near.inside) {
 			// Shared by the sheet and the near volume: they are one body of fog, thin far away and tall close by.
-			float place = coverage * lerp(1.0, WaterPreference, ground.water) * BurnOff(BurnSunlitNear, joint.shade);
+			// Over water: WaterPreference times as much, through the water's own drifting patches. ground.water
+			// rises from 0 at the waterline over the shore depth, so the change has the shape of the shore.
+			float place = coverage * BurnOff(BurnSunlitNear, joint.shade);
+			if (ground.water > 0.0)
+				place *= lerp(1.0, WaterPreference * WaterPatches(xyAbs, reach), ground.water);
 			if (place > 0.0 && BasinStrength > 0.0) {
 				if (Stale(slow.tAround, joint.t)) {
 					slow.around = GroundAround(xy, BasinRadius);
@@ -289,8 +334,28 @@ namespace GroundFog
 			const float pool = smoothstep(0.0, 1.0, max(hollow, ground.water));
 			// Broad banks, travelling with the wind like the sheet's.
 			const float bank = lerp(0.7, 1.25, ValueNoise((xyAbs - WindTravel) * InvBankScale * 0.25 + 7.3));
-			joint.valley.place = coverage * valleyFade * pool * BurnOff(BurnSunlitFar, joint.shade);
 			joint.valley.top = max(FarThickness * (0.35 + 0.65 * pool) * bank, 1.0);
+			float place = coverage * valleyFade * pool * BurnOff(BurnSunlitFar, joint.shade);
+			if (place > 0.0) {
+				// It pools on level low ground and does not climb hillsides. And the ground it is laid on is
+				// read coarsely this far out: where that ground may be off the land by more than the layer is
+				// thick, the layer would hang over the land or sink into it in bands, so it thins out there,
+				// except near the end of a ray, where its ground is the surface the pixel shows. Water is
+				// level and exactly known. Both terms change over many joints and are held like the shade.
+				if (ground.water < 1.0) {
+					if (slow.tSlope < 0.0 || joint.t - slow.tSlope > 0.3 * joint.t) {
+						LandLie(xy, reach, ground.terrain, slow.slope, slow.error);
+						slow.tSlope = joint.t;
+						taps += 3u;
+					}
+					const float level = 1.0 - smoothstep(0.12, 0.35, slow.slope);
+					const float sure = 1.0 - smoothstep(0.5, 1.5, slow.error / joint.valley.top);
+					place *= lerp(level * lerp(sure, 1.0, ValleyAnchorAt(ray, joint.t)), 1.0, ground.water);
+				}
+				if (ground.water > 0.0)
+					place *= lerp(1.0, min(WaterPreference, 1.0) * WaterPatches(xyAbs, reach), ground.water);
+			}
+			joint.valley.place = place;
 		}
 	}
 
@@ -298,15 +363,23 @@ namespace GroundFog
 	Joint MakeJoint(Ray ray, float t, float reach, inout Slow slow, inout uint taps)
 	{
 		const float2 xy = ray.dir.xy * t;
-		const GroundSample ground = GroundAt(xy, reach);
-		++taps;
+		// Joints whose land is above every water surface around them skip the water read. The bound is read from a
+		// coarse level of the water map and held like the other slow reads.
+		if (HasWaterMap() && Stale(slow.tWater, t)) {
+			slow.waterCeiling = WaterCeiling(MapUv(xy), max(SlowStep, 0.15 * t));
+			slow.tWater = t;
+			++taps;
+		}
+		const GroundSample ground = GroundAt(xy, reach, slow.waterCeiling);
+		taps += ground.reads;
 		Joint joint;
 		joint.t = t;
 		joint.ground = ground.z + SheetLiftAt(ray, t);
 		const float z = ray.camZ + ray.dir.z * t;
 		joint.h = z - joint.ground;
 		joint.hn = z - ground.z - FloorAt(ray, t);
-		Shade(joint, xy, ground, reach, slow, taps);
+		joint.hv = z - ground.z - ray.valleyOffset * ValleyAnchorAt(ray, t);
+		Shade(joint, ray, xy, ground, reach, slow, taps);
 		return joint;
 	}
 
@@ -325,7 +398,7 @@ namespace GroundFog
 	}
 
 	// Adds the sheet's or the valley layer's share of the segment between two joints.
-	void Integrate(inout Seen seen, Joint a, Joint b, Layer la, Layer lb, float extinction, float fill, bool valley)
+	void Integrate(inout Seen seen, Joint a, Joint b, Layer la, Layer lb, float ha, float hb, float extinction, float fill, bool valley)
 	{
 		if (!la.inside && !lb.inside)
 			return;
@@ -333,13 +406,13 @@ namespace GroundFog
 		const float top = both ? 0.5 * (la.top + lb.top) : (la.inside ? la.top : lb.top);
 		const float place = both ? 0.5 * (la.place + lb.place) : (la.inside ? la.place : lb.place);
 		const Profile profile = MakeProfile(top, fill);
-		const float tau = extinction * place * LineMean(profile, a.h, b.h) * (b.t - a.t);
+		const float tau = extinction * place * LineMean(profile, ha, hb) * (b.t - a.t);
 		if (tau <= 0.0)
 			return;
 		// Lit at the middle of the segment, but inside the layer even where the ray itself is under the ground
 		// or above the top.
-		const float height = clamp(0.5 * (a.h + b.h), 0.15 * top, top);
-		Accumulate(seen, a, b, tau, 0.5 * (a.ground + b.ground), height,
+		const float height = clamp(0.5 * (ha + hb), 0.15 * top, top);
+		Accumulate(seen, a, b, tau, 0.5 * (a.ground + a.h - ha + b.ground + b.h - hb), height,
 			extinction * place * profile.scale * (exp(-height / profile.scale) - exp(-top / profile.scale)), valley);
 	}
 
@@ -483,13 +556,18 @@ namespace GroundFog
 	const bool wrap = surface && tEnd < GroundFog::FadeEnd;
 	const float lift = wrap ? 2.0 * GroundFog::SurfaceLift : 0.0;
 	const float floorLift = max(GroundFog::FloorOffset, wrap ? 1.5 * max(GroundFog::FloorMax, GroundFog::SurfaceLift) : 0.0);
+	// A far surface the valley layer is anchored to lies at most this far above the coarse ground under it.
+	const float reachEnd = max(tEnd * GroundFog::StepGrowth, GroundFog::StepMin);
+	const bool anchor = surface && GroundFog::FarExtinction > 0.0 && tEnd > GroundFog::FadeStart;
+	const float anchorReach = GroundFog::FarThickness + 0.1 * reachEnd;
+	const float valleyLift = anchor ? 2.0 * anchorReach : 0.0;
 	const bool debugTaps = GroundFog::DebugMode == 4u;
 	const float4 clear = float4(0.0, 0.0, 0.0, 1.0);
 	const float4 clearAux = float4(auxDepths, 1.0, 1.0);
 
 	// The whole ray against the highest ground under it: one read settles short rays that end well above the ground.
 	++taps;
-	if (camZ + min(dir.z * tEnd, 0.0) - GroundFog::GroundMaxAlong(0.0, endXY) > GroundFog::SlabTop(0.0, tEnd, lift, floorLift)) {
+	if (camZ + min(dir.z * tEnd, 0.0) - GroundFog::GroundMaxAlong(0.0, endXY) > GroundFog::SlabTop(0.0, tEnd, lift, floorLift, valleyLift)) {
 		FogOut[pixel] = debugTaps ? float4(GroundFog::TapColor(taps) * GroundFog::SkyMean() * 4.0, 0.5) : clear;
 		FogAuxOut[pixel] = debugTaps ? float4(auxDepths, 0.5, 1.0) : clearAux;
 		return;
@@ -504,6 +582,21 @@ namespace GroundFog
 	ray.floorEnd = GroundFog::FloorOffset * GroundFog::FloorReach(endXY);
 	ray.floorLength = 0.0;
 	ray.tFloorEnd = tEnd;
+	ray.valleyOffset = 0.0;
+	ray.valleyLength = 0.0;
+	if (anchor) {
+		// Far ground is read from coarse levels of the height map, and a layer a few meters thick laid on that
+		// lifts off rising ground or sinks into it in bands. Where the ray ends on a surface, that surface is the
+		// ground there: the layer's ground meets it over the end of the ray, so the fog touches what the pixel
+		// shows. Things standing well above the coarse ground (trees, towers, cliffs) are not ground.
+		const GroundFog::GroundSample endGround = GroundFog::GroundAt(endXY, reachEnd);
+		taps += endGround.reads;
+		float above = position.z + camZ - endGround.z;
+		above = endGround.water > 0.0 ? max(above, 0.0) : above;
+		ray.valleyOffset = above * (1.0 - smoothstep(anchorReach, 2.0 * anchorReach, abs(above)));
+		ray.valleyLength = ray.valleyOffset != 0.0 ? min(2.0 * reachEnd, tEnd) : 0.0;
+	}
+	ray.tValley = tEnd - ray.valleyLength;
 	// In front of anything that is not ground the fog fades out over the end of the ray, so it never draws the
 	// outline of what stands in it.
 	float softScale = 1.0;
@@ -518,7 +611,7 @@ namespace GroundFog
 		const bool nearEnd = GroundFog::NearExtinction > 0.0 && tEnd < GroundFog::NearEnd;
 		if ((facingUp > 0.0 || (nearEnd && ray.floorEnd > 0.0)) && GroundFog::SurfaceBlend > 0.0) {
 			const GroundFog::GroundSample endGround = GroundFog::GroundAt(endXY, 1.0);
-			++taps;
+			taps += endGround.reads;
 			float above = position.z + camZ - endGround.z;
 			// Under water the surface seen may be the bed; the fog stays on the water.
 			above = endGround.water > 0.0 ? max(above, 0.0) : above;
@@ -557,8 +650,9 @@ namespace GroundFog
 	const float2 uvStep = dir.xy * GroundFog::MapScaleOffset.xy;
 
 	GroundFog::Slow slow;
-	slow.tShade = slow.tAround = -1.0;
-	slow.shade = slow.around = 0.0;
+	slow.tShade = slow.tAround = slow.tWater = slow.tSlope = -1.0;
+	slow.shade = slow.around = slow.slope = slow.error = 0.0;
+	slow.waterCeiling = 1.0e30;
 	GroundFog::Joint a = GroundFog::MakeJoint(ray, 0.0, GroundFog::StepMin, slow, taps);
 
 	GroundFog::Seen seen;
@@ -572,13 +666,13 @@ namespace GroundFog
 			tauNear = seen.tau;
 		// Above the fog: pass over the stretches of the ray that no ground under them reaches up to, each three
 		// times as long as the one before, at one read each. A ray that looks up goes through to its end this way.
-		if (!a.sheet.inside && !a.valley.inside && !a.near.inside && a.h > 0.0 && a.hn > 0.0) {
+		if (!a.sheet.inside && !a.valley.inside && !a.near.inside && a.h > 0.0 && a.hn > 0.0 && a.hv > 0.0) {
 			float from = a.t;
 			[loop] for (uint k = 0u; k < 10u && from < tEnd - 0.01; ++k)
 			{
 				const float to = min(max(3.0 * from, from + 4.0 * GroundFog::StepMin), tEnd);
 				++taps;
-				if (camZ + dir.z * (dir.z < 0.0 ? to : from) - GroundFog::GroundMaxAlong(dir.xy * from, dir.xy * to) <= GroundFog::SlabTop(from, to, lift, floorLift))
+				if (camZ + dir.z * (dir.z < 0.0 ? to : from) - GroundFog::GroundMaxAlong(dir.xy * from, dir.xy * to) <= GroundFog::SlabTop(from, to, lift, floorLift, valleyLift))
 					break;
 				from = to;
 			}
@@ -613,8 +707,8 @@ namespace GroundFog
 
 		const float scale = a.t >= tSoft - 0.01 ? softScale : 1.0;
 		GroundFog::IntegrateNear(seen, a, b, scale);
-		GroundFog::Integrate(seen, a, b, a.sheet, b.sheet, GroundFog::GroundExtinction * scale, GroundFog::GroundFill, false);
-		GroundFog::Integrate(seen, a, b, a.valley, b.valley, GroundFog::FarExtinction, GroundFog::ValleyFill(), true);
+		GroundFog::Integrate(seen, a, b, a.sheet, b.sheet, a.h, b.h, GroundFog::GroundExtinction * scale, GroundFog::GroundFill, false);
+		GroundFog::Integrate(seen, a, b, a.valley, b.valley, a.hv, b.hv, GroundFog::FarExtinction, GroundFog::ValleyFill(), true);
 		a = b;
 		if (seen.tau > 9.0)
 			break;

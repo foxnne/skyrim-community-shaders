@@ -91,16 +91,16 @@ namespace
 	constexpr float kMaxSurfaceHeight = 4.0f;
 	constexpr float kMaxSoftness = 2.0f;
 	constexpr float kMaxFloorHeight = 8.0f;
-	constexpr float kMaxNearDensity = 0.2f;
-	constexpr float kMinNearThickness = 1.0f;
+	constexpr float kMaxNearDensity = 8.0f;
+	constexpr float kMinNearThickness = 0.15f;
 	constexpr float kMaxNearThickness = 8.0f;
 	constexpr float kMinNearFalloff = 0.5f;
 	constexpr float kMaxNearFalloff = 6.0f;
 	constexpr float kMinNearDistance = 15.0f;
 	constexpr float kMaxNearDistance = 150.0f;
-	constexpr float kMinDriftScale = 3.0f;
+	constexpr float kMinDriftScale = 0.5f;
 	constexpr float kMaxDriftScale = 40.0f;
-	constexpr float kMaxBreathing = 0.4f;
+	constexpr float kMaxBreathing = 0.6f;
 	constexpr float kMaxTimeAmount = 3.0f;
 	// The near volume's top rises and falls once in this many seconds.
 	constexpr float kBreathPeriod = 11.0f;

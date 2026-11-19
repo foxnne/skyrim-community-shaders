@@ -646,7 +646,8 @@ groupshared float gAmbientBinWeight[512];
 		const float2 xy = center.xy + offset.xy * grid.spacing.xy;
 		const float2 anchored = xy * GAME_UNITS_PER_METER;
 		const float2 field = CloudFieldPosition(xy - info.noiseWindOffset * GAME_UNIT_TO_M, info.cloudEvolution.xy);
-		float2 heights = SampleCloudHeights(field * GAME_UNITS_PER_METER, anchored).xy * GAME_UNIT_TO_M;
+		// Separate local slabs are not part of the weather heights.
+		float2 heights = IncludeLocalNdfLayerHeights(SampleCloudHeights(field * GAME_UNITS_PER_METER, anchored).xy, anchored) * GAME_UNIT_TO_M;
 		// A storm can lie below the weather layer; include its support before quadrature.
 		[loop] for (uint stormIndex = 0u; stormIndex < CloudStormCount(); ++stormIndex)
 		{

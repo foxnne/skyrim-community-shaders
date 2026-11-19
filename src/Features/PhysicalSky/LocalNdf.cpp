@@ -110,6 +110,7 @@ bool LocalNdfManager::Update(const NdfSettings& settings, TextureManager& textur
 		std::array<ID3D11ShaderResourceView*, 3> sources;
 		float weight;
 		std::string asset;
+		bool flatAltitude;
 	};
 	std::vector<Layer> layers;
 	rejectedAssets.clear();
@@ -129,8 +130,12 @@ bool LocalNdfManager::Update(const NdfSettings& settings, TextureManager& textur
 		if (!instance.enabled || instance.worldspace.empty() || instance.worldspace != worldspace)
 			continue;
 		const float strength = ClampFinite(instance.strength, 0.f, 1.f, 1.f);
+		// Unknown future values fall back to Interpolate, as before.
+		const bool separate = instance.modelingBlend == LocalNdfBlendMode::Separate;
 		const float modelWeight = strength * ClampFinite(instance.modelingWeight, 0.f, 1.f, 1.f);
-		const float heightWeight = strength * ClampFinite(instance.heightWeight, 0.f, 1.f, 1.f);
+		// A separate slab always needs its own bottom/top; they are never blended
+		// into the global heights, so the height weight is only a presence mask.
+		const float heightWeight = separate ? (modelWeight > 0.f ? 1.f : 0.f) : strength * ClampFinite(instance.heightWeight, 0.f, 1.f, 1.f);
 		if (modelWeight == 0.f && heightWeight == 0.f)
 			continue;
 		const auto path = AssetPath(instance.asset);
@@ -167,7 +172,7 @@ bool LocalNdfManager::Update(const NdfSettings& settings, TextureManager& textur
 			ClampFinite(instance.feather, 0.f, std::min(data.centerSize.z, data.centerSize.w) * 0.5f, 200.f), 0.f };
 		data.hasMask = hasMask ? 1u : 0u;
 		data.modelingAlpha = instance.modelingAlpha ? 1u : 0u;
-		data.modelingBlend = instance.modelingBlend == LocalNdfBlendMode::Maximum ? 1u : 0u;
+		data.modelingBlend = separate ? 2u : (instance.modelingBlend == LocalNdfBlendMode::Maximum ? 1u : 0u);
 		const float2 radius = { (std::abs(data.rotationWeights.x) * data.centerSize.z + std::abs(data.rotationWeights.y) * data.centerSize.w) * 0.5f,
 			(std::abs(data.rotationWeights.y) * data.centerSize.z + std::abs(data.rotationWeights.x) * data.centerSize.w) * 0.5f };
 		minimum.x = std::min(minimum.x, data.centerSize.x - radius.x);
@@ -178,16 +183,20 @@ bool LocalNdfManager::Update(const NdfSettings& settings, TextureManager& textur
 			minAltitude = std::min(minAltitude, data.heightFeather.x);
 			maxAltitude = std::max(maxAltitude, data.heightFeather.x + data.heightFeather.y);
 		}
-		layers.push_back({ data, { maps.height, maps.modeling, mask }, endpointWeight, instance.asset });
+		layers.push_back({ data, { maps.height, maps.modeling, mask }, endpointWeight, instance.asset, separate && instance.flatAltitude });
 	}
 	std::sort(layers.begin(), layers.end(), [](const Layer& a, const Layer& b) {
 		if (a.asset != b.asset)
 			return a.asset < b.asset;
 		return std::memcmp(&a.data, &b.data, sizeof(Parameters)) < 0;
 	});
+	// x endpoint weight, y blend mode, z separate slab uses un-curved altitude.
 	std::vector<float4> nextWeights;
-	for (const auto& layer : layers)
-		nextWeights.push_back({ layer.weight, static_cast<float>(layer.data.modelingBlend), 0.f, 0.f });
+	uint32_t separateCount = 0;
+	for (const auto& layer : layers) {
+		nextWeights.push_back({ layer.weight, static_cast<float>(layer.data.modelingBlend), layer.flatAltitude ? 1.f : 0.f, 0.f });
+		separateCount += layer.data.modelingBlend == 2u ? 1u : 0u;
+	}
 	if (nextWeights.empty())
 		nextWeights.push_back({});
 	if (nextWeights.size() != layerWeights.size()) {
@@ -202,6 +211,7 @@ bool LocalNdfManager::Update(const NdfSettings& settings, TextureManager& textur
 	for (const auto& layer : layers) {
 		nextKey.append(reinterpret_cast<const char*>(&layer.data), sizeof(layer.data));
 		nextKey.append(layer.asset).push_back('\0');
+		nextKey.push_back(layer.flatAltitude ? '\1' : '\0');
 	}
 	const float requestedTexelSize = ClampFinite(settings.localTexelSize, 1.f, 512.f, 32.f);
 	nextKey.append(reinterpret_cast<const char*>(&requestedTexelSize), sizeof(requestedTexelSize));
@@ -219,7 +229,9 @@ bool LocalNdfManager::Update(const NdfSettings& settings, TextureManager& textur
 		dimension = std::clamp(static_cast<uint32_t>(std::ceil(std::max(maximumPosition.x - minimum.x, maximumPosition.y - minimum.y) / effectiveTexelSize)) + 1u, 1u, 2048u);
 		const float side = dimension * effectiveTexelSize;
 		rect = { minimum.x, minimum.y, 1.f / side, 1.f / side };
-		altitude = { minAltitude <= maxAltitude ? minAltitude : 0.f, minAltitude <= maxAltitude ? maxAltitude - minAltitude : 0.f, 1.f, static_cast<float>(layers.size()) };
+		altitude = { minAltitude <= maxAltitude ? minAltitude : 0.f, minAltitude <= maxAltitude ? maxAltitude - minAltitude : 0.f,
+			// z > 0: local field active; z > 1: at least one Separate slab (1 + count).
+			1.f + static_cast<float>(separateCount), static_cast<float>(layers.size()) };
 	}
 	const auto count = static_cast<uint32_t>(std::max<size_t>(layers.size(), 1));
 	if (!height || height->desc.Width != dimension || height->desc.ArraySize != count || targets.empty()) {
@@ -398,20 +410,23 @@ void LocalNdfManager::DrawSettings(NdfSettings& settings, const std::string& wor
 	changed |= ImGui::DragFloat2(T(TKEY("local_ndf_center"), "World X / Y (m)"), &state.center.x, 10.f);
 	changed |= ImGui::DragFloat2(T(TKEY("local_ndf_size"), "Width / length (m)"), &state.size.x, 10.f, 1.f, 128000.f);
 	changed |= ImGui::DragFloat(T(TKEY("local_ndf_rotation"), "Rotation (degrees)"), &state.rotation, 1.f);
-	ImGui::BeginDisabled(state.heightWeight <= 0.f);
+	ImGui::BeginDisabled(state.heightWeight <= 0.f && state.modelingBlend != LocalNdfBlendMode::Separate);
 	changed |= ImGui::DragFloat(T(TKEY("local_ndf_altitude"), "Height zero (m)"), &state.altitude, 10.f, -24000.f, 48000.f);
 	changed |= ImGui::DragFloat(T(TKEY("local_ndf_height_span"), "Height span (m)"), &state.heightSpan, 10.f, 1.f, 24000.f);
 	ImGui::EndDisabled();
 	changed |= ImGui::SliderFloat(T(TKEY("local_ndf_strength"), "Local cloud strength"), &state.strength, 0.f, 1.f);
-	const char* blendNames[] = { T(TKEY("local_ndf_interpolate"), "Interpolate"), T(TKEY("local_ndf_maximum"), "Maximum") };
-	int blend = state.modelingBlend == LocalNdfBlendMode::Maximum ? 1 : 0;
-	if (ImGui::Combo(T(TKEY("local_ndf_blend"), "Modeling blend"), &blend, blendNames, 2)) {
+	const char* blendNames[] = { T(TKEY("local_ndf_interpolate"), "Interpolate"), T(TKEY("local_ndf_maximum"), "Maximum"), T(TKEY("local_ndf_separate"), "Separate layer") };
+	int blend = state.modelingBlend == LocalNdfBlendMode::Separate ? 2 : (state.modelingBlend == LocalNdfBlendMode::Maximum ? 1 : 0);
+	if (ImGui::Combo(T(TKEY("local_ndf_blend"), "Modeling blend"), &blend, blendNames, 3)) {
 		state.modelingBlend = static_cast<LocalNdfBlendMode>(blend);
 		changed = true;
 	}
 	changed |= ImGui::SliderFloat(T(TKEY("local_ndf_model_weight"), "Modeling influence"), &state.modelingWeight, 0.f, 1.f);
+	const bool separateLayer = state.modelingBlend == LocalNdfBlendMode::Separate;
+	ImGui::BeginDisabled(separateLayer);
 	changed |= ImGui::SliderFloat(T(TKEY("local_ndf_height_weight"), "Height influence"), &state.heightWeight, 0.f, 1.f);
-	if (state.heightWeight <= 0.f)
+	ImGui::EndDisabled();
+	if (state.heightWeight <= 0.f && !separateLayer)
 		ImGui::TextWrapped("%s", T(TKEY("local_ndf_no_height"), "Height influence is zero: Height.dds is not required and does not affect cloud bounds."));
 	changed |= ImGui::DragFloat(T(TKEY("local_ndf_feather"), "Edge feather (m)"), &state.feather, 1.f, 0.f, 64000.f);
 	changed |= ImGui::Checkbox(T(TKEY("local_ndf_alpha"), "Use modeling alpha as mask"), &state.modelingAlpha);
@@ -419,6 +434,10 @@ void LocalNdfManager::DrawSettings(NdfSettings& settings, const std::string& wor
 		ImGui::TextWrapped("%s", T(TKEY("local_ndf_interpolate_hint"), "Alpha zero preserves the background weather, including its height when height influence is enabled. Disable alpha to replace the field at full influence; zero source coverage then clears background clouds."));
 	if (state.modelingBlend == LocalNdfBlendMode::Maximum)
 		ImGui::TextWrapped("%s", T(TKEY("local_ndf_maximum_hint"), "Maximum combines coverage and profile types independently, so they may come from different maps. It never clears background clouds and ignores modeling alpha for RGB. Height blending still uses alpha when enabled."));
+	if (separateLayer) {
+		changed |= ImGui::Checkbox(T(TKEY("local_ndf_flat_altitude"), "Terrain altitude (ignore cloud curvature)"), &state.flatAltitude);
+		ImGui::TextWrapped("%s", T(TKEY("local_ndf_separate_hint"), "Separate layer adds an independent second cloud slab with its own bottom/top (Height.dds is required) and coverage/types scaled by mask, alpha and influence. Global clouds above or below it are unchanged; Height influence is ignored."));
+	}
 	ImGui::EndDisabled();
 	if (changed && editable) {
 		globals::features::physicalSky.volMainHistoryValid = false;

@@ -76,7 +76,10 @@ float3 CloudSampleDisplacement(float3 ray, float4 metadata, float opacity, float
 	const float2 fieldDelta = CloudPreviousFieldOffset(position, -shearChange * GAME_UNIT_TO_M, info.cloudEvolution);
 	float3 lowDisplacement = float3(info.cloudWindDelta - fieldDelta * GAME_UNITS_PER_METER,
 		info.cloudEvolutionDelta * (4.0 * height * (1.0 - height)));
-	const float localWeight = LocalNdfMotionWeight(FrameBuffer::CameraPosAdjust.xy + ray.xy * lowDepth, height, info);
+	float localWeight = LocalNdfMotionWeight(FrameBuffer::CameraPosAdjust.xy + ray.xy * lowDepth, height, info);
+	// A resolved depth inside a separate local slab is world-anchored cloud.
+	[branch] if (HasLocalNdfLayers(info))
+		localWeight = max(localWeight, LocalNdfLayerMotionWeight(float3(FrameBuffer::CameraPosAdjust.xy + ray.xy * lowDepth, FrameBuffer::CameraPosAdjust.z - info.bottomZ + ray.z * lowDepth), info));
 	const float localMotionUncertainty = length(lowDisplacement) * localWeight;
 	lowDisplacement *= 1.0 - localWeight;
 	// Ownership comes from nonzero extinction integrated on this ray. A mean

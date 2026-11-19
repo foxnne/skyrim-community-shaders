@@ -270,6 +270,9 @@ float3 ApplyLocalNdfModel(float3 model, LocalNdfModelSample local)
 	[loop] for (uint i = 0u; i < local.count; ++i)
 	{
 		const float4 endpoint = LocalNdfWeights[i];
+		// Separate slabs never alter the global model.
+		if (endpoint.y > 1.5)
+			continue;
 		float3 shaped;
 		[branch] if (endpoint.y > 0.0)
 			shaped = max(model, TexLocalNdfMaximum.SampleLevel(TransmittanceSampler, float3(local.uv, i), 0).rgb);
@@ -287,6 +290,8 @@ bool HasLocalNdfInfluence(LocalNdfModelSample local)
 {
 	[loop] for (uint i = 0u; i < local.count; ++i)
 	{
+		if (LocalNdfWeights[i].y > 1.5)
+			continue;
 		[branch] if (LocalNdfWeights[i].y > 0.0)
 		{
 			if (any(TexLocalNdfMaximum.SampleLevel(TransmittanceSampler, float3(local.uv, i), 0).rgb > 0.0))
@@ -304,10 +309,84 @@ float3 LocalNdfHeight(float3 height, float2 worldXY, VolumetricCloudData info)
 	{
 		float4 local = 0.0;
 		[loop] for (uint i = 0u; i < (uint)info.localNdfAltitude.w; ++i)
-			local += LocalNdfWeights[i].x * TexLocalNdfHeight.SampleLevel(TransmittanceSampler, float3(uv, i), 0);
+		{
+			// Separate slabs keep their own bottom/top; the global slab is unchanged.
+			const float2 endpoint = LocalNdfWeights[i].xy;
+			[branch] if (endpoint.y < 1.5)
+				local += endpoint.x * TexLocalNdfHeight.SampleLevel(TransmittanceSampler, float3(uv, i), 0);
+		}
 		height.xy = height.xy * (1.0 - local.b) + (local.rg * info.localNdfAltitude.y + info.localNdfAltitude.x * local.b) * GAME_UNITS_PER_METER;
 	}
 	return height;
+}
+
+// Separate-layer local states (blend mode 2) are a second, independent slab per
+// column. localNdfAltitude.z carries 1 + their count, so every other
+// configuration pays one comparison.
+bool HasLocalNdfLayers(VolumetricCloudData info)
+{
+#ifdef NO_LOCAL_NDF
+	return false;
+#else
+	return info.localNdfAltitude.z > 1.5;
+#endif
+}
+
+// Bottom/top of one separate slab as profile altitudes (game units). The atlas
+// stores premultiplied heights; endpoint.z selects terrain altitude, which the
+// curved cloud shell sees `curvature` higher.
+bool SampleLocalNdfLayerHeights(uint index, float4 endpoint, float2 uv, float curvature, VolumetricCloudData info, out float2 altitude)
+{
+	altitude = 0.0;
+	const float4 height = TexLocalNdfHeight.SampleLevel(TransmittanceSampler, float3(uv, index), 0);
+	if (height.b <= 1e-3)
+		return false;
+	altitude = (height.rg / height.b * info.localNdfAltitude.y + info.localNdfAltitude.x) * GAME_UNITS_PER_METER + endpoint.z * curvature;
+	return altitude.y > altitude.x;
+}
+
+// Union of a column's weather heights with the separate slabs above it.
+float2 IncludeLocalNdfLayerHeights(float2 heights, float2 anchoredXY)
+{
+	const VolumetricCloudData info = VolumetricCloudBuffer[0];
+	[branch] if (HasLocalNdfLayers(info))
+	{
+		const float2 uv = LocalNdfUV(anchoredXY, info);
+		if (InLocalNdf(uv, info)) {
+			const float curvature = CloudCurvatureOffset(anchoredXY - FrameBuffer::CameraPosAdjust.xy, info.cloudCurvatureRadius);
+			[loop] for (uint i = 0u; i < (uint)info.localNdfAltitude.w; ++i)
+			{
+				const float4 endpoint = LocalNdfWeights[i];
+				float2 altitude;
+				if (endpoint.y < 1.5 || !SampleLocalNdfLayerHeights(i, endpoint, uv, curvature, info, altitude))
+					continue;
+				heights = heights.y > heights.x ? float2(min(heights.x, altitude.x), max(heights.y, altitude.y)) : altitude;
+			}
+		}
+	}
+	return heights;
+}
+
+// Separate slabs are anchored to the world. `position` is world XY with
+// cloud-space Z (the resolved mean cloud depth of a pixel).
+float LocalNdfLayerMotionWeight(float3 position, VolumetricCloudData info)
+{
+	const float2 uv = LocalNdfUV(position.xy, info);
+	if (!HasLocalNdfLayers(info) || !InLocalNdf(uv, info))
+		return 0.0;
+	const float curvature = CloudCurvatureOffset(position.xy - FrameBuffer::CameraPosAdjust.xy, info.cloudCurvatureRadius);
+	const float profileAltitude = position.z + curvature;
+	float weight = 0.0;
+	[loop] for (uint i = 0u; i < (uint)info.localNdfAltitude.w; ++i)
+	{
+		const float4 endpoint = LocalNdfWeights[i];
+		float2 altitude;
+		if (endpoint.y < 1.5 || !SampleLocalNdfLayerHeights(i, endpoint, uv, curvature, info, altitude))
+			continue;
+		if (profileAltitude > altitude.x && profileAltitude < altitude.y)
+			weight += endpoint.x * saturate(TexLocalNdfMaximum.SampleLevel(TransmittanceSampler, float3(uv, i), 0).r * 16.0);
+	}
+	return saturate(weight);
 }
 
 float LocalNdfMotionWeight(float2 worldXY, float height, VolumetricCloudData info)
@@ -321,6 +400,8 @@ float LocalNdfMotionWeight(float2 worldXY, float height, VolumetricCloudData inf
 	[loop] for (uint i = 0u; i < local.count; ++i)
 	{
 		const float4 endpoint = LocalNdfWeights[i];
+		if (endpoint.y > 1.5)
+			continue;
 		[branch] if (endpoint.y > 0.0)
 		{
 			if (coverage < 0.0) {
@@ -726,7 +807,7 @@ float CloudNdfProfile(inout NDFInfo ndf)
 	return verticalProfile * coverageProfile;
 }
 
-NDFInfo sampleNDF(float2 worldXY, float2 anchoredXY, float profileAltitude)
+NDFInfo sampleWeatherNDF(float2 worldXY, float2 anchoredXY, float profileAltitude)
 {
 	const VolumetricCloudData info = VolumetricCloudBuffer[0];
 	NDFInfo ndf;
@@ -768,6 +849,57 @@ NDFInfo sampleNDF(float2 worldXY, float2 anchoredXY, float profileAltitude)
 	ndf.top_type = lerp(model.g, upstream.g, shearBlend) * saturate(ndf.coverage * 10.0);
 	ndf.bottom_type = lerp(model.b, upstream.b, shearBlend);
 	ndf.dimension_profile = CloudNdfProfile(ndf);
+	return ndf;
+}
+
+// Second slab from Separate-mode local states. The global sample (including
+// "no cloud" outside its slab) is kept unless a local slab holds this point
+// with a larger profile. No wind shear: the slab is anchored to the terrain.
+void ApplyLocalNdfLayers(inout NDFInfo ndf, float2 anchoredXY, float profileAltitude)
+{
+	const VolumetricCloudData info = VolumetricCloudBuffer[0];
+	const float curvature = CloudCurvatureOffset(anchoredXY - FrameBuffer::CameraPosAdjust.xy, info.cloudCurvatureRadius);
+	const float2 window = float2(info.localNdfAltitude.x, info.localNdfAltitude.x + info.localNdfAltitude.y) * GAME_UNITS_PER_METER;
+	if (profileAltitude <= window.x || profileAltitude >= window.y + curvature)
+		return;
+	const float2 uv = LocalNdfUV(anchoredXY, info);
+	if (!InLocalNdf(uv, info))
+		return;
+	[loop] for (uint i = 0u; i < (uint)info.localNdfAltitude.w; ++i)
+	{
+		const float4 endpoint = LocalNdfWeights[i];
+		float2 altitude;
+		if (endpoint.y < 1.5 || !SampleLocalNdfLayerHeights(i, endpoint, uv, curvature, info, altitude))
+			continue;
+		if (profileAltitude <= altitude.x || profileAltitude >= altitude.y)
+			continue;
+		// RGB = model * mask * alpha * weight, A = mask * alpha * weight.
+		const float4 model = TexLocalNdfMaximum.SampleLevel(TransmittanceSampler, float3(uv, i), 0);
+		const float coverage = saturate(model.r * endpoint.x);
+		if (model.a <= 1e-4 || coverage < 1e-8)
+			continue;
+		const float2 types = saturate(model.gb / model.a);
+		NDFInfo layer;
+		initNDFInfo(layer);
+		layer.altitude = altitude;
+		layer.height_fraction = saturate((profileAltitude - altitude.x) / (altitude.y - altitude.x));
+		const float4 range = info.localNdfAuxiliary;
+		layer.shaping_start = range.z != range.w ? saturate(lerp(range.z, range.w, saturate((types.x - range.x) / (range.y - range.x)))) : saturate(range.z);
+		layer.coverage = coverage;
+		layer.top_type = types.x * saturate(coverage * 10.0);
+		layer.bottom_type = types.y;
+		layer.in_layer = true;
+		layer.dimension_profile = CloudNdfProfile(layer);
+		if (!ndf.in_layer || layer.dimension_profile > ndf.dimension_profile)
+			ndf = layer;
+	}
+}
+
+NDFInfo sampleNDF(float2 worldXY, float2 anchoredXY, float profileAltitude)
+{
+	NDFInfo ndf = sampleWeatherNDF(worldXY, anchoredXY, profileAltitude);
+	[branch] if (HasLocalNdfLayers(VolumetricCloudBuffer[0]))
+		ApplyLocalNdfLayers(ndf, anchoredXY, profileAltitude);
 	return ndf;
 }
 

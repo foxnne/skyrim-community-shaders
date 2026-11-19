@@ -111,6 +111,35 @@ endpoint blend. Blending maximum floors before applying `max` is not equivalent.
 A failed asset or an endpoint in another worldspace contributes the global field
 at its original weight; other endpoints are not renormalized to hide the failure.
 
+### Separate layer (blend mode 2)
+
+Separate layer is not a control-field operation. The endpoint does not enter
+`F` or `H` above, so the global bottom/top and modeling are exactly what they
+are without it. Instead each column gets a second slab:
+
+```text
+bottom/top = source Height RG (absolute metres), wherever m*a > 0
+coverage   = source.r * m*a*s*wm * endpointWeight
+types      = source.gb (unweighted)
+```
+
+A density sample inside that slab evaluates the same vertical profile, coverage
+exponent and erosion as the weather slab, and the sample keeps whichever of the
+two has the larger profile. A point below the global base or above the global
+top, where the weather sample is empty, therefore still shows the local slab,
+and a global deck above a low bank is unchanged. Height.dds is required and
+Height influence is ignored. Alpha may be soft: it only fades the bank.
+
+`flatAltitude` (default true, Separate only) reads the heights as terrain
+altitudes instead of altitudes on the curved cloud shell, so a distant bank
+stays on its mountain. The slab is not sheared by wind and is treated as
+stationary by temporal reprojection. Its slices reuse the endpoint's Height
+slice (read back as RG / B) and Maximum slice (RGB premultiplied, A = weight).
+`localNdfAltitude.z` carries `1 + number of Separate endpoints`; with none
+active every pass costs one extra comparison. Supercell storm composition
+(`sampleSupercellWeatherDensity`) and lightning source placement do not see the
+separate slab.
+
 The renderer caches three RGBA16_FLOAT texture arrays, one slice per valid
 endpoint: height RG / influence B, modeling additive RGB / opacity A, and maximum
 floor RGB. Height values are normalized to the common altitude envelope, then

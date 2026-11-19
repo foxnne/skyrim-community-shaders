@@ -52,7 +52,14 @@ RWTexture2DArray<float4> MaximumOutput : register(u2);
 		const float2 normalizedHeight = (heightFeather.x + heights * heightFeather.y - altitude.x) / max(altitude.y, 1.0);
 		HeightOutput[target] = float4(normalizedHeight * heightWeight, heightWeight, 0.0);
 	}
-	if (modelingBlend != 0u) {
+	if (modelingBlend == 2u) {
+		// Separate layer: an independent slab, never blended into the global
+		// field. Premultiplied like the other maps so bilinear taps stay correct;
+		// A lets the march recover the unweighted profile types. Its height
+		// slice above is read back un-premultiplied (RG / B).
+		const float weight = mask * alpha * rotationWeights.z;
+		MaximumOutput[target] = float4(model.rgb * weight, weight);
+	} else if (modelingBlend != 0u) {
 		const float weight = mask * rotationWeights.z;
 		MaximumOutput[target] = float4(model.rgb * weight, 0.0);
 	} else {

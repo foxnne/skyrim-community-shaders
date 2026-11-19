@@ -31,7 +31,14 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	GustRainy,
 	GustSnow,
 	GustCloudy,
-	TreeModSupport)
+	TreeModSupport,
+	LODTreeLighting,
+	LODTreeLightBillboards,
+	LODTreeWrap,
+	LODTreeTransmission,
+	LODTreeShadowSoftening,
+	LODTreeNormalUpBias,
+	LODTreeBrightness)
 
 namespace
 {
@@ -105,6 +112,28 @@ void TreeWind::DrawSettings()
 		ImGui::Text("%s", T(TKEY("tree_mod_support_tooltip"),
 							  "Also sways 3D tree LOD from tree mods built differently from DynDOLOD's own models, such as Happy Little Trees, Nature of the Wild Lands and Ulvenwald."));
 	}
+
+	ImGui::SeparatorText(T(TKEY("lod_tree_lighting"), "Distant Tree Lighting"));
+	ImGui::Checkbox(T(TKEY("lod_tree_lighting_enabled"), "Light Distant Trees as Foliage"), &settings.LODTreeLighting);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s", T(TKEY("lod_tree_lighting_enabled_tooltip"),
+							  "Lights the crowns of 3D tree LOD like the leaves of nearby trees: light wraps around and comes through them. Off = the plain lighting of other distant objects. Needs Tree Mod Support for tree mods such as Nature of the Wild Lands."));
+	}
+	ImGui::Checkbox(T(TKEY("lod_tree_light_billboards"), "Include Tree Billboards"), &settings.LODTreeLightBillboards);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s", T(TKEY("lod_tree_light_billboards_tooltip"),
+							  "Also applies to flat tree billboards and to 3D tree LOD with soft or rim lighting. Off = only the 3D crowns of tree mods."));
+	}
+	SliderWithTooltip(T(TKEY("lod_tree_brightness"), "Brightness"), &settings.LODTreeBrightness, 0.5f, 3.0f, "%.2f",
+		T(TKEY("lod_tree_brightness_tooltip"), "Brightens the leaf colour of distant trees. 1 = unchanged. About 1.7 matches PBR tree textures."));
+	SliderWithTooltip(T(TKEY("lod_tree_wrap"), "Light Wrap"), &settings.LODTreeWrap, 0.0f, 1.0f, "%.2f",
+		T(TKEY("lod_tree_wrap_tooltip"), "How far sunlight wraps around to the sides of a crown. 0 = hard falloff."));
+	SliderWithTooltip(T(TKEY("lod_tree_transmission"), "Light Through Leaves"), &settings.LODTreeTransmission, 0.0f, 1.0f, "%.2f",
+		T(TKEY("lod_tree_transmission_tooltip"), "Sunlight that comes through to the side facing away from the sun, tinted by the leaf colour. 0 = none."));
+	SliderWithTooltip(T(TKEY("lod_tree_shadow_softening"), "Shadow Softening"), &settings.LODTreeShadowSoftening, 0.0f, 1.0f, "%.2f",
+		T(TKEY("lod_tree_shadow_softening_tooltip"), "Lightens the screen-space shadows on distant trees. 0 = full shadow, 1 = none."));
+	SliderWithTooltip(T(TKEY("lod_tree_normal_up_bias"), "Upward Normals"), &settings.LODTreeNormalUpBias, 0.0f, 1.0f, "%.2f",
+		T(TKEY("lod_tree_normal_up_bias_tooltip"), "Tilts the crown surfaces toward the sky, so fewer of them face the ground. 0 = unchanged."));
 
 	if (ImGui::CollapsingHeader(T(TKEY("advanced"), "Advanced: Distances and Weather Types"))) {
 		SliderWithTooltip(T(TKEY("near_scale"), "Near-Band Sway"), &settings.NearScale, 0.0f, 1.0f, "%.2f",
@@ -188,7 +217,7 @@ struct TreeWind::Hooks
 		static void thunk(RE::BSShader* This, RE::BSRenderPass* Pass, uint32_t RenderFlags)
 		{
 			func(This, Pass, RenderFlags);
-			globals::features::treeWind.BeginDraw(Pass);
+			globals::features::treeWind.BeginDraw(Pass, true);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -208,7 +237,7 @@ struct TreeWind::Hooks
 		static void thunk(RE::BSShader* This, RE::BSRenderPass* Pass, uint32_t RenderFlags)
 		{
 			func(This, Pass, RenderFlags);
-			globals::features::treeWind.BeginDraw(Pass);
+			globals::features::treeWind.BeginDraw(Pass, false);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -245,18 +274,45 @@ void TreeWind::PostPostLoad()
 	Hooks::Install();
 }
 
-void TreeWind::BeginDraw(RE::BSRenderPass* a_pass)
+void TreeWind::BeginDraw(RE::BSRenderPass* a_pass, bool a_lighting)
 {
+	constexpr auto crownFlag = static_cast<uint32_t>(State::ExtraShaderDescriptors::LODTreeCrown);
 	drawBendWeights = nullptr;
-	if (!swayActive)
+	auto& extraDescriptor = globals::state->permutationData.ExtraShaderDescriptor;
+	extraDescriptor &= ~crownFlag;
+
+	const bool lightCrowns = a_lighting && settings.LODTreeLighting;
+	if (!swayActive && !lightCrowns)
 		return;
 	const auto kind = TreeShapes::Classify(a_pass, settings.TreeModSupport);
-	drawBendWeights = kind == TreeShapes::Kind::None ? nullptr : bendWeights.Get(a_pass->geometry, kind, globals::state->frameCount, settings.TreeModSupport);
+	if (kind == TreeShapes::Kind::None)
+		return;
+	if (swayActive)
+		drawBendWeights = bendWeights.Get(a_pass->geometry, kind, globals::state->frameCount, settings.TreeModSupport);
+	// Only shapes that kept their LOD model's flags: other two-sided object LOD is not a tree.
+	// Billboards and DynDOLOD's own 3D crowns carry soft or rim lighting; tree-mod crowns carry neither.
+	if (lightCrowns && kind == TreeShapes::Kind::Crown && TreeShapes::IsPassthruShape(a_pass->geometry)) {
+		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
+		if (settings.LODTreeLightBillboards || a_pass->shaderProperty->flags.none(Flag::kRimLighting, Flag::kSoftLighting))
+			extraDescriptor |= crownFlag;
+	}
 }
 
 void TreeWind::EndDraw()
 {
 	drawBendWeights = nullptr;
+	globals::state->permutationData.ExtraShaderDescriptor &= ~static_cast<uint32_t>(State::ExtraShaderDescriptors::LODTreeCrown);
+}
+
+TreeWind::LODTreeLightingData TreeWind::GetCommonBufferData() const
+{
+	LODTreeLightingData data{};
+	data.Wrap = std::clamp(settings.LODTreeWrap, 0.0f, 1.0f);
+	data.Transmission = std::clamp(settings.LODTreeTransmission, 0.0f, 1.0f);
+	data.ShadowSoftening = std::clamp(settings.LODTreeShadowSoftening, 0.0f, 1.0f);
+	data.NormalUpBias = std::clamp(settings.LODTreeNormalUpBias, 0.0f, 1.0f);
+	data.Brightness = std::clamp(settings.LODTreeBrightness, 0.0f, 4.0f);
+	return data;
 }
 
 void TreeWind::SetupResources()

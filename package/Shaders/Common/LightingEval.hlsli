@@ -7,7 +7,7 @@
 #include "Common/Math.hlsli"
 #if defined(TRUE_PBR)
 #	include "Common/PBR.hlsli"
-#elif defined(GRASS_LIGHTING)
+#elif defined(GRASS_LIGHTING) || defined(LOD_TREE_LIGHTING)
 #	include "Common/PBRMath.hlsli"
 #endif
 #if defined(HAIR) && defined(HAIR_BACKLIGHTING)
@@ -165,6 +165,16 @@ void EvaluateLighting(DirectContext context, MaterialProperties material, float3
 	float3 diffuseLightColor = context.lightColor * context.detailedShadow;
 	float3 softLightColor = context.lightColor * context.softShadow;
 	lightingOutput.diffuse = saturate(NdotL) * diffuseLightColor * Color::BRDFScale;
+#	if defined(LOD_TREE_LIGHTING)
+	// Object LOD tree crowns: the thin-surface lobes of PBR foliage in place of Lambert. The lit side wraps;
+	// the far side gets the light that crosses the crown. Both are multiplied by the base colour with the
+	// rest of the diffuse light, which tints the transmitted part like a leaf.
+	[branch] if ((Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::LODTreeCrown) != 0)
+	{
+		float2 diffuseCosines = PBR::GetThinSurfaceDiffuseCosines(NdotL, SharedData::lodTreeLightingSettings.Wrap);
+		lightingOutput.diffuse = (diffuseCosines.x * diffuseLightColor + diffuseCosines.y * SharedData::lodTreeLightingSettings.Transmission * softLightColor) * Color::BRDFScale;
+	}
+#	endif
 #	if defined(HAIR) && defined(HAIR_BACKLIGHTING)
 	HairBacklighting::AddDirectLight(lightingOutput, context, tbnTr[2], material.BaseColor);
 #	endif

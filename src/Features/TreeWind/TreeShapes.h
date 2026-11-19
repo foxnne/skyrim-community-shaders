@@ -24,6 +24,12 @@ namespace TreeShapes
 	/** @brief Classifies a Lighting or Utility pass by its shader flags, geometry type, shape name and layout. */
 	Kind Classify(const RE::BSRenderPass* a_pass, bool a_treeModSupport);
 
+	/**
+	 * @brief True for object LOD shapes that keep the shader flags of their LOD models: 'passthru', 'treepassthru',
+	 * 'objpassthru', with or without a '-LargeRef' suffix. Tree crowns are among them; walls and rocks are 'obj'.
+	 */
+	bool IsPassthruShape(const RE::BSGeometry* a_geometry);
+
 	class BendWeights
 	{
 	public:

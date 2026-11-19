@@ -91,6 +91,10 @@ float MediumVisibility(float3 position, out float atmosphereVisibility, out floa
 	return saturate(visibility);
 }
 
+#ifdef GROUND_FOG
+#	include "GroundFog/GroundFog.hlsli"
+#endif
+
 #ifdef EXP_HEIGHT_FOG
 #	define VIEW_ATMOSPHERE_INJECTION
 #	include "ExponentialHeightFog/VolumetricFogCommon.hlsli"
@@ -227,6 +231,32 @@ float3 AtmosphereLight(uint lightIndex, float3 position, float3 direction, float
 		fog *= 1000.0 / GAME_UNIT_TO_M;
 		light += fog.rgb;
 		fogExtinction = fog.a;
+	}
+#endif
+#ifdef GROUND_FOG
+	// Added once the atmosphere light is final, so a later change to the atmosphere terms cannot scale ground fog.
+	if (info.flags.z & 2048u) {
+		GroundFog::Cell groundFog;
+		if (GroundFog::EvaluateCell(grid, coord, MediumLevel, position, offset.z, groundFog)) {
+			const float perKm = 1000.0 / GAME_UNIT_TO_M;
+			float groundFogAtmosphere;
+			float3 groundFogDiffuse;
+			// Visibility inside the layer: the cell's own sample is often under the ground.
+			const float groundFogVisibility = MediumVisibility(groundFog.lightPos, groundFogAtmosphere, groundFogDiffuse);
+			const float3 scattering = groundFog.extinction * perKm * groundFog.albedo;
+			const float3 viewDirection = normalize(center);
+			float3 groundFogLight = AtmosphereLight(0u, groundFog.lightPos, viewDirection, sky.sunDir, sky.sunlightColor, 0.0, scattering,
+				groundFogVisibility * GroundFog::SelfShadowing(groundFog.tauAbove, sky.sunDir.z), groundFogDiffuse);
+			groundFogLight += AtmosphereLight(1u, groundFog.lightPos, viewDirection, sky.masserDir, sky.masserColor, 0.0, scattering,
+				groundFogVisibility * GroundFog::SelfShadowing(groundFog.tauAbove, sky.masserDir.z), groundFogDiffuse);
+			groundFogLight += AtmosphereLight(2u, groundFog.lightPos, viewDirection, sky.secundaDir, sky.secundaColor, 0.0, scattering,
+				groundFogVisibility * GroundFog::SelfShadowing(groundFog.tauAbove, sky.secundaDir.z), groundFogDiffuse);
+			groundFogLight *= GroundFog::SunScale;
+			// Sky light reaches fog in shadow too, so it takes no direct visibility.
+			groundFogLight += scattering * GroundFog::SkyMean() * GroundFog::SkyAmbientScale;
+			light += groundFogLight;
+			fogExtinction += groundFog.extinction * perKm;
+		}
 	}
 #endif
 	float4 source = float4(max(light, 0.0), max(fogExtinction, 0.0));

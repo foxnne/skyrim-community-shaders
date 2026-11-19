@@ -1,0 +1,319 @@
+#ifndef GROUND_FOG_HLSLI
+#define GROUND_FOG_HLSLI
+
+// Ground Fog: a thin sheet of fog that follows the terrain, injected into the shared atmosphere volume.
+//
+// A froxel cell is often taller than the layer, so the density is never point sampled. Each cell gets the exact
+// mean of the height profile over the heights the cell covers, which keeps the layer's optical mass whatever the
+// cell size and needs no jitter.
+//
+// The idea of a noise-shaped column top with an exponential profile integrated in closed form comes from
+// Iwillbewarlock's GroundFog (GPL-3.0). No code is shared with it.
+//
+// Include after Common/Random.hlsli and Common/ViewAtmosphere.hlsli, with a clamped linear `LinearSampler` in scope.
+
+namespace GroundFog
+{
+	cbuffer GroundFogCB : register(b2)
+	{
+		float4 MapScaleOffset;   // height map uv = absolute xy * xy + zw
+		float2 MapZ;             // world z at texel value 0 and 1
+		float2 MapEdgeFade;      // uv distance from the map edge to full strength, as a reciprocal
+		float Thickness;         // top of the tallest mounds above the ground, game units
+		float Steepness;         // density falls to exp(-Steepness) at the top
+		float GroundExtinction;  // extinction at the ground, per game unit, amount included
+		float GroundFill;        // depth below the ground that still holds fog, game units
+		float FadeStart;         // game units
+		float FadeEnd;
+		float2 WindTravel;  // how far the wind has carried the pattern, game units
+		float InvNoiseScale;
+		float NoiseStrength;
+		float InvBankScale;
+		float BankStrength;
+		float BasinStrength;
+		float BasinRadius;  // game units
+		float InvBasinDepth;
+		float WaterPreference;
+		float Albedo;
+		float SunScale;
+		float SkyAmbientScale;
+		float SelfShadow;
+		uint Flags;      // bit 0: raise the ground to the water surface
+		uint DebugMode;  // 0 off, 1 slab, 2 ground height, 3 layer mask
+		float2 Padding;
+	};
+
+	Texture2D<float> HeightMap : register(t6);
+
+	static const float TopLimit = 0.3;  // banks raise the layer by at most this share per unit of BankStrength
+
+	struct Cell
+	{
+		float extinction;  // mean extinction of the cell, per game unit
+		float3 lightPos;   // camera-relative point inside the layer, for lighting
+		float tauAbove;    // vertical optical depth of the fog above lightPos
+		float3 albedo;
+	};
+
+	struct Profile
+	{
+		float fill;   // constant density from -fill to 0
+		float top;    // exponential from 0 to top, nothing above
+		float scale;  // e-folding height
+		float total;  // integral over the whole profile
+	};
+
+	float2 MapUv(float2 xy)
+	{
+		return (xy + FrameBuffer::CameraPosAdjust.xy) * MapScaleOffset.xy + MapScaleOffset.zw;
+	}
+
+	// 0 outside the height map, rising to 1 one cell inside it.
+	float MapCoverage(float2 uv)
+	{
+		const float2 inside = min(uv, 1.0 - uv) * MapEdgeFade;
+		return saturate(min(inside.x, inside.y));
+	}
+
+	float TerrainZ(float2 uv)
+	{
+		return lerp(MapZ.x, MapZ.y, HeightMap.SampleLevel(LinearSampler, uv, 0));
+	}
+
+	// Absolute z of the surface the fog lies on at a camera-relative xy; water is 1 where that surface is water.
+	float Ground(float2 xy, out float water)
+	{
+		float z = TerrainZ(MapUv(xy));
+		water = 0.0;
+		if (Flags & 1u) {
+			// Known for the 5x5 cells around the camera only; far below the terrain elsewhere.
+			const float camZ = FrameBuffer::CameraPosAdjust.z;
+			const float surface = SharedData::GetWaterData(float3(xy, z - camZ)).w + camZ;
+			water = saturate((surface - z) / 16.0);
+			z = max(z, surface);
+		}
+		return z;
+	}
+
+	float Hash(int2 cell)
+	{
+		return Random::pcg2d(uint2(cell)).x * (1.0 / 4294967296.0);
+	}
+
+	float ValueNoise(float2 p)
+	{
+		const float2 base = floor(p);
+		const float2 f = p - base;
+		const float2 u = f * f * (3.0 - 2.0 * f);
+		const int2 cell = int2(base);
+		return lerp(lerp(Hash(cell), Hash(cell + int2(1, 0)), u.x), lerp(Hash(cell + int2(0, 1)), Hash(cell + int2(1, 1)), u.x), u.y);
+	}
+
+	// Top of the layer above the ground at an absolute xy. Mounds average about 0.42 of Thickness; a cell longer
+	// than a mound gets that average, so distant cells do not flicker as the camera moves.
+	float LayerTop(float2 xyAbs, float cellLength)
+	{
+		const float2 q = xyAbs - WindTravel;
+		float top = Thickness;
+		if (NoiseStrength > 0.0) {
+			const float2 p = q * InvNoiseScale;
+			const float n = smoothstep(0.2, 0.8, 0.65 * ValueNoise(p) + 0.35 * ValueNoise(p * 2.3 + 17.3));
+			const float mound = lerp(0.15 + 0.85 * n * n, 0.42, saturate(cellLength * InvNoiseScale - 0.5));
+			top *= lerp(1.0, mound, NoiseStrength);
+		}
+		if (BankStrength > 0.0) {
+			const float bank = lerp(0.45, 1.0 + TopLimit, smoothstep(0.15, 0.85, ValueNoise(q * InvBankScale + 31.7)));
+			top *= max(1.0 + BankStrength * (bank - 1.0), 0.0);
+		}
+		return max(top, 1.0);
+	}
+
+	// More fog in hollows, less on rises: the terrain around the point against the terrain at it.
+	float BasinFactor(float2 xy, float terrain)
+	{
+		const float2 uv = MapUv(xy);
+		const float2 du = float2(BasinRadius * MapScaleOffset.x, 0.0);
+		const float2 dv = float2(0.0, BasinRadius * MapScaleOffset.y);
+		const float around = 0.25 * (TerrainZ(uv + du) + TerrainZ(uv - du) + TerrainZ(uv + dv) + TerrainZ(uv - dv));
+		const float hollow = clamp((around - terrain) * InvBasinDepth, -1.0, 1.0);
+		return clamp(1.0 + BasinStrength * hollow, 0.0, 1.0 + BasinStrength);
+	}
+
+	// 1 - exp(-t), exact for small t.
+	float OneMinusExp(float t)
+	{
+		return t < 0.25 ? t * (1.0 - t * (0.5 - t * (1.0 / 6.0 - t * (1.0 / 24.0 - t * (1.0 / 120.0))))) : 1.0 - exp(-t);
+	}
+
+	// t - 1 + exp(-t), exact for small t.
+	float ExpRemainder(float t)
+	{
+		return t < 0.25 ? t * t * (0.5 - t * (1.0 / 6.0 - t * (1.0 / 24.0 - t * (1.0 / 120.0 - t * (1.0 / 720.0))))) : t - 1.0 + exp(-t);
+	}
+
+	Profile MakeProfile(float top)
+	{
+		Profile profile;
+		profile.fill = GroundFill;
+		profile.top = top;
+		profile.scale = top / max(Steepness, 0.02);
+		profile.total = profile.fill + profile.scale * OneMinusExp(profile.top / profile.scale);
+		return profile;
+	}
+
+	// Relative density at height h above the ground: 1 from -fill to 0, exp(-h / scale) up to top, 0 above. Space
+	// deeper than fill is not part of the cell at all: it is hidden by the ground, so it must not dilute the mean.
+	// Returns the first and second antiderivatives from -fill to x of the density (xy) and of the counted space (zw).
+	float4 Antiderivatives(Profile profile, float x)
+	{
+		const float counted = max(x + profile.fill, 0.0);
+		const float below = min(counted, profile.fill);
+		const float inside = clamp(x, 0.0, profile.top);
+		const float above = max(x - profile.top, 0.0);
+		const float t = inside / profile.scale;
+		return float4(below + profile.scale * OneMinusExp(t),
+			0.5 * below * below + profile.fill * inside + profile.scale * profile.scale * ExpRemainder(t) + above * profile.total,
+			counted, 0.5 * counted * counted);
+	}
+
+	// For a ray segment whose height above the ground runs from ha to hb, widened to the cell's vertical half size r:
+	// x = density integrated over the heights it covers, y = how much of them counts, both as shares of the whole.
+	// x / y is the mean density. Exact for ground that is straight along the segment.
+	float2 SegmentIntegral(Profile profile, float ha, float hb, float r)
+	{
+		if (max(ha, hb) + r <= -profile.fill)
+			return 0.0;
+		if (min(ha, hb) - r >= profile.top)
+			return float2(0.0, 1.0);
+		const float rise = hb - ha;
+		// The general form divides by r * rise; below these sizes the missing dimension changes nothing.
+		if (abs(rise) < 2.0) {
+			const float mid = 0.5 * (ha + hb);
+			if (r < 0.5)
+				return mid < -profile.fill ? 0.0 : float2(mid > profile.top ? 0.0 : (mid < 0.0 ? 1.0 : exp(-mid / profile.scale)), 1.0);
+			return (Antiderivatives(profile, mid + r).xz - Antiderivatives(profile, mid - r).xz) / (2.0 * r);
+		}
+		if (r < 2.0)
+			return (Antiderivatives(profile, hb).xz - Antiderivatives(profile, ha).xz) / rise;
+		return (Antiderivatives(profile, hb + r).yw - Antiderivatives(profile, hb - r).yw - Antiderivatives(profile, ha + r).yw + Antiderivatives(profile, ha - r).yw) / (2.0 * r * rise);
+	}
+
+	float3 Hue(float h)
+	{
+		return saturate(abs(frac(h + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0);
+	}
+
+	// Sun transmittance through the fog above a point.
+	float SelfShadowing(float tauAbove, float lightZ)
+	{
+		return exp(-SelfShadow * tauAbove / max(lightZ, 0.15));
+	}
+
+	// Mean incident sky radiance, clouds included.
+	float3 SkyMean()
+	{
+		return max(float3(PhysSky::TexCloudDiffuseTransport.Load(int3(0, 0, 0)).x, PhysSky::TexCloudDiffuseTransport.Load(int3(1, 0, 0)).x,
+					   PhysSky::TexCloudDiffuseTransport.Load(int3(2, 0, 0)).x) *
+					   0.28209479177387814,
+			0.0);
+	}
+
+	// jittered is the pass's own sample of this cell at depth fraction depthOffset; lighting stays near it.
+	bool EvaluateCell(ViewAtmosphere::Grid grid, uint3 coord, uint level, float3 jittered, float depthOffset, out Cell cell)
+	{
+		cell.extinction = 0.0;
+		cell.lightPos = jittered;
+		cell.tauAbove = 0.0;
+		cell.albedo = Albedo;
+
+		const float nearDistance = ViewAtmosphere::Distance(grid, coord.z);
+		const float farDistance = ViewAtmosphere::Distance(grid, coord.z + 1u);
+		if (nearDistance >= FadeEnd)
+			return false;
+		const float distanceFade = 1.0 - smoothstep(FadeStart, FadeEnd, 0.5 * (nearDistance + farDistance));
+		if (distanceFade <= 0.0)
+			return false;
+
+		// The far face of the cell; the near face is the same four rays scaled by nearScale.
+		const float3 farPoint = ViewAtmosphere::Position(grid, coord, float3(0.5, 0.5, 1.0));
+		const float4 cornerZ = float4(ViewAtmosphere::Position(grid, coord, float3(0.0, 0.0, 1.0)).z, ViewAtmosphere::Position(grid, coord, float3(1.0, 0.0, 1.0)).z,
+			ViewAtmosphere::Position(grid, coord, float3(0.0, 1.0, 1.0)).z, ViewAtmosphere::Position(grid, coord, float3(1.0, 1.0, 1.0)).z);
+		const float exitLow = min(min(cornerZ.x, cornerZ.y), min(cornerZ.z, cornerZ.w));
+		const float exitHigh = max(max(cornerZ.x, cornerZ.y), max(cornerZ.z, cornerZ.w));
+		const float nearScale = nearDistance / farDistance;
+		const float exitMid = 0.5 * (exitLow + exitHigh);
+		const float exitHalf = 0.5 * (exitHigh - exitLow);
+
+		const float midScale = 0.5 * (1.0 + nearScale);
+		const float2 midXY = farPoint.xy * midScale;
+		const float coverage = MapCoverage(MapUv(midXY));
+		if (coverage <= 0.0)
+			return false;
+		const float camZ = FrameBuffer::CameraPosAdjust.z;
+		float midWater;
+		const float midGround = Ground(midXY, midWater);
+
+		// Reject cells clear of the layer. The ground under the rest of the cell is not sampled yet, so allow for a
+		// 45 degree slope over half its length.
+		const float topMax = Thickness * (1.0 + TopLimit * BankStrength);
+		const float slack = 0.5 * (1.0 - nearScale) * length(farPoint.xy);
+		const float cellLow = min(exitLow, exitLow * nearScale) + camZ - midGround;
+		const float cellHigh = max(exitHigh, exitHigh * nearScale) + camZ - midGround;
+		if (cellLow - slack >= topMax || cellHigh + slack <= -GroundFill)
+			return false;
+
+		const float cellLength = farDistance - nearDistance;
+		const float top = LayerTop(midXY + FrameBuffer::CameraPosAdjust.xy, cellLength);
+		const Profile profile = MakeProfile(top);
+
+		// The ray is cut where the ground is sampled, so long cells follow terrain that is not straight.
+		const uint halfSteps = level == 0u ? 1u : (cellLength > 1024.0 ? 2u : 1u);
+		float water;
+		const float nearGround = Ground(farPoint.xy * nearScale, water);
+		const float farGround = Ground(farPoint.xy, water);
+		float2 sum = 0.0;
+		float scaleA = nearScale;
+		float groundA = nearGround;
+		[loop] for (uint i = 1u; i <= 2u * halfSteps; ++i)
+		{
+			const float scaleB = lerp(nearScale, 1.0, float(i) / float(2u * halfSteps));
+			float groundB = farGround;
+			if (i == halfSteps)
+				groundB = midGround;
+			else if (i < 2u * halfSteps)
+				groundB = Ground(farPoint.xy * scaleB, water);
+			sum += SegmentIntegral(profile, scaleA * exitMid + camZ - groundA, scaleB * exitMid + camZ - groundB, 0.5 * (scaleA + scaleB) * exitHalf);
+			scaleA = scaleB;
+			groundA = groundB;
+		}
+		if (sum.x <= 0.0 || sum.y <= 1e-4)
+			return false;
+		const float mean = min(sum.x / sum.y, 1.0);
+
+		float placement = coverage * distanceFade * lerp(1.0, WaterPreference, midWater);
+		float basin = 1.0;
+		if (BasinStrength > 0.0) {
+			basin = BasinFactor(midXY, TerrainZ(MapUv(midXY)));
+			placement *= basin;
+		}
+		const float groundExtinction = GroundExtinction * placement;
+		cell.extinction = groundExtinction * mean;
+		if (cell.extinction <= 0.0)
+			return false;
+
+		// Light the fog where it is: at the sample's place along the cell, but inside the layer even when the
+		// sample itself is under the ground or above the top.
+		const float lightGround = depthOffset < 0.5 ? lerp(nearGround, midGround, depthOffset * 2.0) : lerp(midGround, farGround, depthOffset * 2.0 - 1.0);
+		const float lightHeight = clamp(jittered.z + camZ - lightGround, 0.15 * top, top);
+		cell.lightPos = float3(jittered.xy, lightGround + lightHeight - camZ);
+		cell.tauAbove = groundExtinction * profile.scale * (exp(-lightHeight / profile.scale) - exp(-top / profile.scale));
+
+		if (DebugMode == 2u)
+			cell.albedo = Hue(midGround / 1024.0) * (frac(midGround / 128.0) < 0.5 ? 1.0 : 0.3);
+		else if (DebugMode == 3u)
+			cell.albedo = 0.08 + 0.92 * float3(saturate(basin - 1.0), saturate(top / max(topMax, 1.0)), midWater);
+		return true;
+	}
+}
+
+#endif

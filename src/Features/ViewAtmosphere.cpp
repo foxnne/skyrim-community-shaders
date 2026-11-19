@@ -327,6 +327,10 @@ void ViewAtmosphere::Render()
 	if ((data.flags.z & (1u | 256u | 512u | 2048u)) != previousShadowFlags)
 		data.history.x = 0.0f;
 	parameters->Update(&data, sizeof(data));
+	lightingInputs.shadowMap.copy_from(shadowView);
+	lightingInputs.shadowData.copy_from(shadowData);
+	lightingInputs.cloudLayer.copy_from(cloudLayer ? cloudLayer->srv.get() : nullptr);
+	lightingInputs.terrainShadow.copy_from(terrainReady ? terrain.texShadowHeight->srv.get() : nullptr);
 	auto* paramSrv = parameters->SRV();
 	context->CSSetShaderResources(127, 1, &paramSrv);
 	ID3D11Buffer* shared[] = { globals::state->sharedDataCB->CB(), globals::state->featureDataCB->CB() };
@@ -396,6 +400,23 @@ void ViewAtmosphere::Render()
 	ready = true;
 	Bind();
 	Bind(true);
+}
+
+void ViewAtmosphere::BindLightingInputs(ID3D11DeviceContext* context)
+{
+	if (!ready)
+		return;
+	auto& sky = globals::features::physicalSky;
+	auto bind = [&](UINT slot, ID3D11ShaderResourceView* srv) { context->CSSetShaderResources(slot, 1, &srv); };
+	bind(1, lightingInputs.shadowMap.get());
+	bind(2, sky.texMsLut ? sky.texMsLut->srv.get() : nullptr);
+	bind(25, lightingInputs.cloudLayer.get());
+	bind(60, lightingInputs.terrainShadow.get());
+	bind(61, sky.texTrLut ? sky.texTrLut->srv.get() : nullptr);
+	bind(69, sky.texCloudShadowMean ? sky.texCloudShadowMean->srv.get() : nullptr);
+	bind(70, CloudDiffuseTransport());
+	bind(98, lightingInputs.shadowData.get());
+	bind(112, sky.texShadowVolume ? sky.texShadowVolume->srv.get() : nullptr);
 }
 
 void ViewAtmosphere::Bind(bool compute)
@@ -582,6 +603,7 @@ void ViewAtmosphere::ClearShaderCache()
 	reflectionShadersRequested = false;
 	injectCS = nullptr;
 	integrateCS = nullptr;
+	lightingInputs = {};
 	prepared = ready = false;
 	lastFrame = UINT32_MAX;
 	Unbind();
@@ -607,6 +629,8 @@ bool ViewAtmosphere::CompositeEnabled()
 			defines.emplace_back("IBL", "");
 		if (globals::features::dynamicCubemaps.loaded)
 			defines.emplace_back("DYNAMIC_CUBEMAPS", "");
+		if (globals::features::groundFog.loaded)
+			defines.emplace_back("GROUND_FOG", "");
 		if (auto* shader = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\ViewAtmosphere\\Composite.cs.hlsl", defines, "cs_5_0")))
 			mediumCompositeCS.attach(shader);
 	}
@@ -670,6 +694,9 @@ void ViewAtmosphere::CompositeAfterWater()
 	context->CSSetShaderResources(40, 2, depths.data());
 	std::array<ID3D11SamplerState*, 5> samplers = { linearSampler.get(), nullptr, nullptr, linearSampler.get(), linearSampler.get() };
 	context->CSSetSamplers(0, 5, samplers.data());
+	// Ground fog is drawn here, for the depth the composite is about to use (opaque scene and water), and the
+	// composite lays it under the atmosphere. It leaves its result bound for the composite, or nothing.
+	globals::features::groundFog.RenderPixel(context);
 	context->CSSetUnorderedAccessViews(0, 1, &main.UAV, nullptr);
 	context->CSSetShader(mediumCompositeCS.get(), nullptr, 0);
 	D3D11_TEXTURE2D_DESC desc;

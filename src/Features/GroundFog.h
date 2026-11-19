@@ -5,9 +5,10 @@
 /**
  * @brief A thin sheet of fog that follows the terrain.
  *
- * Owns no pass of its own: Atmosphere and Fog compiles the layer into its light-scattering shader and calls
- * BindForVolume around the dispatch. The ground comes from the Terrain Shadows height map, so the fog exists only
- * in worldspaces that ship a 16-bit one.
+ * Drawn per screen pixel by its own compute pass (RenderPixel), which Atmosphere and Fog runs right before its
+ * post-water composite and lays under the atmosphere there. With the setting VolumeInjection the layer is instead
+ * compiled into the shared volume's light-scattering shader (BindForVolume), as in the first version. The ground
+ * comes from the Terrain Shadows height map, so the fog exists only in exterior worldspaces that ship a 16-bit one.
  */
 struct GroundFog : Feature
 {
@@ -49,6 +50,19 @@ struct GroundFog : Feature
 		float SkyAmbientScale = 1.0f;
 		float SelfShadow = 1.0f;
 		float GroundFill = 0.25f;  // share of Thickness
+		// Pixel pass.
+		float SurfaceBlendDistance = 3.0f;  // end of the view ray over which the ground becomes the visible surface
+		float SurfaceMaxHeight = 1.0f;      // a surface up to this far above the mapped ground counts as ground
+		bool HalfResolution = true;
+		float StepGrowth = 0.3f;  // size of terrain detail the march follows, as a share of the distance from the camera
+		int MaxSteps = 72;
+		// The valley layer: deeper fog in hollows and over water, beyond the sheet.
+		float FarAmount = 1.0f;
+		float FarDensity = 0.003f;     // extinction at the ground per meter, at FarAmount 1
+		float FarThickness = 25.0f;    // meters
+		float FarEnd = 6000.0f;        // meters
+		float CloudDarkening = 0.75f;  // how much cloud overhead dims the sky light the fog takes
+		bool VolumeInjection = false;  // draw through the shared atmosphere volume instead of per pixel
 	};
 
 	/** Mirrors GroundFogCB in GroundFog/GroundFog.hlsli. */
@@ -78,9 +92,24 @@ struct GroundFog : Feature
 		float SelfShadow;
 		uint32_t Flags;
 		uint32_t DebugMode;
-		float2 Padding;
+		float SurfaceBlend;
+		float SurfaceLift;
+		float StepMin;
+		float StepGrowth;
+		uint32_t MaxSteps;
+		float WaterTop;
+		float2 PyramidSize;
+		float PyramidLevels;
+		float MapTexel;
+		float2 MapSize;
+		float FarExtinction;
+		float FarThickness;
+		float FarEnd;
+		float FarBasinRadius;
+		float InvFarBasinDepth;
+		float CloudDarkening;
 	};
-	static_assert(sizeof(VolumeData) == 128);
+	static_assert(sizeof(VolumeData) == 192);
 	static_assert(offsetof(VolumeData, MapZ) == 16);
 	static_assert(offsetof(VolumeData, Thickness) == 32);
 	static_assert(offsetof(VolumeData, FadeStart) == 48);
@@ -89,7 +118,13 @@ struct GroundFog : Feature
 	static_assert(offsetof(VolumeData, BasinStrength) == 80);
 	static_assert(offsetof(VolumeData, Albedo) == 96);
 	static_assert(offsetof(VolumeData, Flags) == 112);
-	static_assert(offsetof(VolumeData, Padding) == 120);
+	static_assert(offsetof(VolumeData, SurfaceBlend) == 120);
+	static_assert(offsetof(VolumeData, MaxSteps) == 136);
+	static_assert(offsetof(VolumeData, PyramidSize) == 144);
+	static_assert(offsetof(VolumeData, MapTexel) == 156);
+	static_assert(offsetof(VolumeData, MapSize) == 160);
+	static_assert(offsetof(VolumeData, FarEnd) == 176);
+	static_assert(offsetof(VolumeData, CloudDarkening) == 188);
 
 	enum class DebugMode : uint32_t
 	{
@@ -97,6 +132,7 @@ struct GroundFog : Feature
 		kSlab,
 		kGroundHeight,
 		kLayerMask,
+		kTapCount,
 	};
 
 	enum class Status
@@ -108,6 +144,8 @@ struct GroundFog : Feature
 		kUnderwater,
 		kNoHeightMap,
 		kHeightMapNot16Bit,
+		kNoVolume,
+		kNoResources,
 	};
 
 	Settings settings;
@@ -119,10 +157,21 @@ struct GroundFog : Feature
 	virtual void LoadSettings(json& o_json) override;
 	virtual void SaveSettings(json& o_json) override;
 	virtual void RestoreDefaultSettings() override;
+	virtual void ClearShaderCache() override;
+
+	/**
+	 * @brief Draws the layer for the current scene depth into the feature's own targets and binds them for
+	 * ViewAtmosphere/Composite.cs.hlsl. Call inside the post-water composite, with its depth (t40), linear sampler
+	 * (s0), shared constant buffers and the shared volume's parameters already bound to the compute stage.
+	 * @return False when there is nothing to draw this frame: disabled, interior, Amount 0, no height map. The
+	 * composite slots are cleared then, and no GPU work is done.
+	 */
+	bool RenderPixel(ID3D11DeviceContext* a_context);
 
 	/**
 	 * @brief Binds the layer's constants and the terrain height map for the atmosphere volume's compute pass.
-	 * @return False when there is no fog to add this frame; nothing is bound then.
+	 * @return False when the volume has no fog to add this frame, which is always unless VolumeInjection is set;
+	 * nothing is bound then.
 	 */
 	bool BindForVolume(ID3D11DeviceContext* a_context);
 	/** @brief Restores what the compute stage had bound before BindForVolume. */
@@ -131,9 +180,27 @@ struct GroundFog : Feature
 	/** Constant buffer and height map slots in ViewAtmosphere/LightScattering.cs.hlsl. */
 	static constexpr uint32_t kConstantSlot = 2;
 	static constexpr uint32_t kHeightMapSlot = 6;
+	/** Further slots of GroundFog/GroundFogPixel.cs.hlsl and of the fog in ViewAtmosphere/Composite.cs.hlsl. */
+	static constexpr uint32_t kHeightPyramidSlot = 7;
+	static constexpr uint32_t kCompositeFogSlot = 42;
+	static constexpr uint32_t kCompositeDepthSlot = 43;
 
 private:
 	Status Update(VolumeData& a_data, ID3D11ShaderResourceView*& a_heightMap);
+	bool EnsureShaders();
+	/** Builds the coarse copies of the height map when it changes. */
+	bool EnsureHeightPyramid(ID3D11DeviceContext* a_context, ID3D11ShaderResourceView* a_heightMap);
+	bool EnsureTargets(uint32_t a_width, uint32_t a_height);
+
+	winrt::com_ptr<ID3D11ComputeShader> pixelCS;
+	winrt::com_ptr<ID3D11ComputeShader> pyramidCS;
+	winrt::com_ptr<ID3D11ComputeShader> pyramidFirstCS;
+	bool shadersRequested = false;
+	eastl::unique_ptr<Texture2D> fogTexture;       // rgb: light toward the camera, a: transmittance
+	eastl::unique_ptr<Texture2D> fogDepthTexture;  // device depth each fog pixel was computed for
+	eastl::unique_ptr<Texture2D> heightPyramid;
+	winrt::com_ptr<ID3D11ShaderResourceView> heightPyramidSource;
+	uint32_t heightPyramidLevels = 0;
 
 	eastl::unique_ptr<ConstantBuffer> volumeConstants;
 	winrt::com_ptr<ID3D11Buffer> previousConstants;
@@ -149,6 +216,7 @@ private:
 	DebugMode debugMode = DebugMode::kOff;
 	Status status = Status::kDisabled;
 	float effectiveAmount = 0.0f;
+	float effectiveFarAmount = 0.0f;
 	float windSpeed = 0.0f;
 	DXGI_FORMAT heightMapFormat = DXGI_FORMAT_UNKNOWN;
 	float2 heightMapSize{};

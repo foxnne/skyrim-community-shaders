@@ -132,7 +132,9 @@ enum class NdfType : uint32_t
 enum class LocalNdfBlendMode : uint32_t
 {
 	Interpolate = 0,
-	Maximum = 1
+	Maximum = 1,
+	// Independent second slab: the global bottom/top and modeling stay untouched.
+	Separate = 2
 };
 
 struct LocalNdfState
@@ -151,12 +153,14 @@ struct LocalNdfState
 	float feather = 200.f;
 	bool modelingAlpha = true;
 	LocalNdfBlendMode modelingBlend = LocalNdfBlendMode::Interpolate;
+	// Separate mode only: heights are terrain altitudes, not altitudes on the curved cloud shell.
+	bool flatAltitude = true;
 };
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	LocalNdfState,
 	asset, worldspace, enabled, center, size, rotation, altitude, heightSpan,
-	strength, modelingWeight, heightWeight, feather, modelingAlpha, modelingBlend)
+	strength, modelingWeight, heightWeight, feather, modelingAlpha, modelingBlend, flatAltitude)
 
 struct NdfSettings
 {

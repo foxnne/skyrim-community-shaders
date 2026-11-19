@@ -2,6 +2,7 @@
 
 #include "Deferred.h"
 #include "Features/Effects11/D3D11StateBackup.h"
+#include "Features/PhysicalSky.h"
 #include "Features/TerrainBlending.h"
 #include "Globals.h"
 #include "ShaderCache.h"
@@ -324,7 +325,8 @@ void ProceduralLightning::PollEngineFlash(const RE::Sky* a_sky)
 	if (flashStartTime == lastFlashStartTime)
 		return;
 	lastFlashStartTime = flashStartTime;
-	if (a_sky->flash > 0.0f)
+	// Physical Sky draws its own bolts when it owns the weather's lightning; never add a second set.
+	if (a_sky->flash > 0.0f && !globals::features::physicalSky.lightning.OwnsWeather())
 		SpawnBolts(a_sky, false);
 }
 
@@ -571,6 +573,8 @@ void ProceduralLightning::DrawSettings()
 	ImGui::Checkbox(T(TKEY("enabled"), "Enabled"), &settings.Enabled);
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::TextWrapped("%s", T(TKEY("enabled_tooltip"), "Bolts appear with the game's lightning flashes, so only in thunderstorm weathers and outdoors."));
+	if (globals::features::physicalSky.lightning.OwnsWeather())
+		ImGui::TextWrapped("%s", T(TKEY("physical_sky_owns"), "Physical Sky lightning is active and replaces the game's flashes, so no bolts are drawn here. Test strikes still work."));
 
 	if (ImGui::TreeNodeEx(T(TKEY("appearance"), "Appearance"), ImGuiTreeNodeFlags_DefaultOpen)) {
 		ImGui::SliderFloat(T(TKEY("intensity"), "Brightness"), &settings.Intensity, 1.0f, 64.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);

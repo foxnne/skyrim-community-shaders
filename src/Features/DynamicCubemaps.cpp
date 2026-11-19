@@ -305,6 +305,11 @@ ID3D11ComputeShader* DynamicCubemaps::GetComputeShaderBC6HEncode()
 
 void DynamicCubemaps::UpdateCubemapCapture(bool a_reflections)
 {
+	// The capture blends the lit frame into the environment map, which would keep a lightning flash in
+	// reflections and in the ambient fallback for a while after it. Hold the map across the flash instead.
+	if (globals::features::physicalSky.lightning.Transient())
+		return;
+
 	auto renderer = globals::game::renderer;
 	auto context = globals::d3d::context;
 

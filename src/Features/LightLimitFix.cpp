@@ -866,20 +866,25 @@ void LightLimitFix::UpdateLights()
 	const auto& flash = globals::features::physicalSky.cbData;
 	if (flash.enabled && flash.lightningControl.w > 0.f && flash.lightningColorIntensity.w > 0.f) {
 		for (uint32_t i = 0; i < 2 && lightsData.size() < MAX_LIGHTS; ++i) {
+			// Same two emitters and falloff as Lightning::IncidentFrom: illuminance at the emitter, in scene units and
+			// already inside the per-discharge limits, falling as r^2 / (d^2 + r^2) with the soft radius r.
 			const auto source = i == 0 ? flash.lightningPositionRadius : flash.lightningChannelEmitter;
-			if (source.w <= 0.f)
+			const float softRadius = flash.lightningScene.z;
+			if (flash.lightningPositionRadius.w <= 0.f || softRadius <= 0.f)
 				continue;
 			LightData light{};
-			const float luminance = (i == 0 ? flash.lightningPhotometry.x : flash.lightningPhotometry.y) * flash.lightningColorIntensity.w;
-			if (luminance <= 0.f)
+			const float atEmitter = (i == 0 ? flash.lightningScene.x : flash.lightningScene.y) * flash.lightningColorIntensity.w;
+			if (atEmitter <= 0.f)
 				continue;
+			// GetAttenuation returns pi * r^2 / (d^2 + r^2) for this light.
+			const float luminance = atEmitter / std::numbers::pi_v<float>;
 			light.color = float3(flash.lightningColorIntensity.x, flash.lightningColorIntensity.y, flash.lightningColorIntensity.z) *
 			              luminance;
 			if (!globals::features::linearLighting.IsLinearLightingActive())
 				light.color = { Util::ColorSpace::LinearToGameGamma(light.color.x), Util::ColorSpace::LinearToGameGamma(light.color.y), Util::ColorSpace::LinearToGameGamma(light.color.z) };
-			light.sizeBias = source.w * source.w;  // equivalent emitter radius squared, game units
-			// Cull only below 0.1 lux; attenuation itself stays photometric.
-			light.radius = source.w * std::sqrt(std::max(std::numbers::pi_v<float> * luminance / 0.1f - 1.f, 1.f));
+			light.sizeBias = softRadius * softRadius;  // game units squared
+			// Cull only below 0.001 scene units (a hundredth of the full moon).
+			light.radius = softRadius * std::sqrt(std::max(atEmitter / 0.001f - 1.f, 1.f));
 			light.invRadius = 1.f / light.radius;
 			light.lightFlags.set(LightFlags::PortalStrict, LightFlags::Lightning);
 			SetLightPosition(light, { source.x, source.y, source.z });

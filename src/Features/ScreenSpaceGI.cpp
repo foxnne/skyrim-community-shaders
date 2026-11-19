@@ -10,6 +10,7 @@
 #include "I18n/I18n.h"
 #include "IBL.h"
 #include "NRD.h"
+#include "PhysicalSky.h"
 #include "ReverseZ.h"
 #include "Skylighting.h"
 #include "State.h"
@@ -821,7 +822,10 @@ void ScreenSpaceGI::UpdateSB()
 		const bool hasContinuousHistory = hasMultiBounceHistory &&
 		                                  globals::state->frameCount == lastMultiBounceHistoryFrame + 1;
 		const bool trackMultiBounce = settings.EnableGI && settings.EnableMultiBounce;
-		const bool injectMultiBounce = trackMultiBounce && hasContinuousHistory && hasFullResolutionMultiBounceHistory;
+		// The previous frame's GI is not fed back while a lightning flash is in it, or the flash would keep
+		// circulating between bounces after the sky has gone dark.
+		const bool injectMultiBounce = trackMultiBounce && hasContinuousHistory && hasFullResolutionMultiBounceHistory &&
+		                               !globals::features::physicalSky.lightning.Transient();
 		// 0: disabled, 1: populate history, 2: populate and inject valid history.
 		data.MultiBounceMode = injectMultiBounce ? 2u : (trackMultiBounce ? 1u : 0u);
 	}
@@ -1046,6 +1050,14 @@ void ScreenSpaceGI::DrawSSGI()
 
 		nrdSvc.ApplyReblurSettings(reblurSettings, settings.Reblur,
 			tracedHalfRes ? nrd::CheckerboardMode::BLACK : nrd::CheckerboardMode::OFF);
+		// A lightning flash lasts a few frames. With the configured accumulation it would stay in the history for
+		// as many frames as that averages over; with a short history the GI follows the flash and lets go of it.
+		if (globals::features::physicalSky.lightning.Transient()) {
+			reblurSettings.maxAccumulatedFrameNum = std::min(reblurSettings.maxAccumulatedFrameNum, 3u);
+			reblurSettings.maxFastAccumulatedFrameNum = std::min(reblurSettings.maxFastAccumulatedFrameNum, 1u);
+			reblurSettings.maxStabilizedFrameNum = 0u;
+			reblurSettings.historyFixFrameNum = 0u;
+		}
 		reblurSettings.hitDistanceParameters.A = 3.0f / Util::Units::GAME_UNIT_TO_M;
 		reblurSettings.hitDistanceParameters.B = 0.1f;
 		reblurSettings.diffusePrepassBlurRadius = settings.DiffusePrepassBlurRadius;

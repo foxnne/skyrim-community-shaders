@@ -25,7 +25,9 @@ public:
 	/// Creates the candidate readback and immutable-per-discharge channel upload.
 	void SetupResources();
 	/// Advances the pause-aware event and fills Physical Sky's shared shader data.
-	void Update(PhysicalSky& sky, const std::string& worldspace, bool available);
+	/// `skyRendering`: Physical Sky draws this frame, so it may own the weather's lightning.
+	/// `available`: the cloud renderer and lightning shaders can place and draw a discharge.
+	void Update(PhysicalSky& sky, const std::string& worldspace, bool skyRendering, bool available);
 	/// Submits a density-only placement query using the cloud renderer's current resources.
 	void QuerySource(ID3D11ComputeShader* shader);
 	/// Counts successful cloud updates, rather than display frames, for mask preparation.
@@ -36,8 +38,35 @@ public:
 	void Trigger();
 	/// Reports ownership even between flashes, so vanilla cannot start a second scheduler.
 	bool OwnsWeather() const { return ownsWeather.load(std::memory_order_relaxed); }
-	/// Clears an existing vanilla flash and stops a thunder sound already playing at takeover.
-	void SuppressVanilla(RE::Sky* sky) const;
+	/// While owning the weather: clears the vanilla flash, zeroes the game settings that turn it into
+	/// directional and ambient light, and stops a thunder sound already playing. Otherwise restores them.
+	void SuppressVanilla(RE::Sky* sky);
+	/// True while a flash lights the scene and for a few frames after it. Temporal histories that would keep
+	/// the flash (GI accumulation, environment capture, exposure adaptation) hold or shorten on this.
+	bool Transient() const { return transientFrames.load(std::memory_order_relaxed) > 0u; }
+
+	/// The peak scene illuminance, in scene units, that one strike may deliver at the camera and at the strike itself.
+	static constexpr float kMaxCameraIlluminance = 2.f;
+	static constexpr float kMaxPeakIlluminance = 10.f;
+	/// Core radius of the scene light's falloff, metres: E(d) = E0 * r^2 / (d^2 + r^2).
+	static constexpr float kSoftRadius = 500.f;
+	/// Frames after the last lit frame during which histories stay short.
+	static constexpr uint32_t kTransientTail = 8;
+
+	/// What the last frame of an active discharge resolved to; shown in the settings panel.
+	struct Readout
+	{
+		float distance = 0;          // camera to the strike, km
+		float cameraIlluminance = 0; // at full pulse, after limits
+		float peakIlluminance = 0;   // at the emitter, after limits
+		float sceneScale = 1, cloudScale = 1, boltScale = 1;  // what the limits removed
+		float exposure = 1;          // pre-exposure the limits used; 1 = none available
+		bool grounded = false, cloudBase = false;
+		bool thunderWeather = false;
+		uint32_t weatherFrequency = 0;  // raw vanilla thunder frequency byte
+		uint32_t segments = 0;
+	};
+	const Readout& LastReadout() const { return readout; }
 	ID3D11ShaderResourceView* Segments() const { return segments ? segments->SRV() : nullptr; }
 	bool HasSource() const { return phase == Phase::Preparing || phase == Phase::Flashing; }
 
@@ -60,6 +89,14 @@ private:
 		bool played = false;
 	};
 	std::atomic_bool ownsWeather = false;
+	std::atomic_uint32_t transientFrames = 0;
+	Readout readout;
+	float flashExposure = 1.f;
+	// Vanilla flash-to-light game settings, zeroed while this owns the weather.
+	RE::Setting* flashDirectional = nullptr;
+	RE::Setting* flashAmbient = nullptr;
+	float savedFlashDirectional = 0, savedFlashAmbient = 0;
+	bool flashSettingsResolved = false, flashSettingsZeroed = false;
 	Phase phase = Phase::Idle;
 	// The pending source owns the other mask lane, but never contributes light or sound.
 	Phase pendingPhase = Phase::Idle;
@@ -93,4 +130,6 @@ private:
 	void PromoteSource(PhysicalSky& sky);
 	void BuildChannel(float bottomZ);
 	void StartFlash(const PhysicalSky& physicalSky);
+	/// Scene, cloud and bolt levels for the active discharge, with the absolute and exposure limits applied.
+	void ResolvePhotometry(PhysicalSky& physicalSky, float intensity);
 };

@@ -153,7 +153,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	PhysicalSky::Settings::LightningSettings,
-	rate, distanceRange, radius, cloudLuminance, channelLuminance, channelRadius,
+	weatherMode, vanillaFallback, rate, distanceRange, radius,
+	cloudGlow, boltLuminance, boltWidth, boltGlow, channelRadius,
+	sceneIlluminance, sceneExposureLimit, fogScatter,
 	strokeCount, strokeDuration, strokeInterval, strokeDecay,
 	groundChance, cloudBaseChance, color)
 
@@ -1112,18 +1114,35 @@ void PhysicalSky::SettingsWeatherEffects()
 		ImGui::TextWrapped("%s", T(TKEY("lightning_cloud_requirement"), "Lightning requires volumetric clouds. Enable them in Clouds to see the effect."));
 	if (ImGui::CollapsingHeader(T(TKEY("lightning_section"), "Lightning"), ImGuiTreeNodeFlags_DefaultOpen)) {
 		ImGui::SliderFloat(T(TKEY("lightning_intensity"), "Lightning Intensity"), &settings.lightningIntensity, 0.f, 4.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-		Util::AddTooltip(T(TKEY("lightning_intensity_desc"), "Controls lightning, its illumination and thunder using Physical Sky weather settings, independently of vanilla weather. A nonzero value replaces vanilla flashes and thunder; zero restores them."));
+		Util::AddTooltip(T(TKEY("lightning_intensity_desc2"), "Scales the bolt, the cloud glow, the light on the scene and the thunder volume together. 1 is the calibrated level. At zero there is no Physical Sky lightning; the game's own flash stays off unless Vanilla Fallback is ticked."));
+		ImGui::Checkbox(T(TKEY("lightning_vanilla_fallback"), "Vanilla Fallback at Zero Intensity"), &settings.lightning.vanillaFallback);
+		Util::AddTooltip(T(TKEY("lightning_vanilla_fallback_desc"), "With Lightning Intensity at zero, hands flashes and thunder back to the game. The game's flash is not in scene light units and washes out a linear-lit scene at dusk and night, so this is off by default."));
+		const char* weatherModes[] = { T(TKEY("lightning_weather_any"), "Any weather with a suitable cloud"), T(TKEY("lightning_weather_thunder"), "Thunder weathers only") };
+		ImGui::Combo(T(TKEY("lightning_weather_mode"), "Automatic Discharges"), &settings.lightning.weatherMode, weatherModes, 2);
+		Util::AddTooltip(T(TKEY("lightning_weather_mode_desc"), "Thunder weathers are those whose weather record has a thunder frequency. New Lightning and Replay Lightning work in any weather."));
 		ImGui::DragFloat(T(TKEY("lightning_rate"), "Discharge Rate"), &settings.lightning.rate, 0.1f, 0.f, 600.f, "%.1f / min", ImGuiSliderFlags_AlwaysClamp);
-		Util::AddTooltip(T(TKEY("lightning_rate_desc"), "Requested average discharge rate from Physical Sky weather settings. Discharges do not overlap, and preparing a new cloud source limits the actual frequency. Zero stops automatic discharges but keeps vanilla lightning suppressed while Lightning Intensity is nonzero."));
+		Util::AddTooltip(T(TKEY("lightning_rate_desc"), "Requested average discharge rate from Physical Sky weather settings. Discharges do not overlap, and preparing a new cloud source limits the actual frequency. Zero stops automatic discharges."));
 		ImGui::DragFloat2(T(TKEY("lightning_distance"), "Discharge Distance Range"), &settings.lightning.distanceRange.x, 0.05f, 0.05f, 50.f, "%.2f km", ImGuiSliderFlags_AlwaysClamp);
 		Util::AddTooltip(T(TKEY("lightning_distance_desc"), "Minimum and maximum horizontal distance from the camera. A local storm uses its own footprint within this range."));
-		ImGui::DragFloat(T(TKEY("lightning_radius"), "Luminous Cloud Radius"), &settings.lightning.radius, 10.f, 10.f, 5000.f, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
-		Util::AddTooltip(T(TKEY("lightning_radius_desc"), "Equivalent radius of the luminous cloud patch. A larger radius increases both its visible footprint and the area that illuminates the scene."));
-		ImGui::DragFloat(T(TKEY("lightning_cloud_luminance"), "Peak Cloud Luminance"), &settings.lightning.cloudLuminance, 10.f, 0.f, 1.0e9f, "%.0f cd/m^2", ImGuiSliderFlags_AlwaysClamp);
-		ImGui::DragFloat(T(TKEY("lightning_channel_luminance"), "Peak Channel Luminance"), &settings.lightning.channelLuminance, 10000.f, 0.f, 1.0e9f, "%.0f cd/m^2", ImGuiSliderFlags_AlwaysClamp);
-		Util::Text::WrappedSecondary("%s", T(TKEY("lightning_photometry_desc"), "Uses the same photometric scale as Solar Illuminance: 1 lux is 1 linear illuminance unit. Luminance and emitting area determine scene illuminance. Calibrated for Linear Lighting and PBR; exposure and lighting multipliers apply afterward. Lightning Intensity multiplies these peak values."));
-		ImGui::DragFloat(T(TKEY("lightning_channel_radius"), "Channel Radius"), &settings.lightning.channelRadius, 0.01f, 0.001f, 5.f, "%.3f m", ImGuiSliderFlags_AlwaysClamp);
-		Util::AddTooltip(T(TKEY("lightning_channel_radius_desc"), "Physical radius of the main luminous channel. Its projected area also determines its contribution to scene illumination."));
+		Util::Text::WrappedSecondary("%s", T(TKEY("lightning_units_desc"), "Brightness values are in scene units, the scale of Solar Illuminance: full sun is 10 and a sunlit white surface is about 3. What is drawn (bolt, cloud glow) and what lights the scene are set separately, so a brighter or wider bolt does not light the scene more."));
+		ImGui::SliderFloat(T(TKEY("lightning_scene_illuminance"), "Scene Light at 1 km"), &settings.lightning.sceneIlluminance, 0.f, SkyLightning::kMaxCameraIlluminance, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::AddTooltip(T(TKEY("lightning_scene_illuminance_desc"), "Peak light a strike 1 km away puts on the scene. 1 is a tenth of full sun, about ten full moons. It falls with the square of distance: 0.14 of this at 3 km, 0.02 at 8 km. No strike lights the camera position by more than 2 or the ground beside it by more than 10."));
+		ImGui::SliderFloat(T(TKEY("lightning_exposure_limit"), "Flash Exposure Limit"), &settings.lightning.sceneExposureLimit, -2.f, 6.f, "%+.1f EV", ImGuiSliderFlags_AlwaysClamp);
+		Util::AddTooltip(T(TKEY("lightning_exposure_limit_desc"), "How far over mid-grey a flash may lift a mid-toned surface at the current exposure, so a strike at night cannot white out the view. The cloud glow may go 2.5 EV and the bolt core 5 EV further. Needs Linear Lighting with auto exposure; without it only the fixed limits apply."));
+		ImGui::SliderFloat(T(TKEY("lightning_fog_scatter"), "Air and Fog Glow"), &settings.lightning.fogScatter, 0.f, 2.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::AddTooltip(T(TKEY("lightning_fog_scatter_desc"), "Share of the scene light that air, haze and fog scatter back to the eye. Lower it if thick fog flashes too brightly."));
+		ImGui::DragFloat(T(TKEY("lightning_cloud_glow"), "Cloud Glow"), &settings.lightning.cloudGlow, 0.01f, 0.f, 50.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::AddTooltip(T(TKEY("lightning_cloud_glow_desc"), "Peak brightness of the cloud around the discharge."));
+		ImGui::DragFloat(T(TKEY("lightning_radius2"), "Lit Cloud Radius"), &settings.lightning.radius, 10.f, 10.f, 5000.f, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
+		Util::AddTooltip(T(TKEY("lightning_radius_desc2"), "Size of the lit cloud patch and of the bends and forks of the channel. It does not change the light on the scene."));
+		ImGui::DragFloat(T(TKEY("lightning_bolt_luminance"), "Bolt Brightness"), &settings.lightning.boltLuminance, 0.5f, 0.f, 2000.f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
+		Util::AddTooltip(T(TKEY("lightning_bolt_luminance_desc"), "Peak brightness of the channel core as drawn. Forks are dimmer. It does not change the light on the scene."));
+		ImGui::SliderFloat(T(TKEY("lightning_bolt_width"), "Bolt Width"), &settings.lightning.boltWidth, 0.5f, 8.f, "%.1f px", ImGuiSliderFlags_AlwaysClamp);
+		Util::AddTooltip(T(TKEY("lightning_bolt_width_desc"), "Least apparent half-width of the main channel, in pixels of a 1080-line image, at any distance. Wider does not mean brighter."));
+		ImGui::SliderFloat(T(TKEY("lightning_bolt_glow"), "Bolt Halo"), &settings.lightning.boltGlow, 0.f, 0.5f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+		Util::AddTooltip(T(TKEY("lightning_bolt_glow_desc"), "Soft halo five core widths wide, as a fraction of the core brightness."));
+		ImGui::DragFloat(T(TKEY("lightning_channel_radius"), "Channel Radius"), &settings.lightning.channelRadius, 0.01f, 0.01f, 2.f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
+		Util::AddTooltip(T(TKEY("lightning_channel_radius_desc2"), "True radius of the channel. Only seen within some tens of metres, where it is wider than Bolt Width."));
 		ImGui::SliderInt(T(TKEY("lightning_stroke_count"), "Return Strokes"), &settings.lightning.strokeCount, 1, 1024, "%d", ImGuiSliderFlags_AlwaysClamp);
 		Util::AddTooltip(T(TKEY("lightning_stroke_count_desc"), "Repeated flashes along one channel, not new lightning locations. A long discharge delays the next location even at a high discharge rate. Use New Lightning to interrupt the current discharge."));
 		ImGui::DragFloat(T(TKEY("lightning_stroke_duration"), "Stroke Duration"), &settings.lightning.strokeDuration, 1.f, 1.f, 60000.f, "%.0f ms", ImGuiSliderFlags_AlwaysClamp);
@@ -1140,7 +1159,18 @@ void PhysicalSky::SettingsWeatherEffects()
 		settings.SanitizeLightning();
 		ImGui::Text(T(TKEY("lightning_duration"), "Discharge Duration: %.2f s"), ((settings.lightning.strokeCount - 1) * settings.lightning.strokeInterval + settings.lightning.strokeDuration) * 0.001f);
 		if (settings.enableVolumetricClouds && settings.lightningIntensity > 0.f && (!csLightningQuery || !csLightningComposite || !csLightningCubeComposite))
-			Util::Text::Error("%s", T(TKEY("lightning_unavailable"), "Lightning rendering is unavailable. Nonzero Lightning Intensity still suppresses vanilla flashes and thunder. See the log for details."));
+			Util::Text::Error("%s", T(TKEY("lightning_unavailable2"), "Lightning rendering is unavailable. Vanilla flashes and thunder stay suppressed. See the log for details."));
+		{
+			const auto& readout = lightning.LastReadout();
+			ImGui::Text(T(TKEY("lightning_readout_weather"), "Weather thunder frequency: %u (%s), vanilla flash %s"), readout.weatherFrequency,
+				readout.thunderWeather ? T(TKEY("lightning_readout_thunder"), "thunder weather") : T(TKEY("lightning_readout_no_thunder"), "no thunder"),
+				lightning.OwnsWeather() ? T(TKEY("lightning_readout_suppressed"), "suppressed") : T(TKEY("lightning_readout_active"), "active"));
+			ImGui::Text(T(TKEY("lightning_readout_last"), "Last discharge: %s at %.1f km, %u segments"),
+				readout.grounded ? T(TKEY("lightning_readout_ground"), "ground strike") : readout.cloudBase ? T(TKEY("lightning_readout_base"), "cloud base") : T(TKEY("lightning_readout_embedded"), "in cloud"),
+				readout.distance, readout.segments);
+			ImGui::Text(T(TKEY("lightning_readout_light"), "Scene light at camera %.3f, beside the strike %.2f (full sun = 10)"), readout.cameraIlluminance, readout.peakIlluminance);
+			ImGui::Text(T(TKEY("lightning_readout_limits"), "Limits kept: scene %.0f%%, cloud %.0f%%, bolt %.0f%% (exposure %.3g)"), readout.sceneScale * 100.f, readout.cloudScale * 100.f, readout.boltScale * 100.f, readout.exposure);
+		}
 		if (ImGui::Button(T(TKEY("lightning_trigger"), "New Lightning")))
 			lightning.Trigger();
 		Util::AddTooltip(T(TKEY("lightning_trigger_desc"), "Creates a new source using the current distance, radius and event chances. Requires active Physical Sky lightning and a suitable cloud."));
@@ -1937,7 +1967,7 @@ void PhysicalSky::Reset()
 	allGood &= (worldspaceEnabled || settings.enableAllExteriorCells || allowForcedInterior) && (!inInterior || allowForcedInterior) && !inMainLoadingMenu;
 
 	if (!allGood) {
-		lightning.Update(*this, worldspaceID, false);
+		lightning.Update(*this, worldspaceID, false, false);
 		if (skySync.loaded && skySync.settings.Enabled)
 			skySync.workingLightColors = std::nullopt;
 		// Some shader paths read cloud shadow and lightning fields without checking enabled, so clear them all
@@ -2026,7 +2056,7 @@ void PhysicalSky::Reset()
 		.lightSkyStatics = settings.lightSkyStatics ? 1u : 0u,
 		.skyStaticsBrightness = settings.skyStaticsBrightness,
 	};
-	lightning.Update(*this, worldspaceID, allGood && !inInterior && !globals::state->isMapMenuOpen && VolumetricCloudsEnabled() && csLightningQuery && csLightningComposite && csLightningCubeComposite);
+	lightning.Update(*this, worldspaceID, true, allGood && !inInterior && !globals::state->isMapMenuOpen && VolumetricCloudsEnabled() && csLightningQuery && csLightningComposite && csLightningCubeComposite);
 	auto lightningColor = sRGBToWorkingGamut({ cbData.lightningColorIntensity.x, cbData.lightningColorIntensity.y, cbData.lightningColorIntensity.z });
 	// Same working-gamut Y and photometric scale as the solar illuminance control.
 	const float lightningY = wideGamut ? lightningColor.x * 0.2722287168f + lightningColor.y * 0.6740817658f + lightningColor.z * 0.0536895174f :

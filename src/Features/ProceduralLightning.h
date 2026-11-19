@@ -24,7 +24,9 @@ struct ProceduralLightning : Feature
 
 	struct Settings
 	{
-		bool Enabled = true;
+		// Off by default: Physical Sky lightning is the one lightning system. This overlay only follows the game's own
+		// flash, which Physical Sky suppresses, and it does not light clouds or the scene.
+		bool Enabled = false;
 		bool UseWeatherColor = true;
 		std::array<float, 3> Color = { 0.62f, 0.76f, 1.0f };
 		float Intensity = 12.0f;

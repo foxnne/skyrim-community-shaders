@@ -180,21 +180,31 @@ struct PhysicalSky final : public Feature
 
 		// VOLUMETRIC CLOUDS
 		bool enableVolumetricClouds = false;
-		float lightningIntensity = 0.f;  // zero restores vanilla weather lightning
+		// Master multiplier for the bolt, the cloud glow, the scene light and the thunder volume. Zero: no Physical Sky lightning.
+		float lightningIntensity = 1.f;
+		// All luminances and illuminances are in scene units: the scale of Solar Illuminance (10 = full sun),
+		// where a sunlit white surface is about 3.2. They are not real-world cd/m^2 or lux.
 		struct LightningSettings
 		{
-			float rate = 3.f;                       // requested discharges per minute
-			float2 distanceRange = { 0.35f, 7.f };  // horizontal kilometres
-			float radius = 600.f;                   // equivalent luminous cloud radius, metres
-			float cloudLuminance = 1000.f;          // peak cd/m^2
-			float channelLuminance = 1.0e7f;        // peak cd/m^2
-			float channelRadius = 0.12f;            // metres
+			int weatherMode = 1;                   // 0: any weather with a suitable cloud, 1: only weathers that have vanilla thunder
+			bool vanillaFallback = false;          // with zero intensity: hand flashes and thunder back to the game
+			float rate = 6.f;                      // requested discharges per minute
+			float2 distanceRange = { 1.f, 10.f };  // horizontal kilometres
+			float radius = 600.f;                  // size of the lit cloud patch and of the channel's bends, metres
+			float cloudGlow = 1.2f;                // peak luminance of the lit cloud
+			float boltLuminance = 60.f;            // peak luminance of the channel core as drawn; does not light the scene
+			float boltWidth = 1.5f;                // least apparent half-width of the main channel, pixels at 1080p
+			float boltGlow = 0.06f;                // soft halo around the core, fraction of the core
+			float channelRadius = 0.12f;           // true radius in metres; only matters within some tens of metres
+			float sceneIlluminance = 1.f;          // peak light on the scene from a strike 1 km away
+			float sceneExposureLimit = 2.f;        // EV over mid-grey that the flash may lift a mid-albedo surface to
+			float fogScatter = 0.5f;               // share of the scene light that air and fog scatter towards the eye
 			int strokeCount = 3;
-			float strokeDuration = 20.f;  // milliseconds, full optical pulse duration
-			float strokeInterval = 90.f;  // milliseconds between stroke starts
+			float strokeDuration = 60.f;   // milliseconds, full optical pulse duration
+			float strokeInterval = 110.f;  // milliseconds between stroke starts
 			float strokeDecay = 0.65f;
-			float groundChance = 35.f;            // percent
-			float cloudBaseChance = 35.f;         // percent; the remainder is embedded cloud lightning
+			float groundChance = 50.f;            // percent
+			float cloudBaseChance = 25.f;         // percent; the remainder is embedded cloud lightning
 			float3 color = { 0.86f, 0.9f, 1.f };  // linear sRGB chromaticity
 		};
 		LightningSettings lightning;
@@ -285,11 +295,13 @@ struct PhysicalSky final : public Feature
 		float4 lightningEndPosition;
 		float4 lightningColorIntensity;
 		float4 lightningControl;         // generation, mask history valid, segment count, ownership
-		float4 lightningPhotometry;      // cloud and channel cd/m^2, channel radius in m, cloud-base mode
+		float4 lightningPhotometry;      // cloud and bolt luminance at full pulse (scene units, exposure limit applied), channel radius in m, cloud-base mode
 		float4 lightningPlacement;       // pending query: distance bounds in game units, seed, base mode
-		float4 lightningChannelEmitter;  // centroid and equivalent projected-area radius, game units
+		float4 lightningChannelEmitter;  // centroid of the main channel, game units; w is its length
 		float4 lightningPreparationPositionRadius;
 		float4 lightningPreparationControl;  // base mode, history valid, active mask lane, preparing
+		float4 lightningScene;               // illuminance at the cloud and channel emitters at full pulse, soft radius in game units, fog share
+		float4 lightningBolt;                // least angular half-width (rad), halo amount, unused, unused
 		float4 diskAngularRadius;            // Sun, Masser, Secunda, directional light, in radians, independent of disc rendering mode.
 		float3 dirLightBodyDir;              // towards the body lighting the scene, blended while the light swings between two
 		uint dirLightDiskIndex;              // body whose disc phase the clouds show

@@ -1,6 +1,7 @@
 #include "HistogramAutoExposure.h"
 
 #include "Features/LinearLighting.h"
+#include "Features/PhysicalSky.h"
 #include "Features/PostProcessing.h"
 #include "I18n/I18n.h"
 #include "ShaderCache.h"
@@ -406,7 +407,9 @@ void HistogramAutoExposure::Draw(TextureInfo& inout_tex)
 
 	const auto parameters = GetExposureParameters();
 	const bool menuScene = state->IsMenuSceneOpen();
-	const bool holdAdaptation = menuScene && hasMeasuredAdaptation;
+	// A lightning flash is over before the eye or a camera would adapt to it; metering it only leaves the
+	// scene too dark afterwards.
+	const bool holdAdaptation = (menuScene || globals::features::physicalSky.lightning.Transient()) && hasMeasuredAdaptation;
 
 	AutoExposureCB cbData = {
 		.AdaptArea = settings.AdaptArea,

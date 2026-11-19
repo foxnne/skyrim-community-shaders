@@ -94,10 +94,10 @@ cbuffer MediumDispatch : register(b0)
 				float visibility = SharedData::InInterior ? 0.0 : 1.0;
 				if (ViewAtmosphere::Data[0].flags.z & 8u)
 					visibility *= Skylighting::EvaluateDiffuse(visibilitySH, direction, Skylighting::GetFadeOutFactor(position));
-				transient += Lightning::IncidentFrom(emitter, worldPosition) * visibility *
+				transient += Lightning::MediumIncidentFrom(emitter, worldPosition) * visibility *
 				             (rayleigh * PhysSky::Phase::Rayleigh(cosine) + mie * PhysSky::Phase::CornetteShanks(cosine, SharedData::physSkyData.aerosolPhaseG) + source.a * (1.0 / (4.0 * 3.14159265)));
 				if (exaggerate)
-					surfaceTransient += Lightning::IncidentFrom(emitter, worldPosition) * visibility *
+					surfaceTransient += Lightning::MediumIncidentFrom(emitter, worldPosition) * visibility *
 					                    (extraAir * PhysSky::Phase::Rayleigh(cosine) + extraHaze * PhysSky::Phase::CornetteShanks(cosine, SharedData::physSkyData.aerosolPhaseG));
 			}
 		}

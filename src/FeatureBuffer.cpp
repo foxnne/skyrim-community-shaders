@@ -29,6 +29,7 @@
 #include "Features/TerrainBlending.h"
 #include "Features/TerrainShadows.h"
 #include "Features/TerrainVariation.h"
+#include "Features/TreeWind.h"
 #include "Features/VanillaFresnel.h"
 #include "Features/ViewAtmosphere.h"
 #include "Features/VolumetricLighting.h"
@@ -88,5 +89,6 @@ std::pair<unsigned char*, size_t> GetFeatureBufferData(bool a_inWorld)
 		globals::features::screenSpaceReflections.GetCommonBufferData(),
 		globals::features::postProcessing.GetCommonBufferData(),
 		globals::features::physicalSky.cbData,
-		globals::features::viewAtmosphere.settings);
+		globals::features::viewAtmosphere.settings,
+		globals::features::treeWind.GetCommonBufferData());
 }

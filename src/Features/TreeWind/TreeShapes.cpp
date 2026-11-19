@@ -282,6 +282,22 @@ namespace TreeShapes
 		}
 	}
 
+	bool IsPassthruShape(const RE::BSGeometry* a_geometry)
+	{
+		const char* name = a_geometry ? a_geometry->name.c_str() : nullptr;
+		if (!name)
+			return false;
+		std::string_view view(name);
+		constexpr std::string_view largeRef = "-LargeRef";
+		if (view.size() > largeRef.size() && _strnicmp(view.data() + view.size() - largeRef.size(), largeRef.data(), largeRef.size()) == 0)
+			view.remove_suffix(largeRef.size());
+		for (const std::string_view passthru : { "passthru"sv, "treepassthru"sv, "objpassthru"sv }) {
+			if (view.size() == passthru.size() && _strnicmp(view.data(), passthru.data(), view.size()) == 0)
+				return true;
+		}
+		return false;
+	}
+
 	Kind Classify(const RE::BSRenderPass* a_pass, bool a_treeModSupport)
 	{
 		const auto property = a_pass ? a_pass->shaderProperty : nullptr;

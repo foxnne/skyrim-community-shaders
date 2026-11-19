@@ -785,6 +785,17 @@ namespace SharedData
 		float4 Neutral;
 	};
 
+	// Tree Wind: lighting of the tree crowns in object LOD (Permutation::ExtraFlags::LODTreeCrown)
+	struct LODTreeLightingSettings
+	{
+		float Wrap;
+		float Transmission;
+		float ShadowSoftening;
+		float NormalUpBias;
+		float Brightness;
+		float3 pad0;
+	};
+
 	cbuffer FeatureData : register(b6)
 	{
 		GrassLightingSettings grassLightingSettings;
@@ -819,6 +830,7 @@ namespace SharedData
 		PostProcessingSettings postProcessingSettings;
 		PhysSkyData physSkyData;
 		ViewAtmosphereSettings viewAtmosphereSettings;
+		LODTreeLightingSettings lodTreeLightingSettings;
 	};
 
 	Texture2D<float4> DepthTexture : register(t17);

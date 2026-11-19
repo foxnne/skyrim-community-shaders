@@ -446,6 +446,8 @@ public:
 		ProjectedTextureIsSRGB = 1 << 21,
 		GrassPBR = 1 << 22,
 		IsSecunda = 1 << 23,
+		// Crown of a tree in object LOD, set by TreeWind::BeginDraw for the LOD tree lighting.
+		LODTreeCrown = 1 << 24,
 	};
 
 	/** @brief Bitflags describing extra feature-specific properties related to terrain displacement and material models. */

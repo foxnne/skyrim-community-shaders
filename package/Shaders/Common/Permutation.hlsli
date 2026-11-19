@@ -99,6 +99,8 @@ namespace Permutation
 		static const uint ProjectedTextureIsSRGB = (1 << 21);
 		static const uint GrassPBR = (1 << 22);
 		static const uint IsSecunda = (1 << 23);
+		// Crown of a tree in object LOD; see LOD_TREE_LIGHTING in Lighting.hlsl.
+		static const uint LODTreeCrown = (1 << 24);
 	}
 
 	namespace ExtraFeatureFlags

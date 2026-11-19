@@ -11,6 +11,9 @@
  * Utility draws. The TREE_WIND define adds the matching vertex offset to Lighting.hlsl and Utility.hlsl,
  * so the colour, depth and shadow passes move together. The object LOD vertex shaders cannot tell tree
  * LOD apart at compile time, so each draw gets either the swaying (on) or the still (off) buffer.
+ *
+ * The same per-draw test marks the crowns of object LOD trees (ExtraShaderDescriptors::LODTreeCrown), which
+ * Lighting.hlsl lights as foliage: wrapped two-sided diffuse, softer screen-space shadow, brighter base colour.
  */
 struct TreeWind : Feature
 {
@@ -42,6 +45,13 @@ public:
 		float GustSnow = 0.85f;
 		float GustCloudy = 0.35f;
 		bool TreeModSupport = true;
+		bool LODTreeLighting = true;
+		bool LODTreeLightBillboards = true;
+		float LODTreeWrap = 0.5f;
+		float LODTreeTransmission = 0.5f;
+		float LODTreeShadowSoftening = 0.7f;
+		float LODTreeNormalUpBias = 0.3f;
+		float LODTreeBrightness = 1.7f;
 	};
 
 	/** @brief Mirrors TreeWindCB in TreeWind.hlsli. */
@@ -54,6 +64,18 @@ public:
 		float4 Gusts;   // gust strength, gust rarity, unused, unused
 	};
 	static_assert(sizeof(WindCB) % 16 == 0);
+
+	/** @brief Mirrors LODTreeLightingSettings in SharedData.hlsli. Read by the pixel shader for draws flagged LODTreeCrown. */
+	struct alignas(16) LODTreeLightingData
+	{
+		float Wrap;             // diffuse wrap, 0 = plain Lambert
+		float Transmission;     // share of the light on the far side that comes through the crown
+		float ShadowSoftening;  // 0 = full screen-space shadow, 1 = none
+		float NormalUpBias;     // added to the normal's up component before lighting
+		float Brightness;       // base colour multiplier
+		float pad0[3];
+	};
+	static_assert(sizeof(LODTreeLightingData) == 32);
 
 	enum class Preset
 	{
@@ -99,8 +121,14 @@ public:
 
 	void ApplyPreset(Preset a_preset);
 
-	/** @brief Picks out the tree LOD draws between SetupGeometry and RestoreGeometry of the Lighting and Utility shaders. */
-	void BeginDraw(RE::BSRenderPass* a_pass);
+	/** @brief The LOD tree lighting values for the shared feature buffer (FeatureBuffer.cpp). */
+	LODTreeLightingData GetCommonBufferData() const;
+
+	/**
+	 * @brief Picks out the tree LOD draws between SetupGeometry and RestoreGeometry of the Lighting and Utility shaders.
+	 * @param a_lighting True for a Lighting draw, which also gets the LODTreeCrown flag when it draws a tree crown.
+	 */
+	void BeginDraw(RE::BSRenderPass* a_pass, bool a_lighting);
 	void EndDraw();
 
 	struct Hooks;

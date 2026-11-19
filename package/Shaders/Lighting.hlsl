@@ -37,6 +37,12 @@
 #	undef SNOW_COVER
 #endif
 
+// The crowns of trees in object LOD have no define of their own: Tree Wind marks their draws with
+// ExtraFlags::LODTreeCrown, and they are lit as foliage (lodTreeLightingSettings). Same draws as TREE_WIND_VS.
+#if defined(PSHADER) && defined(TREE_WIND) && defined(VC) && !defined(TRUE_PBR) && !defined(TREE_ANIM) && !defined(LOD) && !defined(LODLANDSCAPE) && !defined(LANDSCAPE) && !defined(SKINNED) && !defined(SKIN) && !defined(EYE) && !defined(HAIR)
+#	define LOD_TREE_LIGHTING
+#endif
+
 #if defined(SNOW_COVER)
 #	if defined(TRUE_PBR)
 #		define GLINT
@@ -1137,6 +1143,9 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	const bool inWorld = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::InWorld);
 #	endif
 	const bool inReflection = Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::InReflection;
+#	if defined(LOD_TREE_LIGHTING)
+	const bool lodTreeCrown = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::LODTreeCrown) != 0;
+#	endif
 
 	float nearFactor = smoothstep(4096.0 * 2.5, 0.0, viewPosition.z);
 
@@ -1744,6 +1753,12 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		endif
 #	endif  // LOD_BLENDING
 
+#	if defined(LOD_TREE_LIGHTING)
+	// The LOD atlas is built from the non-PBR leaf textures, about half as bright as the PBR ones on loaded trees
+	if (lodTreeCrown)
+		baseColor.xyz *= SharedData::lodTreeLightingSettings.Brightness;
+#	endif
+
 #	if defined(CS_SKIN_SHADING)
 	float4 skinsk = 0;
 	float4 skinExtra = 1;
@@ -2227,6 +2242,15 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 			const float3 blendedNormal = lerp(worldNormal, float3(0, 0, 1), saturate(buriedDepth / 10.0));
 			worldNormal = dot(blendedNormal, blendedNormal) > 1e-6 ? normalize(blendedNormal) : float3(0, 0, 1);
 		}
+	}
+#	endif
+
+#	if defined(LOD_TREE_LIGHTING)
+	// LOD crown normals are bent and part of them point at the ground, which loaded trees never do
+	[branch] if (lodTreeCrown)
+	{
+		const float3 raisedNormal = worldNormal + float3(0, 0, SharedData::lodTreeLightingSettings.NormalUpBias);
+		worldNormal = dot(raisedNormal, raisedNormal) > 1e-6 ? normalize(raisedNormal) : float3(0, 0, 1);
 	}
 #	endif
 
@@ -2920,6 +2944,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		endif
 		{
 			float2 screenSpaceShadows = ScreenSpaceShadows::GetScreenSpaceShadows(input.Position.xyz, screenUV, screenNoise);
+#		if defined(LOD_TREE_LIGHTING)
+			// A canopy lets light through; the screen-space trace treats the cards in front as solid
+			if (lodTreeCrown)
+				screenSpaceShadows = lerp(1.0, screenSpaceShadows, 1.0 - SharedData::lodTreeLightingSettings.ShadowSoftening);
+#		endif
 #		if defined(SKINNED) || defined(SKIN) || defined(HAIR)
 			screenSpaceShadows.x = lerp(1.0, screenSpaceShadows.x, saturate(4.0 * dirLightAngle));
 #		endif
@@ -3367,6 +3396,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	endif
 
 	float3 directionalAmbientColor = Color::Ambient(max(0, mul(DirectionalAmbient, float4(ambientNormal, 1.0))));
+#	if defined(LOD_TREE_LIGHTING)
+	// Thin crown: ambient reaches it from both sides
+	if (lodTreeCrown)
+		directionalAmbientColor = 0.5 * (directionalAmbientColor + Color::Ambient(max(0, mul(DirectionalAmbient, float4(-ambientNormal, 1.0)))));
+#	endif
 
 #	if defined(IBL)
 	if (SharedData::iblSettings.EnableIBL) {
@@ -3424,7 +3458,14 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	if defined(IBL)
 	if (SharedData::iblSettings.EnableIBL) {
 		if (!(SharedData::iblSettings.UseStaticIBL && !inWorld && !inReflection)) {
+#		if defined(LOD_TREE_LIGHTING)
+			const float3 ambientBeforeIBL = directionalAmbientColor;
+#		endif
 			directionalAmbientColor = ImageBasedLighting::GetDiffuseIBL(directionalAmbientColor, -ambientNormal, input.WorldPosition.xyz);
+#		if defined(LOD_TREE_LIGHTING)
+			if (lodTreeCrown)
+				directionalAmbientColor = 0.5 * (directionalAmbientColor + ImageBasedLighting::GetDiffuseIBL(ambientBeforeIBL, ambientNormal, input.WorldPosition.xyz));
+#		endif
 		}
 	}
 #	endif

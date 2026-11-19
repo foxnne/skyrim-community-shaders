@@ -68,8 +68,8 @@ namespace GroundFog
 		float NearEnd;         // game units from the camera; fades out over the second half
 		float InvDriftScale;   // patches of the density modifier, per game unit
 		float DriftStrength;
-		float BreathPhase;  // radians, advances with time
-		float NearBreath;   // share by which the near volume's top rises and falls
+		float BreathPhase;   // radians, advances with time
+		float NearBreath;    // share by which the near volume's top rises and falls
 		float2 FloorAnchor;  // camera-relative xy of the player
 		float FloorOffset;   // how far the floor the player stands on lies above the fog's ground there, game units
 		float FloorMax;      // visible level floors up to this far above the mapped ground carry the near volume

@@ -56,13 +56,13 @@ struct GroundFog : Feature
 		float SurfaceSoftness = 0.5f;       // fog fades over this last stretch of a ray that ends on something not ground
 		float FloorMaxHeight = 4.0f;        // level floors up to this far above the mapped ground carry the near volume
 		// The near volume: a taller, softer body of fog around the camera.
-		float NearDensity = 0.025f;   // extinction at the ground per meter, at Amount 1; 0 = none
-		float NearThickness = 3.5f;   // height at which it has thinned to nothing
-		float NearFalloff = 2.5f;     // how quickly it thins with height
-		float NearDistance = 60.0f;   // meters from the camera; fades out over the second half
-		float DriftScale = 9.0f;      // size of the drifting patches, meters
-		float DriftStrength = 0.7f;   // how uneven the density is
-		float Breathing = 0.15f;      // share by which the near volume's top rises and falls
+		float NearDensity = 0.025f;  // extinction at the ground per meter, at Amount 1; 0 = none
+		float NearThickness = 3.5f;  // height at which it has thinned to nothing
+		float NearFalloff = 2.5f;    // how quickly it thins with height
+		float NearDistance = 60.0f;  // meters from the camera; fades out over the second half
+		float DriftScale = 9.0f;     // size of the drifting patches, meters
+		float DriftStrength = 0.7f;  // how uneven the density is
+		float Breathing = 0.15f;     // share by which the near volume's top rises and falls
 		// Burn-off: amount by time of day, and fog kept where terrain shadow holds the sun off.
 		float BurnOffStrength = 1.0f;  // 0 = the time of day and the sun change nothing
 		float ShadowRetention = 0.8f;  // share of the morning amount that ground in terrain shadow keeps by day

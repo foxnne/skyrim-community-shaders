@@ -96,9 +96,10 @@ namespace GroundFog
 		float tBlend;
 		float blendLength;
 		// Near volume: its ground is the mapped ground plus the player's floor offset near the player, and meets
-		// floorEnd over the last floorLength of the ray.
+		// floorEnd over the floorLength of the ray before tFloorEnd.
 		float floorEnd;
 		float tFloor;
+		float tFloorEnd;
 		float floorLength;
 	};
 
@@ -125,7 +126,7 @@ namespace GroundFog
 
 	float NearFill()
 	{
-		return max(GroundFill, 0.25 * NearThickness);
+		return GroundFill;
 	}
 
 	// How much a visible surface counts as the ground, by its height above the mapped ground. Rocks, roads, steps
@@ -478,6 +479,7 @@ namespace GroundFog
 	ray.blendLength = 0.0;
 	ray.floorEnd = GroundFog::FloorOffset * GroundFog::FloorReach(endXY);
 	ray.floorLength = 0.0;
+	ray.tFloorEnd = tEnd;
 	// In front of anything that is not ground the fog fades out over the end of the ray, so it never draws the
 	// outline of what stands in it.
 	float softScale = 1.0;
@@ -489,7 +491,8 @@ namespace GroundFog
 		taps += 4u;
 		const float facingUp = smoothstep(0.5, 0.85, normal.z);
 		softScale = lerp(0.5, 1.0, facingUp);
-		if (facingUp > 0.0 && GroundFog::SurfaceBlend > 0.0) {
+		const bool nearEnd = GroundFog::NearExtinction > 0.0 && tEnd < GroundFog::NearEnd;
+		if ((facingUp > 0.0 || (nearEnd && ray.floorEnd > 0.0)) && GroundFog::SurfaceBlend > 0.0) {
 			const GroundFog::GroundSample endGround = GroundFog::GroundAt(endXY, 1.0);
 			++taps;
 			float above = position.z + camZ - endGround.z;
@@ -497,23 +500,29 @@ namespace GroundFog
 			above = endGround.water > 0.0 ? max(above, 0.0) : above;
 			ray.surfaceOffset = above * GroundFog::SurfaceWeight(above) * facingUp;
 			ray.blendLength = ray.surfaceOffset != 0.0 ? min(GroundFog::SurfaceBlend, tEnd) : 0.0;
-			if (GroundFog::NearExtinction > 0.0 && tEnd < GroundFog::NearEnd) {
-				// The near volume also follows level floors well above the map: roads on fill, bridges, town
-				// floors. Low ones are taken as they are; a high one must go on around the pixel, unless it is
-				// the level the player stands on.
-				float known = facingUp * GroundFog::FloorWeight(above);
-				const float needsSupport = smoothstep(GroundFog::SurfaceLift, 2.0 * GroundFog::SurfaceLift, above);
-				if (known > 0.0 && needsSupport > 0.0 && abs(above - ray.floorEnd) > GroundFog::SurfaceLift)
-					known *= lerp(1.0, GroundFog::FloorSupport(position, normal, mainSize, activeMain, taps), needsSupport);
+			if (nearEnd) {
+				// The near volume follows level floors above the map instead: roads on fill, bridges, town floors.
+				// A surface more than a step above the map must go on around the pixel to be one (the top of a
+				// rock, a barrel or a wall is something standing in the fog), unless it is the level the player
+				// stands on. Ground below the map is always followed.
 				const float base = ray.floorEnd;
-				ray.floorEnd = lerp(base, above, known);
+				float known = facingUp * GroundFog::FloorWeight(above);
+				const float needsSupport = smoothstep(0.25 * GroundFog::SurfaceLift, 0.75 * GroundFog::SurfaceLift, above);
+				if (known > 0.0 && needsSupport > 0.0 && abs(above - base) > 0.5 * GroundFog::SurfaceLift)
+					known *= lerp(1.0, GroundFog::FloorSupport(position, normal, mainSize, activeMain, taps), needsSupport);
+				// Whatever is seen below the floor's level shows that the floor does not reach there: the fog's
+				// ground is no higher than that point, and it has come down by where the ray sinks through the
+				// floor's level.
+				ray.floorEnd = min(lerp(base, above, known), max(above, 0.0));
 				// A floor far from the level the ray came over is met over a longer stretch.
 				ray.floorLength = min(GroundFog::SurfaceBlend + 4.0 * abs(ray.floorEnd - base), tEnd);
+				if (ray.floorEnd < base && dir.z < -1e-4)
+					ray.tFloorEnd = clamp((endGround.z + base - camZ) / dir.z, 0.0, tEnd);
 			}
 		}
 	}
 	ray.tBlend = tEnd - ray.blendLength;
-	ray.tFloor = tEnd - ray.floorLength;
+	ray.tFloor = ray.tFloorEnd - ray.floorLength;
 	const float tSoft = softScale < 1.0 && GroundFog::SoftLength > 0.0 ? max(tEnd - GroundFog::SoftLength, 0.0) : tEnd;
 	// Where the nearest of the four scene pixels lies along this ray.
 	const float tNear = viewNear < viewFar * 0.98 ? min(sceneDistance * viewNear / viewFar, tEnd) : tEnd;
@@ -570,6 +579,8 @@ namespace GroundFog
 			const float4 ahead = float4(stops.x > a.t + 0.01 ? stops.x : tEnd, stops.y > a.t + 0.01 ? stops.y : tEnd,
 				stops.z > a.t + 0.01 ? stops.z : tEnd, stops.w > a.t + 0.01 ? stops.w : tEnd);
 			tb = min(min(tb, tEnd), min(min(ahead.x, ahead.y), min(ahead.z, ahead.w)));
+			if (ray.tFloorEnd > a.t + 0.01)
+				tb = min(tb, ray.tFloorEnd);
 		}
 		const GroundFog::Joint b = GroundFog::MakeJoint(ray, tb, max(tb * GroundFog::StepGrowth, GroundFog::StepMin), taps);
 

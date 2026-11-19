@@ -106,6 +106,7 @@ namespace SceneSettingsPolicy
 		{ "CloudShadows" },
 		{ "ExponentialHeightFog" },
 		{ "GrassLighting" },
+		{ "GroundFog" },
 		{ "ImageBasedLighting" },
 		{ "NeuralRendering" },
 		{ "PhysicalSky" },

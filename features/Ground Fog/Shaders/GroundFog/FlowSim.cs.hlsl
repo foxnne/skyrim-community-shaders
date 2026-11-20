@@ -160,12 +160,17 @@ float GustPsi(float2 p)
 	// What the air does here with nothing in it: the wind's drift, and gusts. The gusts are the curl of a noise
 	// that travels with the wind (a stream function, as in Iwillbewarlock's GroundFog, GustPsi in its
 	// WindShaders.h, GPL-3.0: two octaves, weights 2/3 and 1/3), so they turn the fog about without piling it up.
+	// How windy it is: 0 in the calm (the drift's own floor, about 0.2 m/s at the default drift speed), 1 in a full
+	// wind. Still-air fog barely moves by itself: the gusts, the fog's own eddies and the changing of its shapes
+	// are a small fraction of their strength in the calm and come in with the wind, so what moves the fog on a
+	// still morning is what moves through it.
+	const float windiness = saturate((length(Wind) - 20.0) / 80.0);
 	float2 drift = Wind;
 	if (Swirl > 0.0 && GustSpeed > 0.0) {
 		const float2 p = (xyAbs - GroundFog::WindTravel) / GustSize + SwirlTime * float2(0.011, -0.007);
 		const float e = 0.25;
 		const float2 gradient = float2(GustPsi(p + float2(e, 0.0)) - GustPsi(p - float2(e, 0.0)), GustPsi(p + float2(0.0, e)) - GustPsi(p - float2(0.0, e))) / (2.0 * e);
-		drift += float2(gradient.y, -gradient.x) * (Swirl * GustSpeed);
+		drift += float2(gradient.y, -gradient.x) * (Swirl * GustSpeed * lerp(0.1, 1.0, windiness));
 	}
 
 	float2 velocity = drift;
@@ -295,8 +300,12 @@ float GustPsi(float2 p)
 										GroundFog::ValueNoise(p + float2(0.0, e)) - GroundFog::ValueNoise(p - float2(0.0, e))) /
 		                        (2.0 * e);
 		// The share that grows with the speed stays below what the damping takes, so eddies cannot feed themselves.
-		// Three times as strong at the rim of a pool, so its edge curls and breaks up while its middle lies still.
-		velocity += float2(gradient.y, -gradient.x) * Swirl * (6.0 + 0.25 * min(length(velocity - drift), 300.0)) * (1.0 + 2.0 * edge) * DeltaTime;
+		// Two parts. Eddies of their own, weak in the calm (15 %) and full in a wind, and stronger at the rim of a
+		// pool in a wind. And eddies that grow with how fast the fog is moving against the air, three times as
+		// strong at a rim: those are the reaction, a wake curling up and an edge breaking up where something passed.
+		const float idle = 6.0 * lerp(0.15, 1.0, windiness) * (1.0 + 2.0 * edge * windiness);
+		const float stirred = 0.25 * min(length(velocity - drift), 300.0) * (1.0 + 2.0 * edge);
+		velocity += float2(gradient.y, -gradient.x) * Swirl * (idle + stirred) * DeltaTime;
 	}
 
 	// Movers.
@@ -346,7 +355,8 @@ float GustPsi(float2 p)
 	// Water is level, and fog lies on it.
 	lowness = lerp(lowness, max(lowness, 1.0), water);
 	const float place = open * (1.0 - raised) * lerp(1.0, lowness, Pooling);
-	rest = GroundFog::RestPattern(xyAbs, TexelSize, place, SwirlTime);
+	// The shapes change by themselves only slowly (a fifth of the rate they had: over a few minutes).
+	rest = GroundFog::RestPattern(xyAbs, TexelSize, place, 0.2 * SwirlTime);
 	float amount = max(rest + delta, 0.0) * gain;
 	amount = max(amount * wear, min(amount, WakeFloor * rest));
 	amount += (rest - amount) * RefillRate;

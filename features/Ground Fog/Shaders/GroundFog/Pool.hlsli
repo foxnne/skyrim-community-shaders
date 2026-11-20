@@ -31,8 +31,9 @@
 // Include after GroundFog/GroundFog.hlsli.
 
 // A debug view of the pool that needs no setting, for harnesses that can only change #defines: 1 floor map,
-// 2 pool optical depth, 3 simulation, 4 placement. Drawn opaque over the scene within the pool's reach (and the scene
-// at half brightness outside it) by GroundFogPixel.cs.hlsl; see there for the colours. 0 = off.
+// 2 pool optical depth, 3 simulation, 4 placement (opaque over the scene within the pool's reach, the scene at half
+// brightness outside it); 5 the light the fog adds to the scene, 6 how much of the scene it takes away (opaque over
+// the whole screen, black where there is no fog). See GroundFogPixel.cs.hlsl for the colours. 0 = off.
 #ifndef GROUND_FOG_POOL_DEBUG
 #	define GROUND_FOG_POOL_DEBUG 0
 #endif

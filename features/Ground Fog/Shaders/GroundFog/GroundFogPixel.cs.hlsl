@@ -629,7 +629,7 @@ namespace GroundFog
 		return;
 	}
 
-#if GROUND_FOG_POOL_DEBUG > 0
+#if GROUND_FOG_POOL_DEBUG > 0 && GROUND_FOG_POOL_DEBUG < 5
 	{
 		// The pool's debug view chosen by #define (see Pool.hlsli), opaque over the scene within the pool's reach.
 		// 1 Floor map. Blue: no floor known under the pixel. Green: ground, the fog lies on it. Red: stands in the
@@ -679,6 +679,11 @@ namespace GroundFog
 	++taps;
 	const bool march = camZ + min(dir.z * tEnd, 0.0) - GroundFog::GroundMaxAlong(0.0, endXY) <= GroundFog::SlabTop(0.0, tEnd, lift, floorLift, valleyLift);
 	if (!march && pool.tau <= 0.0) {
+#if GROUND_FOG_POOL_DEBUG >= 5
+		FogOut[pixel] = float4(0.0, 0.0, 0.0, 1e-4);
+		FogAuxOut[pixel] = float4(auxDepths, 1e-4, 0.0);
+		return;
+#endif
 		FogOut[pixel] = debugTaps ? float4(GroundFog::TapColor(taps) * GroundFog::SkyMean() * 4.0, 0.5) : clear;
 		FogAuxOut[pixel] = debugTaps ? float4(auxDepths, 0.5, 0.0) : clearAux;
 		return;
@@ -850,6 +855,11 @@ namespace GroundFog
 		return;
 	}
 	if (seen.share < 1.0 / 2048.0) {
+#if GROUND_FOG_POOL_DEBUG >= 5
+		FogOut[pixel] = float4(0.0, 0.0, 0.0, 1e-4);
+		FogAuxOut[pixel] = float4(auxDepths, 1e-4, 0.0);
+		return;
+#endif
 		FogOut[pixel] = clear;
 		FogAuxOut[pixel] = clearAux;
 		return;
@@ -985,6 +995,18 @@ namespace GroundFog
 
 	// A uniform medium of this light per unit of extinction; the composite multiplies by the opacity at the depth
 	// of each of its pixels.
+#if GROUND_FOG_POOL_DEBUG == 5
+	// 5: the light the fog adds to the scene at this pixel (all the fog this pass draws; near the camera that is the
+	// pool), at the scene's exposure, opaque, so it can be set beside the ground it lies on.
+	FogOut[pixel] = float4(min(max(light, 0.0), 65504.0) * GroundFog::OneMinusExp(seen.tau), 1e-4);
+	FogAuxOut[pixel] = float4(auxDepths, 1e-4, 0.0);
+	return;
+#elif GROUND_FOG_POOL_DEBUG == 6
+	// 6: how much of the scene behind the fog it takes away (1 - transmittance), as grey: white all of it.
+	FogOut[pixel] = float4(GroundFog::OneMinusExp(seen.tau) * GroundFog::SkyMean() * 4.0, 1e-4);
+	FogAuxOut[pixel] = float4(auxDepths, 1e-4, 0.0);
+	return;
+#endif
 	FogOut[pixel] = float4(min(max(light, 0.0), 65504.0), exp(-seen.tau));
 	// w: the share of the fog in front of the nearest depth that is the pool, which lies at the end of the ray and
 	// not along it.

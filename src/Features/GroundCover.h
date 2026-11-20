@@ -55,6 +55,7 @@ struct GroundCover : Feature
 		float GlossReduction = 0.6f;
 		float CreaseDarkening = 0.3f;
 		float GreyLimit = 0.35f;       // albedo saturation above which a surface is not rock; 1 = no test
+		float WhiteLimit = 0.7f;       // albedo brightness above which a surface is snow or chalk, not rock; 1 = no test
 		float RegionCoverage = 0.05f;  // least share of the surrounding cell that must grow grass
 		bool AffectObjectLOD = true;
 		bool AffectTerrain = false;
@@ -95,8 +96,11 @@ struct GroundCover : Feature
 
 		float2 MapScale{};
 		float2 MapOffset{};
+
+		float WhiteLimit = 1;
+		float pad[3]{};
 	};
-	static_assert(sizeof(PerFrame) == 96);
+	static_assert(sizeof(PerFrame) == 112);
 
 	enum Flags : uint
 	{

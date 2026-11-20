@@ -25,6 +25,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	GlossReduction,
 	CreaseDarkening,
 	GreyLimit,
+	WhiteLimit,
 	RegionCoverage,
 	AffectObjectLOD,
 	AffectTerrain,
@@ -176,6 +177,7 @@ GroundCover::PerFrame GroundCover::GetCommonBufferData()
 	data.GlossReduction = settings.GlossReduction;
 	data.CreaseDarkening = settings.CreaseDarkening;
 	data.GreyLimit = settings.GreyLimit;
+	data.WhiteLimit = settings.WhiteLimit;
 	data.RegionCoverage = settings.RegionCoverage;
 	// The shader adds the level map's altitude to this when kLevelMap is set.
 	data.PlainLevel = settings.PlainLevelOffset + (useLevelMap ? 0.0f : settings.PlainLevel);
@@ -332,6 +334,10 @@ void GroundCover::DrawSettings()
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("How colourful a surface may be and still count as rock. 1 = no test.");
 		}
+		ImGui::SliderFloat("White Limit", &settings.WhiteLimit, 0.05f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("How bright a surface may be and still count as rock. Keeps the cover off snow painted on a mesh. 1 = no test.");
+		}
 		ImGui::SliderFloat("Region Grass", &settings.RegionCoverage, 0.0f, 0.5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("Share of the surrounding cell that must grow grass. Keeps the cover out of regions without any.");
@@ -376,6 +382,7 @@ void GroundCover::LoadSettings(json& o_json)
 	sanitize(settings.GlossReduction, defaults.GlossReduction, 0.0f, 1.0f);
 	sanitize(settings.CreaseDarkening, defaults.CreaseDarkening, 0.0f, 1.0f);
 	sanitize(settings.GreyLimit, defaults.GreyLimit, 0.01f, 1.0f);
+	sanitize(settings.WhiteLimit, defaults.WhiteLimit, 0.05f, 1.0f);
 	sanitize(settings.RegionCoverage, defaults.RegionCoverage, 0.0f, 1.0f);
 	sanitize(settings.ScreeStrength, defaults.ScreeStrength, 0.0f, 1.0f);
 	sanitize(settings.ScreeHeight, defaults.ScreeHeight, 1.0f, 100000.0f);

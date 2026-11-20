@@ -102,6 +102,10 @@ namespace GroundCover
 		const float greyLimit = SharedData::groundCoverSettings.GreyLimit;
 		if (greyLimit < 1.0)
 			up *= 1.0 - smoothstep(0.6 * greyLimit, greyLimit, (baseMax - baseMin) / max(baseMax, 1e-4));
+		// Snow painted on a mesh or projected onto it is grey too, but brighter than any rock.
+		const float whiteLimit = SharedData::groundCoverSettings.WhiteLimit;
+		if (whiteLimit < 1.0)
+			up *= 1.0 - smoothstep(0.8 * whiteLimit, whiteLimit, baseMax);
 		if (up <= 0.001)
 			return 0;
 

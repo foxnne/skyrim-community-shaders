@@ -836,6 +836,9 @@ namespace SharedData
 
 		float2 MapScale;
 		float2 MapOffset;
+
+		float WhiteLimit;
+		float3 pad0;
 	};
 
 	cbuffer FeatureData : register(b6)

@@ -584,11 +584,14 @@ namespace GroundFog
 	pool.speed = 0.0;
 	pool.floorZ = GroundFog::FloorEmpty;
 	pool.range = pool.known = pool.ground = pool.over = pool.within = 0.0;
+	pool.crest = pool.sunSide = 0.5;
+	// How much of the fog this pixel sees is the pool, for what only the pool's shading takes.
+	float poolShare = 0.0;
 	if (GroundFog::PoolExtinction > 0.0 && surface && tEnd < GroundFog::PoolEnd) {
 		normal = GroundFog::SurfaceNormal(scenePixel, depth, position, mainSize, activeMain);
 		hasNormal = true;
 		taps += 4u;
-		pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, taps);
+		pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, SharedData::DirLightDirection.xyz, taps);
 		if (pool.floorZ < GroundFog::FloorUnknown) {
 			uint2 splatSize;
 			FloorSplat.GetDimensions(splatSize.x, splatSize.y);
@@ -625,6 +628,52 @@ namespace GroundFog
 		FogAuxOut[pixel] = float4(auxDepths, 1.0 - cover, 0.0);
 		return;
 	}
+
+#if GROUND_FOG_POOL_DEBUG > 0
+	{
+		// The pool's debug view chosen by #define (see Pool.hlsli), opaque over the scene within the pool's reach.
+		// 1 Floor map. Blue: no floor known under the pixel. Green: ground, the fog lies on it. Red: stands in the
+		//   fog on a known floor, bright at the floor, dark at and above the top of the fog. Magenta: ground on
+		//   the top of a raised thing (a cart bed, a table, a rock), which gets no fog. A blue tint on green or
+		//   red: the floor there comes from the terrain height map (the screen has not shown it).
+		// 2 Pool optical depth along the ray: black none, then blue 0.05, green 0.5, yellow 1, red 2 (its cap).
+		// 3 Simulation at the pixel. Red: amount of fog (full at 2). Green: the resting amount it settles to (full
+		//   at 2). Blue: how fast it moves (full at 3 m/s).
+		// 4 Placement. Red: what terrain, water, time of day and shade give the place (full at 1.5), before the
+		//   floor's relief and the wisps. Green: the resting amount after them (full at 2). Blue: raised thing
+		//   (no fog rests there).
+		float3 colour = 0.0;
+		float cover = 0.5;
+		if (pool.range > 0.0) {
+			cover = 1.0;
+			const float2 simUv = GroundFog::SimUv(position.xy);
+			// How much the floor here is a floor the fog lies on, not a raised thing's top (FogSlope.z).
+			const float floorness = saturate(GroundFog::FogSlope.SampleLevel(LinearSampler, simUv, 0).z);
+	#	if GROUND_FOG_POOL_DEBUG == 1
+			const float standing = 1.0 - saturate(pool.over / GroundFog::PoolHardTop);
+			if (pool.known <= 0.0)
+				colour = float3(0.0, 0.25 * pool.ground, 1.0);
+			else
+				colour = float3((1.0 - pool.ground) * (0.15 + 0.85 * standing) + pool.ground * (1.0 - floorness), pool.ground * floorness, pool.ground * (1.0 - floorness) + (pool.known < 1.0 ? 0.4 : 0.0));
+	#	elif GROUND_FOG_POOL_DEBUG == 2
+			colour = pool.tau > 0.0 ? GroundFog::Hue(0.66 * (1.0 - saturate(log2(pool.tau / 0.05) / log2(40.0)))) : 0.0;
+	#	elif GROUND_FOG_POOL_DEBUG == 3
+			const float4 state = GroundFog::FogSim.SampleLevel(LinearSampler, simUv, 0);
+			colour = float3(saturate(0.5 * state.z), saturate(0.5 * state.w), saturate(length(state.xy) / 210.0));
+	#	else
+			const float4 state = GroundFog::FogSim.SampleLevel(LinearSampler, simUv, 0);
+			const float4 slopeSun = GroundFog::FogSlope.SampleLevel(LinearSampler, simUv, 0);
+			float water, groundZ;
+			const float open = GroundFog::RestingAmountAt(position.xy, GroundFog::StepMin, GroundFog::BurnSunlitNear, 1.0 - saturate(slopeSun.w), water, groundZ);
+			const bool floorKnown = GroundFog::FogFloor.SampleLevel(LinearSampler, simUv, 0) < GroundFog::FloorUnknown;
+			colour = float3(saturate(open / 1.5), saturate(0.5 * state.w), floorKnown ? 1.0 - floorness : 0.0);
+	#	endif
+		}
+		FogOut[pixel] = float4(colour * GroundFog::SkyMean() * 4.0, cover >= 1.0 ? 1e-4 : 0.5);
+		FogAuxOut[pixel] = float4(auxDepths, cover >= 1.0 ? 1e-4 : 0.5, 0.0);
+		return;
+	}
+#endif
 
 	// The whole ray against the highest ground under it: one read settles short rays that end well above the ground.
 	++taps;
@@ -792,6 +841,7 @@ namespace GroundFog
 		seen.above += share * pool.above;
 		seen.tau += pool.tau;
 		tauNear += pool.tauNear;
+		poolShare = share / max(seen.share, 1e-6);
 	}
 
 	if (debugTaps) {
@@ -867,20 +917,30 @@ namespace GroundFog
 		visibility * GroundFog::SelfShadowing(tauAbove, physSky.masserDir.z), diffuseVisibility);
 	light += AtmosphereLight(2u, lightPos, dir, physSky.secundaDir, physSky.secundaColor, 0.0, albedo,
 		visibility * GroundFog::SelfShadowing(tauAbove, physSky.secundaDir.z), diffuseVisibility);
-	// Dense fog scatters many times before the light leaves it, which evens out the direction it leaves in: beside
-	// the forward-peaked single scattering above, a share of the sun's and moons' light (after the atmosphere, so
-	// warm at a low sun) comes out evenly to every side.
-	if (GroundFog::SunWrap > 0.0) {
+	// What a white surface lying where the pool lies would send back of the sun and moons: that is what the pool is
+	// lit like, a white diffuse body in the scene's light (the same colour after the atmosphere, the same shadow
+	// from the sun map, its own depth over the point), and never more. Its lumpy top catches a low light better
+	// than level ground does, hence the least angle. The thin layers further out keep the scattering of a haze
+	// (the forward-peaked phase above) with a share of it sent out evenly.
+	{
 		const float3 planet = PhysSky::GetMediumPlanetPosition(lightPos);
 		const float3 lightDirs[3] = { physSky.sunDir, physSky.masserDir, physSky.secundaDir };
 		const float3 lightColors[3] = { physSky.sunlightColor, physSky.masserColor, physSky.secundaColor };
+		float3 white = 0.0;
 		[unroll] for (uint l = 0u; l < 3u; ++l)
 		{
-			if (any(lightColors[l] > 0.0) && dot(lightDirs[l], lightDirs[l]) >= 0.5)
-				light += lightColors[l] * PhysSky::SampleAtmosphereLightTr(PhysSky::TexTrLut, LinearSampler, planet, lightDirs[l], physSky.diskAngularRadius[l]) *
-				         (albedo * GroundFog::SunWrap * 0.0795775 * visibility * GroundFog::SelfShadowing(tauAbove, lightDirs[l].z));
+			if (any(lightColors[l] > 0.0) && dot(lightDirs[l], lightDirs[l]) >= 0.5) {
+				const float3 arriving = lightColors[l] * PhysSky::SampleAtmosphereLightTr(PhysSky::TexTrLut, LinearSampler, planet, lightDirs[l], physSky.diskAngularRadius[l]) *
+				                        (visibility * GroundFog::SelfShadowing(tauAbove, lightDirs[l].z));
+				light += arriving * (albedo * GroundFog::SunWrap * 0.0795775);
+				white += arriving * (albedo * 0.3183099 * max(lightDirs[l].z, 0.2));
+			}
 		}
+		light = lerp(light, white, poolShare);
 	}
+	// The pool's lumpy top: the side of a billow toward the light is brighter, the side away from it darker.
+	// (Both are about 0.5 on average, and these average 1: shading only, no light is lost.)
+	light *= lerp(1.0, lerp(0.7, 1.3, pool.sunSide), poolShare);
 	light *= GroundFog::SunScale;
 	// Sky light reaches fog in the shadow of terrain and objects too, so it takes no direct visibility.
 	// The sky's light on the fog is what the open sky gives, less what stands over the fog: under a canopy or
@@ -909,14 +969,17 @@ namespace GroundFog
 #endif
 		skyOpen = lerp(1.0, skyOpen, GroundFog::CanopyShade);
 	}
-	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming * skyOpen;
+	// And the folds between its billows see less of the sky than their tops.
+	const float folds = lerp(1.0, lerp(0.8, 1.2, pool.crest), poolShare);
+	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming * skyOpen * folds;
 	// Fog in the sun is brighter than fog in the shade, but not without end: what it scatters of the sun and moons
 	// levels off at SunLimit times its sky light (at the limit's own value it has reached half of that), keeping
 	// its colour. So sunlit fog reads as lit fog, not as paint.
 	if (GroundFog::SunLimit > 0.0) {
 		static const float3 luma = float3(0.2126, 0.7152, 0.0722);
 		const float cap = GroundFog::SunLimit * dot(skyLight, luma);
-		light *= cap / max(cap + dot(light, luma), 1e-6);
+		// The pool needs no such limit: it is lit like a white surface, which is the most it can be.
+		light *= lerp(cap / max(cap + dot(light, luma), 1e-6), 1.0, poolShare);
 	}
 	light += skyLight;
 

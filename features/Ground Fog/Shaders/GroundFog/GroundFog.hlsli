@@ -90,6 +90,10 @@ namespace GroundFog
 		float PoolThickness;   // height at which it has thinned to nothing, game units
 		float PoolEnd;         // game units from the camera; fades out over the second half
 		float SunWrap;         // share of an even (isotropic) phase added to the sun and moon light the fog scatters
+		float SunLimit;        // the sun and moon light the fog scatters levels off at this many times its sky light; 0 = no limit
+		float Wispiness;       // 0: the resting fog is even patches; 1: separate wisps with clear air between them
+		float InvWispScale;    // per game unit
+		float WispPad;
 	};
 
 	Texture2D<float> HeightMap : register(t6);
@@ -365,7 +369,8 @@ namespace GroundFog
 	//   FogFloor  the level of the floor at each texel, absolute z, gathered from the up-facing surfaces the screen
 	//             has shown there; FloorUnknown or more where nothing has been seen yet.
 	//   FogSlope  the slope of that floor over about a meter. z: 1 where it is known, xy: rise over run times z (so a
-	//             filtered read divides xy by z).
+	//             filtered read divides xy by z). w: how much of the sun reaches the fog there (the shadow cascades,
+	//             taken over the area of a texel and the height of the pool, and smoothed over time).
 	// The pool reads z directly. The sheet and the tall near volume, which are placed by the same resting amount,
 	// take z / w: how far the fog there is from rest.
 	Texture2D<float4> FogSim : register(t8);
@@ -423,6 +428,24 @@ namespace GroundFog
 		const float2 p2 = (xyAbs - 1.7 * WindTravel) * InvDriftScale * 2.3 + 11.9;
 		const float n = smoothstep(0.25, 0.75, 0.62 * ValueNoise(p) + 0.38 * ValueNoise(p2));
 		return 1.0 + DriftStrength * 0.8 * (2.0 * n - 1.0) * (1.0 - fade);
+	}
+
+	// The pattern the pool rests in, relative to its mean (about 1). At Wispiness 0 the even patches of
+	// DensityModifier. At 1 separate wisps: the two-octave value noise of the resting fog in Iwillbewarlock's
+	// GroundFog (EqFog in its WindShaders.h, GPL-3.0: weights 2/3 and 1/3, riding the wind), here bent by a broader
+	// noise so the shapes are drawn out and curl, and cut by a threshold so there is clear air between them: about
+	// 40 % of the ground has none, and inside a wisp there is up to 2.5 times the mean. The simulation settles to
+	// this and carries only what departs from it, so the wisps stay sharp while they travel.
+	float RestPattern(float2 xyAbs, float reach)
+	{
+		const float even = DensityModifier(xyAbs, reach);
+		if (Wispiness <= 0.0)
+			return even;
+		const float2 p = (xyAbs - WindTravel) * InvWispScale;
+		const float2 bend = float2(ValueNoise(p * 0.45 + 3.1), ValueNoise(p * 0.45 + 9.7)) - 0.5;
+		const float2 q = p + 1.8 * bend;
+		const float n = (2.0 * ValueNoise(q) + ValueNoise(q * 2.3 + 17.0)) / 3.0;
+		return lerp(even, 2.5 * smoothstep(0.44, 0.68, n), Wispiness);
 	}
 
 	// Value noise from two lattices turned against each other (by 31 and 68 degrees, the second 1.37 times finer),
@@ -541,15 +564,18 @@ namespace GroundFog
 	}
 
 	// The whole rule at a camera-relative xy, with its own reads (up to five). water: how much of the place is water.
-	float RestingAmountAt(float2 xy, float reach, float sunlit, out float water)
+	// groundZ: absolute z of the mapped ground there.
+	float RestingAmountAt(float2 xy, float reach, float sunlit, out float water, out float groundZ)
 	{
 		water = 0.0;
+		groundZ = FrameBuffer::CameraPosAdjust.z;
 		const float coverage = MapCoverage(MapUv(xy));
 		if (coverage <= 0.0)
 			return 0.0;
 		const float2 xyAbs = xy + FrameBuffer::CameraPosAdjust.xy;
 		const GroundSample ground = GroundAt(xy, reach);
 		water = ground.water;
+		groundZ = ground.z;
 		uint taps = 0u;
 		float rest = RestingAmount(coverage, ground, TerrainShade(xyAbs, ground.z + 70.0, taps), sunlit, xyAbs, reach);
 		if (rest > 0.0 && BasinStrength > 0.0)

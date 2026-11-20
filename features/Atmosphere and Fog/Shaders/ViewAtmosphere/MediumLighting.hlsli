@@ -53,7 +53,8 @@ float MediumTerrainShadow(float3 worldPos, float viewDistance)
 }
 #endif
 
-float MediumVisibility(float3 position, out float atmosphereVisibility, out float3 diffuseVisibility)
+// The sun's shadow cascades at a camera-relative point: 1 lit, 0 in shadow, 1 where the cascades do not reach.
+float MediumCascadeShadow(float3 position)
 {
 	float visibility = 1.0;
 	if (ViewAtmosphere::Data[0].flags.z & 1u) {
@@ -86,6 +87,17 @@ float MediumVisibility(float3 position, out float atmosphereVisibility, out floa
 			}
 		}
 	}
+	return visibility;
+}
+
+// With MEDIUM_EXTERNAL_CASCADE the cascades are left out: the caller has its own, filtered, value of
+// MediumCascadeShadow for the medium and multiplies the three results by it.
+float MediumVisibility(float3 position, out float atmosphereVisibility, out float3 diffuseVisibility)
+{
+	float visibility = 1.0;
+#ifndef MEDIUM_EXTERNAL_CASCADE
+	visibility = MediumCascadeShadow(position);
+#endif
 #ifdef TERRAIN_SHADOWS
 	if (ViewAtmosphere::Data[0].flags.z & 256u)
 		visibility *= MediumTerrainShadow(position + FrameBuffer::CameraPosAdjust.xyz, length(position));

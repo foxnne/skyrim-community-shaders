@@ -52,7 +52,8 @@ struct GroundFog : Feature
 		float SunScale = 1.0f;
 		float SkyAmbientScale = 1.0f;
 		float SelfShadow = 1.0f;
-		float SunDiffusion = 0.5f;  // share of the sun and moon light the fog sends out evenly to all sides
+		float SunDiffusion = 0.3f;  // share of the sun and moon light the fog sends out evenly to all sides
+		float SunLimit = 1.0f;      // sun and moon light in the fog levels off at this many times its sky light; 0 = no limit
 		float GroundFill = 0.25f;  // share of Thickness
 		// Pixel pass.
 		float SurfaceBlendDistance = 3.0f;  // end of the view ray over which the ground becomes the visible surface
@@ -62,7 +63,7 @@ struct GroundFog : Feature
 		// The near volume: a taller, softer body of fog around the camera.
 		// Up to 1 m thick it is the pool: drawn on what the screen shows, from the simulation. Thicker, it is the
 		// tall volume of the first versions, marched over the height map.
-		float NearDensity = 0.5f;     // extinction at the ground per meter, at Amount 1; 0 = none
+		float NearDensity = 0.8f;     // extinction at the ground per meter, at Amount 1; 0 = none
 		float NearThickness = 0.45f;  // height at which it has thinned to nothing
 		float NearFalloff = 1.5f;    // how quickly it thins with height
 		float NearDistance = 40.0f;  // meters from the camera; fades out over the second half
@@ -79,7 +80,9 @@ struct GroundFog : Feature
 		bool Reactive = true;
 		float ReactiveStrength = 1.0f;  // how much of the fog a mover clears; 0 leaves only the displacement
 		// The simulation the pool is drawn from.
-		float SettleTime = 6.0f;    // seconds over which disturbed fog returns to its resting amount
+		float SettleTime = 12.0f;   // seconds over which disturbed fog returns to its resting amount
+		float Wispiness = 1.0f;     // 0: even patches; 1: separate wisps with clear air between them
+		float WispScale = 4.0f;     // size of the wisps, meters
 		float DownhillFlow = 1.0f;  // how strongly the fog runs down slopes and steps into the low places
 		float Swirl = 1.0f;         // eddies in still fog and, more, in fog that is moving
 		float Pooling = 1.0f;       // 0: the pool rests evenly; 1: in dips and at the foot of slopes, little on level ground
@@ -162,8 +165,12 @@ struct GroundFog : Feature
 		float PoolThickness;
 		float PoolEnd;
 		float SunWrap;
+		float SunLimit;
+		float Wispiness;
+		float InvWispScale;
+		float WispPad;
 	};
-	static_assert(sizeof(VolumeData) == 304);
+	static_assert(sizeof(VolumeData) == 320);
 	static_assert(offsetof(VolumeData, MapZ) == 16);
 	static_assert(offsetof(VolumeData, Thickness) == 32);
 	static_assert(offsetof(VolumeData, FadeStart) == 48);
@@ -196,7 +203,7 @@ struct GroundFog : Feature
 		float Radius;
 		float Burst;  // outward speed added once
 		float Clear;  // share cleared at its centre this step
-		float Pad;
+		float Push;   // rate at which it pushes the fog from its middle to its rim, per second
 	};
 	static constexpr uint32_t kMaxFlowEmitters = 24;
 
@@ -220,14 +227,18 @@ struct GroundFog : Feature
 		uint32_t SimFlags;
 		float FloorRise;
 		float Pooling;
+		float SunRate;
+		float LayerTop;
+		float GustSpeed;
+		float GustSize;
 		FlowEmitter Emitters[kMaxFlowEmitters];
 	};
 	static_assert(sizeof(FlowEmitter) == 32);
-	static_assert(sizeof(FlowData) == 80 + 32 * kMaxFlowEmitters);
+	static_assert(sizeof(FlowData) == 96 + 32 * kMaxFlowEmitters);
 	static_assert(offsetof(FlowData, Wind) == 32);
 	static_assert(offsetof(FlowData, Corner) == 48);
 	static_assert(offsetof(FlowData, RestUniform) == 64);
-	static_assert(offsetof(FlowData, Emitters) == 80);
+	static_assert(offsetof(FlowData, Emitters) == 96);
 
 	enum class DebugMode : uint32_t
 	{
@@ -342,7 +353,7 @@ private:
 	eastl::unique_ptr<ConstantBuffer> flowConstants;
 	eastl::unique_ptr<Texture2D> simState[2];
 	eastl::unique_ptr<Texture2D> simFloor[2];
-	eastl::unique_ptr<Texture2D> floorSlope;  // slope of simFloor over about a meter, with a validity channel
+	eastl::unique_ptr<Texture2D> floorSlope[2];  // slope of simFloor over about a meter, validity, and the sun map
 	eastl::unique_ptr<Texture2D> floorSeen;
 	uint32_t flowCurrent = 0;
 	bool flowValid = false;

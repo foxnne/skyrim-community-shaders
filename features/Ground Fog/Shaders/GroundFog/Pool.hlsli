@@ -41,7 +41,7 @@ namespace GroundFog
 	static const float PoolMinSlope = 0.04;
 	// The simulation's amount counts up to this, and the pool's optical depth along a ray levels off at PoolTauMax:
 	// whatever the simulation or the floor map does in one place, the pool stays a veil.
-	static const float PoolAmountMax = 2.5;
+	static const float PoolAmountMax = 4.0;
 	static const float PoolTauKnee = 1.0;
 	static const float PoolTauMax = 2.0;
 
@@ -60,6 +60,7 @@ namespace GroundFog
 		float known;   // 1 where the floor map has a floor for the pixel
 		float ground;  // how much the pixel counts as ground
 		float over;    // its height over the floor, game units
+		float within;  // length of the stretch of the ray inside the layer, game units
 	};
 
 	// Texels of the floor map this far above the lowest beside them belong to another level (game units).
@@ -92,7 +93,7 @@ namespace GroundFog
 		pool.tau = pool.tauNear = pool.t = pool.z = pool.above = pool.amount = 0.0;
 		pool.speed = 0.0;
 		pool.floorZ = FloorEmpty;
-		pool.range = pool.known = pool.ground = pool.over = 0.0;
+		pool.range = pool.known = pool.ground = pool.over = pool.within = 0.0;
 
 		const float2 uv = SimUv(position.xy);
 		const float range = (1.0 - smoothstep(0.5 * PoolEnd, PoolEnd, tEnd)) * SimInside(uv) * smoothstep(PoolNearStart, PoolNearFull, tEnd);
@@ -178,6 +179,7 @@ namespace GroundFog
 		const float4 state = 0.5 * (FogSim.SampleLevel(LinearSampler, SimUv(position.xy - dir.xy * (0.2 * within)), 0) +
 									   FogSim.SampleLevel(LinearSampler, SimUv(position.xy - dir.xy * (0.65 * within)), 0));
 		taps += 2u;
+		pool.within = within;
 		const float amount = clamp(state.z, 0.0, PoolAmountMax);
 		pool.amount = amount;
 		pool.speed = state.xy;

@@ -54,7 +54,7 @@ struct Emitter
 	float radius;     // game units
 	float burst;      // outward speed added once, game units per second
 	float clear;      // share stirred away at its centre this step
-	float pad;
+	float push;       // rate at which it pushes the fog from its middle to its rim, per second
 };
 
 static const uint MaxEmitters = 24u;
@@ -78,16 +78,22 @@ cbuffer SimCB : register(b3)
 	uint SimFlags;      // bit 0: terrain data is bound (height map, water, terrain shadow)
 	float FloorRise;    // share of the way up to a higher floor sighting gone over this step
 	float Pooling;  // 0: the fog rests evenly; 1: in the low places of the floor, little on level ground, none on rises
+	float SunRate;   // share of the way to this step's sun visibility gone over this step
+	float LayerTop;  // thickness of the pool, game units
+	float GustSpeed;  // speed of the gusts, game units per second
+	float GustSize;   // game units per cell of the gust noise
 	Emitter Emitters[MaxEmitters];
 };
 
-// GroundFog::FogSim (t8) and GroundFog::FogFloor (t10) are the previous state here.
+// GroundFog::FogSim (t8), GroundFog::FogFloor (t10) and GroundFog::FogSlope (t11) are the previous state here.
 Texture2D<float> FloorSeen : register(t12);
 RWTexture2D<float4> StateOut : register(u0);
 RWTexture2D<float> FloorOut : register(u1);
 RWTexture2D<float4> SlopeOut : register(u2);
 
-static const float MaxAmount = 4.0;
+static const float MaxAmount = 6.0;
+// A wake (the clear a mover leaves) does not take the fog under this share of what rests there.
+static const float WakeFloor = 0.15;
 // The most a place holds relative to what rests there, and at least this much room for fog passing through.
 static const float MaxPile = 2.5;
 static const float MinRoom = 0.2;
@@ -99,13 +105,18 @@ static const float RaisedEnd = 60.0;
 // that with the camera still it comes to rest and stays.
 // Pooling: what level ground holds of the even amount, the mean rise of the floor around a place (game units) that
 // adds the whole even amount to it (and a place that much above its surroundings holds none), and the most.
-static const float RestFlat = 0.3;
+static const float RestFlat = 0.5;
 static const float RestDepth = 35.0;
 static const float RestMax = 1.6;
 static const float FloorDropSlack = 1.0;
 static const float FloorRiseSlack = 8.0;
 static const float MaxSpeed = 1500.0;
 static const float SwirlSize = 140.0;  // game units per cell of the swirl noise (2 m)
+
+float GustPsi(float2 p)
+{
+	return (2.0 * GroundFog::ValueNoise(p) + GroundFog::ValueNoise(p * 2.1 + 17.0)) / 3.0;
+}
 
 [numthreads(8, 8, 1)] void main(uint2 pixel : SV_DispatchThreadID) {
 	uint2 size;
@@ -123,13 +134,30 @@ static const float SwirlSize = 140.0;  // game units per cell of the swirl noise
 	const float2 xyAbs = xy + FrameBuffer::CameraPosAdjust.xy;
 	float rest = RestUniform;
 	float water = 0.0;
+	float groundZ = FrameBuffer::CameraPosAdjust.z - 120.0;
 	if (SimFlags & 1u)
-		rest = GroundFog::RestingAmountAt(xy, TexelSize, GroundFog::BurnSunlitNear, water);
-	rest *= GroundFog::DensityModifier(xyAbs, TexelSize);
+		rest = GroundFog::RestingAmountAt(xy, TexelSize, GroundFog::BurnSunlitNear, water, groundZ);
 	const float open = rest;
+	const float pattern = GroundFog::RestPattern(xyAbs, TexelSize);
 
-	float2 velocity = Wind;
-	float amount = rest;
+	// What the air does here with nothing in it: the wind's drift, and gusts. The gusts are the curl of a noise
+	// that travels with the wind (a stream function, as in Iwillbewarlock's GroundFog, GustPsi in its
+	// WindShaders.h, GPL-3.0: two octaves, weights 2/3 and 1/3), so they turn the fog about without piling it up.
+	float2 drift = Wind;
+	if (Swirl > 0.0 && GustSpeed > 0.0) {
+		const float2 p = (xyAbs - GroundFog::WindTravel) / GustSize + SwirlTime * float2(0.011, -0.007);
+		const float e = 0.25;
+		const float2 gradient = float2(GustPsi(p + float2(e, 0.0)) - GustPsi(p - float2(e, 0.0)), GustPsi(p + float2(0.0, e)) - GustPsi(p - float2(0.0, e))) / (2.0 * e);
+		drift += float2(gradient.y, -gradient.x) * (Swirl * GustSpeed);
+	}
+
+	float2 velocity = drift;
+	// The fog is carried as its departure from what rests here (as in Iwillbewarlock's GroundFog, CSAdvectFog): the
+	// resting pattern rides the wind exactly, and only the departure goes through the resampling, so wind alone
+	// does not blur the wisps, and air that moves against the wind drags them along.
+	float delta = 0.0;
+	float gain = 1.0;
+	float wear = 1.0;
 	float level = GroundFog::FloorEmpty;
 	float4 floorSlope = 0.0;
 	float raised = 0.0;
@@ -149,14 +177,15 @@ static const float SwirlSize = 140.0;  // game units per cell of the swirl noise
 		const float2 from = clamp(float2(before) + 0.5 - carried * DeltaTime / TexelSize, 0.5, float2(size) - 0.5);
 		const float4 state = GroundFog::FogSim.SampleLevel(LinearSampler, from / float2(size), 0);
 		velocity = state.xy;
-		amount = state.z;
+		delta = state.z - state.w;
+		delta -= dot(velocity - Wind, float2(r.w - l.w, u.w - d.w)) / (2.0 * TexelSize) * DeltaTime;
 
 		// 2. Flowing together or apart.
 		const float divergence = ((r.x - l.x) + (u.y - d.y)) / (2.0 * TexelSize);
-		amount *= clamp(1.0 - divergence * DeltaTime, 0.5, 1.5);
+		gain *= clamp(1.0 - divergence * DeltaTime, 0.5, 1.5);
 
-		// 3. Wind, and from thick to thin.
-		velocity = Wind + (velocity - Wind) * VelocityKeep;
+		// 3. Wind and gusts, and from thick to thin.
+		velocity = drift + (velocity - drift) * VelocityKeep;
 		// Only what is off its resting amount pushes: fog at rest is in balance, patches and all.
 		velocity -= Spread * float2((r.z - r.w) - (l.z - l.w), (u.z - u.w) - (d.z - d.w)) / (2.0 * TexelSize) * DeltaTime;
 
@@ -173,7 +202,7 @@ static const float SwirlSize = 140.0;  // game units per cell of the swirl noise
 			float2 smooth = slope;
 			if (all(corners < GroundFog::FloorUnknown))
 				smooth = 0.5 * slope + 0.25 * float2((corners.y - corners.x) + (corners.w - corners.z), (corners.z - corners.x) + (corners.w - corners.y)) / (2.0 * TexelSize);
-			floorSlope = float4(clamp(smooth, -2.0, 2.0), 1.0, 0.0);
+			floorSlope.xyz = float3(clamp(smooth, -2.0, 2.0), 1.0);
 			// The fog runs down slopes. A step or a wall is not a slope: nothing accelerates through it, or the
 			// fog would pile up without bound at its foot.
 			slope *= 1.0 - smoothstep(0.35, 0.8, length(slope));
@@ -217,7 +246,7 @@ static const float SwirlSize = 140.0;  // game units per cell of the swirl noise
 										GroundFog::ValueNoise(p + float2(0.0, e)) - GroundFog::ValueNoise(p - float2(0.0, e))) /
 		                        (2.0 * e);
 		// The share that grows with the speed stays below what the damping takes, so eddies cannot feed themselves.
-		velocity += float2(gradient.y, -gradient.x) * Swirl * (6.0 + 0.25 * min(length(velocity - Wind), 300.0)) * DeltaTime;
+		velocity += float2(gradient.y, -gradient.x) * Swirl * (6.0 + 0.25 * min(length(velocity - drift), 300.0)) * DeltaTime;
 	}
 
 	// Movers.
@@ -236,19 +265,28 @@ static const float SwirlSize = 140.0;  // game units per cell of the swirl noise
 		}
 		const float bell = exp(-distance2 / radius2);
 		velocity += outward * emitter.burst * sqrt(bell) * saturate(distance2 / radius2 * 4.0);
-		amount *= saturate(1.0 - emitter.clear * ClearStrength * bell);
+		wear *= saturate(1.0 - emitter.clear * ClearStrength * bell);
+		// Pushed from the middle to the rim: a Ricker source (as in Iwillbewarlock's GroundFog, Source in its
+		// WindShaders.h, GPL-3.0). Positive inside the radius, negative outside, and zero over the plane, so the
+		// fog a body parts stands as a rim beside its track instead of vanishing.
+		const float q = distance2 / radius2;
+		gain *= exp(clamp(-emitter.push * (1.0 - q) * exp(-q) * DeltaTime, -0.7, 0.7));
 	}
 
-	// 4. Settle. Nothing rests on raised things, and no place holds more than MaxPile times what rests there.
+	// 4. Settle. Nothing rests on raised things, and no place holds more than MaxPile times what rests around it
+	// (not counting the pattern: a wisp carried into a gap stays a wisp).
 	// Water is level, and fog lies on it.
 	lowness = lerp(lowness, max(lowness, 1.0), water);
-	rest = open * (1.0 - raised) * lerp(1.0, lowness, Pooling);
+	const float place = open * (1.0 - raised) * lerp(1.0, lowness, Pooling);
+	rest = place * pattern;
+	float amount = max(rest + delta, 0.0) * gain;
+	amount = max(amount * wear, min(amount, WakeFloor * rest));
 	amount += (rest - amount) * RefillRate;
-	amount = clamp(amount, 0.0, min(MaxAmount, max(MaxPile * rest, MinRoom * (1.0 - raised))));
+	amount = clamp(amount, 0.0, min(MaxAmount, max(MaxPile * place, MinRoom * (1.0 - raised))));
 	velocity = clamp(velocity, -MaxSpeed, MaxSpeed);
 	if (!(amount >= 0.0) || !(dot(velocity, velocity) < 1.0e9)) {
 		amount = rest;
-		velocity = Wind;
+		velocity = drift;
 	}
 	StateOut[pixel] = float4(velocity, amount, rest);
 
@@ -268,5 +306,20 @@ static const float SwirlSize = 140.0;  // game units per cell of the swirl noise
 			level += (seen - level) * FloorRise;
 	}
 	FloorOut[pixel] = level;
+
+	// 6. Sun. How much of the sun reaches the fog over this texel: the shadow cascades at four places across the
+	// texel and at four heights through the pool, so a shadow has neither a sharp edge nor a height of its own, then
+	// eased toward over SunRate, so leaves moving in the wind and the cascades' own stepping come through as slow,
+	// soft changes. With the camera still it comes to rest.
+	{
+		const float base = (level < GroundFog::FloorUnknown ? level : groundZ) - FrameBuffer::CameraPosAdjust.z;
+		float sun = 0.0;
+		[unroll] for (uint s = 0u; s < 4u; ++s)
+			sun += MediumCascadeShadow(float3(xy + (float2(s & 1u, s >> 1u) - 0.5) * TexelSize, base + (0.1 + 0.3 * float(s)) * LayerTop));
+		sun *= 0.25;
+		if (had)
+			sun = lerp(GroundFog::FogSlope.Load(int3(before, 0)).w, sun, SunRate);
+		floorSlope.w = saturate(sun);
+	}
 	SlopeOut[pixel] = floorSlope;
 }

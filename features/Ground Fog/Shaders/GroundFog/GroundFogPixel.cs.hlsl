@@ -41,8 +41,10 @@
 
 #define COMPUTESHADER
 #define PS_LINEAR_SHADOW_SAMPLER
-// The fog lies on the ground, where a shadow's edge is seen at full size: the cascades are read filtered.
+// The fog lies on the ground, where a shadow's edge is seen at full size: the cascades are read filtered, and inside
+// the simulation's window from its sun map (GroundFog::FogSlope.w), which is steady in the world and in time.
 #define MEDIUM_SOFT_CASCADE
+#define MEDIUM_EXTERNAL_CASCADE
 #include "Common/Random.hlsli"
 #include "Common/ViewAtmosphere.hlsli"
 #include "PhysicalSky/Common.hlsli"
@@ -276,7 +278,8 @@ namespace GroundFog
 		// walls and banks. It comes in exactly as the pool goes out.
 		const float sheetFade = (1.0 - smoothstep(FadeStart, FadeEnd, joint.t)) * (PoolExtinction > 0.0 ? smoothstep(0.5 * PoolEnd, PoolEnd, joint.t) : 1.0);
 		// The valley layer comes in exactly as the sheet goes out, so there is no ring where the sheet ends.
-		const float valleyFade = FarExtinction > 0.0 ? (1.0 - sheetFade) * (1.0 - smoothstep(0.75 * FarEnd, FarEnd, joint.t)) : 0.0;
+		// (By distance alone: where the sheet makes way for the pool the valley layer has no business.)
+		const float valleyFade = FarExtinction > 0.0 ? smoothstep(FadeStart, FadeEnd, joint.t) * (1.0 - smoothstep(0.75 * FarEnd, FarEnd, joint.t)) : 0.0;
 		const float nearFade = NearExtinction > 0.0 ? 1.0 - smoothstep(0.5 * NearEnd, NearEnd, joint.t) : 0.0;
 		joint.shade = 0.0;
 		joint.sheet.inside = sheetFade > 0.0 && joint.h < TopMax() && joint.h > -GroundFill - 64.0;
@@ -575,7 +578,7 @@ namespace GroundFog
 	pool.tau = pool.tauNear = pool.t = pool.z = pool.above = pool.amount = 0.0;
 	pool.speed = 0.0;
 	pool.floorZ = GroundFog::FloorEmpty;
-	pool.range = pool.known = pool.ground = pool.over = 0.0;
+	pool.range = pool.known = pool.ground = pool.over = pool.within = 0.0;
 	if (GroundFog::PoolExtinction > 0.0 && surface && tEnd < GroundFog::PoolEnd) {
 		normal = GroundFog::SurfaceNormal(scenePixel, depth, position, mainSize, activeMain);
 		hasNormal = true;
@@ -821,7 +824,26 @@ namespace GroundFog
 	const SharedData::PhysSkyData physSky = SharedData::physSkyData;
 	float atmosphereVisibility;
 	float3 diffuseVisibility;
-	const float visibility = MediumVisibility(lightPos, atmosphereVisibility, diffuseVisibility);
+	float visibility = MediumVisibility(lightPos, atmosphereVisibility, diffuseVisibility);
+	{
+		// The sun's shadow in the fog. A medium is lit all along the ray and through its whole depth, so a shadow in
+		// it has no edge and no height of its own. Inside the simulation's window it comes from the sun map: the
+		// cascades taken over the area of a texel and the height of the pool, smoothed over time, read at two
+		// places along the stretch of the ray the fog was seen on. Outside it, from the cascades at the lighting
+		// point, filtered.
+		const float2 sunUv = GroundFog::SimUv(lightPos.xy);
+		const float mapped = GroundFog::SimInside(sunUv);
+		float sun = 1.0;
+		if (mapped > 0.0) {
+			const float2 along = dir.xy * max(0.3 * pool.within, 40.0) * GroundFog::FlowWindow.z;
+			sun = 0.5 * (GroundFog::FogSlope.SampleLevel(LinearSampler, sunUv - along, 0).w + GroundFog::FogSlope.SampleLevel(LinearSampler, sunUv + along, 0).w);
+		}
+		if (mapped < 1.0)
+			sun = lerp(MediumCascadeShadow(lightPos), sun, mapped);
+		visibility *= sun;
+		atmosphereVisibility *= sun;
+		diffuseVisibility *= sun;
+	}
 
 	// The sky light follows the sky over the fog, not the sky as a whole: the cloud that shades the sun at this
 	// point also stands between the fog and most of the sky's light. Without this the fog keeps the brightness of
@@ -856,7 +878,16 @@ namespace GroundFog
 	}
 	light *= GroundFog::SunScale;
 	// Sky light reaches fog in the shadow of terrain and objects too, so it takes no direct visibility.
-	light += albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming;
+	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming;
+	// Fog in the sun is brighter than fog in the shade, but not without end: what it scatters of the sun and moons
+	// levels off at SunLimit times its sky light (at the limit's own value it has reached half of that), keeping
+	// its colour. So sunlit fog reads as lit fog, not as paint.
+	if (GroundFog::SunLimit > 0.0) {
+		static const float3 luma = float3(0.2126, 0.7152, 0.0722);
+		const float cap = GroundFog::SunLimit * dot(skyLight, luma);
+		light *= cap / max(cap + dot(light, luma), 1e-6);
+	}
+	light += skyLight;
 
 	// A uniform medium of this light per unit of extinction; the composite multiplies by the opacity at the depth
 	// of each of its pixels.

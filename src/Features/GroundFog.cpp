@@ -43,6 +43,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	SkyAmbientScale,
 	SelfShadow,
 	SunDiffusion,
+	SunLimit,
 	GroundFill,
 	SurfaceBlendDistance,
 	SurfaceMaxHeight,
@@ -63,6 +64,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Reactive,
 	ReactiveStrength,
 	SettleTime,
+	Wispiness,
+	WispScale,
 	DownhillFlow,
 	Swirl,
 	Pooling,
@@ -130,7 +133,20 @@ namespace
 	constexpr double kSimMinTexel = 28.0;
 	constexpr double kSimTexelStep = 7.0;
 	// Seconds over which the fog's motion relative to the wind dies down.
-	constexpr float kSimVelocityTime = 1.2f;
+	constexpr float kSimVelocityTime = 2.5f;
+	// Gusts at Swirl 1: speed (game units per second) and size of a cell of their noise (game units, 12 m).
+	constexpr float kSimGustSpeed = 45.0f;
+	constexpr float kSimGustSize = 840.0f;
+	// Seconds over which the sun map follows the shadows (moving leaves, the cascades' own stepping).
+	constexpr float kSimSunTime = 0.5f;
+	// Share of the fog on a body's path that it pushes to the rim of its track, whatever its speed (the original
+	// mod's ActorPush is 0.35), and the speeds between which that comes in (game units per second).
+	constexpr float kActorPush = 0.7f;
+	constexpr float kActorPushStart = 40.0f;
+	constexpr float kActorPushFull = 90.0f;
+	constexpr float kMinWispScale = 1.0f;
+	constexpr float kMaxWispScale = 15.0f;
+	constexpr float kMaxSunLimit = 8.0f;
 	// Speed of a ripple in the fog, game units per second: how fast a hole closes from its rim.
 	constexpr float kSimWaveSpeed = 50.0f;
 	// Acceleration down a slope of 1 at Downhill Flow 1, game units per second^2 (0.5 m/s on a 1 in 5 slope).
@@ -371,7 +387,7 @@ uint32_t GroundFog::GatherSimEmitters(FlowEmitter* a_emitters, double a_originX,
 		return 1.0f - Util::Smoothstep(heightStart, heightEnd, a_position.z - land - floorOffset);
 	};
 	// a_weight: how far the thing is in the fog, 0 to 1; negative to work it out from its height above the land.
-	auto add = [&](const RE::NiPoint3& a_position, RE::NiPoint3 a_velocity, float a_radius, float a_burst, float a_clear, float a_priority, float a_weight = -1.0f) {
+	auto add = [&](const RE::NiPoint3& a_position, RE::NiPoint3 a_velocity, float a_radius, float a_burst, float a_clear, float a_priority, float a_weight = -1.0f, float a_push = 0.0f) {
 		const float weight = a_weight >= 0.0f ? a_weight : inFog(a_position);
 		if (weight <= 0.0f)
 			return;
@@ -384,6 +400,7 @@ uint32_t GroundFog::GatherSimEmitters(FlowEmitter* a_emitters, double a_originX,
 		candidate.emitter.Radius = a_radius;
 		candidate.emitter.Burst = a_burst * weight;
 		candidate.emitter.Clear = a_clear * weight;
+		candidate.emitter.Push = a_push * weight;
 		candidate.priority = a_priority;
 		candidates.push_back(candidate);
 	};
@@ -449,7 +466,10 @@ uint32_t GroundFog::GatherSimEmitters(FlowEmitter* a_emitters, double a_originX,
 		// Whatever walks stands on the floor the fog lies on, whatever the land map says is under it. What flies
 		// (a dragon overhead) is over it.
 		const float weight = a_actor->IsInMidair() ? -1.0f : 1.0f;
-		add(position, velocity, radius * 2.0f, 0.0f, clear, 2.0f + (dx * dx + dy * dy) * 1.0e-8f, weight);
+		// A Ricker source of radius R loses z * sqrt(pi) * R / 2 on a straight path through its middle at rate
+		// z * speed, whatever the speed (Iwillbewarlock GroundFog, WindShaders.h Source): z for the share wanted.
+		const float push = kActorPush / (0.8862f * radius * 2.0f) * speed * Util::Smoothstep(kActorPushStart, kActorPushFull, speed);
+		add(position, velocity, radius * 2.0f, 0.0f, clear, 2.0f + (dx * dx + dy * dy) * 1.0e-8f, weight, push);
 	};
 	if (auto player = RE::PlayerCharacter::GetSingleton())
 		visitActor(player, player->GetHandle().native_handle());
@@ -512,7 +532,8 @@ float4 GroundFog::PrepareSim(bool a_pool)
 		simState[1] = make(DXGI_FORMAT_R16G16B16A16_FLOAT, "GroundFog::SimState1");
 		simFloor[0] = make(DXGI_FORMAT_R32_FLOAT, "GroundFog::SimFloor0");
 		simFloor[1] = make(DXGI_FORMAT_R32_FLOAT, "GroundFog::SimFloor1");
-		floorSlope = make(DXGI_FORMAT_R16G16B16A16_FLOAT, "GroundFog::FloorSlope");
+		floorSlope[0] = make(DXGI_FORMAT_R16G16B16A16_FLOAT, "GroundFog::FloorSlope0");
+		floorSlope[1] = make(DXGI_FORMAT_R16G16B16A16_FLOAT, "GroundFog::FloorSlope1");
 		floorSeen = make(DXGI_FORMAT_R32_FLOAT, "GroundFog::FloorSeen");
 		flowValid = false;
 	}
@@ -541,6 +562,10 @@ float4 GroundFog::PrepareSim(bool a_pool)
 	simData->Corner = { cornerX, cornerY };
 	simData->Swirl = settings.Swirl;
 	simData->Pooling = std::clamp(settings.Pooling, 0.0f, 1.0f);
+	simData->SunRate = 1.0f - std::exp(-deltaTime / kSimSunTime);
+	simData->LayerTop = std::max(settings.NearThickness, kMinNearThickness) * unitsPerMeter;
+	simData->GustSpeed = kSimGustSpeed;
+	simData->GustSize = kSimGustSize;
 	simData->SwirlTime = static_cast<float>(swirlTime);
 	// Without terrain data the fog rests evenly. Interiors would set this from the cell (and a floor level).
 	simData->RestUniform = 1.0f;
@@ -581,12 +606,11 @@ void GroundFog::StepSim(ID3D11DeviceContext* a_context, bool a_terrain)
 	a_context->CSGetShaderResources(kFloorMapSlot, 1, oldInputs[1].put());
 	a_context->CSGetShaderResources(kFloorSlopeSlot, 1, oldInputs[2].put());
 	a_context->CSGetShaderResources(kFloorSeenSlot, 1, oldInputs[3].put());
-	// The slope map is an output here; it may still be bound as an input from the last frame.
 	ID3D11ShaderResourceView* state = simState[flowCurrent]->srv.get();
-	ID3D11ShaderResourceView* floors[] = { simFloor[flowCurrent]->srv.get(), nullptr, floorSeen->srv.get() };
+	ID3D11ShaderResourceView* floors[] = { simFloor[flowCurrent]->srv.get(), floorSlope[flowCurrent]->srv.get(), floorSeen->srv.get() };
 	a_context->CSSetShaderResources(kFlowMapSlot, 1, &state);
 	a_context->CSSetShaderResources(kFloorMapSlot, 3, floors);
-	ID3D11UnorderedAccessView* outputs[] = { simState[next]->uav.get(), simFloor[next]->uav.get(), floorSlope->uav.get() };
+	ID3D11UnorderedAccessView* outputs[] = { simState[next]->uav.get(), simFloor[next]->uav.get(), floorSlope[next]->uav.get() };
 	a_context->CSSetUnorderedAccessViews(0, 3, outputs, nullptr);
 	a_context->CSSetShader(flowCS.get(), nullptr, 0);
 	globals::profiler->BeginPass("GroundFog::Simulation");
@@ -729,6 +753,9 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 	a_data.SkyAmbientScale = settings.SkyAmbientScale;
 	a_data.SelfShadow = settings.SelfShadow;
 	a_data.SunWrap = settings.SunDiffusion;
+	a_data.SunLimit = settings.SunLimit;
+	a_data.Wispiness = slab ? 0.0f : settings.Wispiness;
+	a_data.InvWispScale = 1.0f / (std::clamp(settings.WispScale, kMinWispScale, kMaxWispScale) * unitsPerMeter);
 	a_data.Flags = 1u | (settings.HalfResolution ? 2u : 0u);
 	a_data.DebugMode = static_cast<uint32_t>(debugMode);
 	a_data.SurfaceBlend = slab ? 0.0f : settings.SurfaceBlendDistance * unitsPerMeter;
@@ -1041,7 +1068,7 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 		StepSim(a_context, true);
 		ground[2] = simState[flowCurrent]->srv.get();
 		ground[4] = simFloor[flowCurrent]->srv.get();
-		ground[5] = floorSlope->srv.get();
+		ground[5] = floorSlope[flowCurrent]->srv.get();
 		a_context->CSSetShaderResources(kHeightMapSlot, 6, ground);
 	}
 	ID3D11UnorderedAccessView* outputs[] = { fogTexture->uav.get(), fogAuxTexture->uav.get(), simulated && data.PoolExtinction > 0.0f ? floorSeen->uav.get() : nullptr };
@@ -1112,6 +1139,12 @@ void GroundFog::DrawSettings()
 
 		ImGui::SliderFloat(T(TKEY("settle_time"), "Settle Time"), &settings.SettleTime, kMinSettleTime, kMaxSettleTime, "%.1f s", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
 		Util::HoverTip(T(TKEY("settle_time_tooltip"), "How long the pool takes to come back to its resting amount after it has been disturbed, and to follow the time of day, shade and water as you move. Short heals wakes quickly; long leaves trails."));
+
+		ImGui::SliderFloat(T(TKEY("wispiness"), "Wispiness"), &settings.Wispiness, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("wispiness_tooltip"), "How broken up the pool is. At 1 it lies in separate wisps and tendrils with clear air between them, dense enough to see them drift, curl and part. At 0 it is an even layer with soft patches."));
+
+		ImGui::SliderFloat(T(TKEY("wisp_scale"), "Wisp Size"), &settings.WispScale, kMinWispScale, kMaxWispScale, "%.1f m", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("wisp_scale_tooltip"), "Size of the wisps and of the gaps between them."));
 
 		ImGui::SliderFloat(T(TKEY("pooling"), "Pooling"), &settings.Pooling, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("pooling_tooltip"), "How much the pool keeps to the low places of the ground you see. At 1 it gathers in dips, gutters and at the foot of slopes and over water, leaves a thin veil on level open ground and none on rises. At 0 it lies evenly everywhere."));
@@ -1217,6 +1250,9 @@ void GroundFog::DrawSettings()
 
 		ImGui::SliderFloat(T(TKEY("sun_diffusion"), "Sun Diffusion"), &settings.SunDiffusion, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("sun_diffusion_tooltip"), "Share of the sun and moon light that lit fog sends out evenly to all sides, as dense fog does, on top of the glow toward the light. It gives lit fog the colour of the low sun from any direction. 0 leaves only the glow toward the light and the sky light."));
+
+		ImGui::SliderFloat(T(TKEY("sun_limit"), "Sun Limit"), &settings.SunLimit, 0.0f, kMaxSunLimit, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("sun_limit_tooltip"), "How much brighter fog in the sun can get than fog in the shade: the sun and moon light it scatters levels off at this many times its sky light. At 1 sunlit fog is at most twice as bright as shaded fog. 0 removes the limit."));
 
 		ImGui::SliderFloat(T(TKEY("sky_ambient_scale"), "Sky Light"), &settings.SkyAmbientScale, 0.0f, kMaxLightScale, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("sky_ambient_scale_tooltip"), "Scales the light the fog takes from the whole sky, which is what lights it in shadow."));
@@ -1362,6 +1398,9 @@ void GroundFog::LoadSettings(json& o_json)
 	sanitize(settings.SkyAmbientScale, defaults.SkyAmbientScale, 0.0f, kMaxLightScale);
 	sanitize(settings.SelfShadow, defaults.SelfShadow, 0.0f, kMaxLightScale);
 	sanitize(settings.SunDiffusion, defaults.SunDiffusion, 0.0f, 1.0f);
+	sanitize(settings.SunLimit, defaults.SunLimit, 0.0f, kMaxSunLimit);
+	sanitize(settings.Wispiness, defaults.Wispiness, 0.0f, 1.0f);
+	sanitize(settings.WispScale, defaults.WispScale, kMinWispScale, kMaxWispScale);
 	sanitize(settings.GroundFill, defaults.GroundFill, 0.0f, kMaxGroundFill);
 	sanitize(settings.SurfaceBlendDistance, defaults.SurfaceBlendDistance, 0.0f, kMaxSurfaceBlend);
 	sanitize(settings.SurfaceMaxHeight, defaults.SurfaceMaxHeight, 0.0f, kMaxSurfaceHeight);

@@ -587,11 +587,13 @@ namespace GroundFog
 	pool.crest = pool.sunSide = 0.5;
 	// How much of the fog this pixel sees is the pool, for what only the pool's shading takes.
 	float poolShare = 0.0;
+	// From the pool's volume: the sun its fog sees (and how much that stands for the sun map lookup), its sky light.
+	float poolSun = 1.0, poolSunWeight = 0.0, poolSky = 1.0;
 	if (GroundFog::PoolExtinction > 0.0 && surface && tEnd < GroundFog::PoolEnd) {
 		normal = GroundFog::SurfaceNormal(scenePixel, depth, position, mainSize, activeMain);
 		hasNormal = true;
 		taps += 4u;
-		pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, SharedData::DirLightDirection.xyz, taps);
+		pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, SharedData::DirLightDirection.xyz, taps, poolSun, poolSunWeight, poolSky);
 		if (pool.floorZ < GroundFog::FloorUnknown) {
 			uint2 splatSize;
 			FloorSplat.GetDimensions(splatSize.x, splatSize.y);
@@ -905,6 +907,9 @@ namespace GroundFog
 		}
 		if (mapped < 1.0)
 			sun = lerp(MediumCascadeShadow(lightPos), sun, mapped);
+		// Near the camera the pool's volume has taken the sun at each place of its own fog (and through the fog
+		// above each toward the sun): that stands for it, for the pool's share.
+		sun = lerp(sun, poolSun, poolShare * poolSunWeight);
 		visibility *= sun;
 		atmosphereVisibility *= sun;
 		diffuseVisibility *= sun;
@@ -987,7 +992,7 @@ namespace GroundFog
 	}
 	// And the folds between its billows see less of the sky than their tops.
 	const float folds = lerp(1.0, lerp(0.8, 1.2, pool.crest), poolShare);
-	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming * skyOpen * folds;
+	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming * skyOpen * folds * lerp(1.0, poolSky, poolShare);
 	// Fog in the sun is brighter than fog in the shade, but not without end: what it scatters of the sun and moons
 	// levels off at SunLimit times its sky light (at the limit's own value it has reached half of that), keeping
 	// its colour. So sunlit fog reads as lit fog, not as paint.

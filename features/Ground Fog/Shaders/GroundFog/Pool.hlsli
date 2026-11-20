@@ -71,6 +71,44 @@ namespace GroundFog
 	// is ground: the fog lies on it, in full. Game units (0.1 m), and as much again to fade out.
 	static const float PoolGroundFacing = 0.5;
 	static const float PoolGroundBand = 7.0;
+	// The pool's top rises and falls with Breathing at this share of its strength: still fog barely breathes.
+	static const float PoolBreathShare = 0.3;
+	// The pool's volume. Inside the layer the density varies with height as well as with place (3D noise fixed in
+	// the world, riding the wind, bent by the air's motion): tendrils and gaps at different heights, a broken top.
+	// Within PoolVolumeFull of the camera it is integrated through the layer at PoolVolumeSamples places along the
+	// ray, each with its own density, sun, shadow of the fog above it and sky light; beyond PoolVolumeEnd the
+	// closed-form path stands for it (the noise averages 1 there, so the two agree on the mean and the blend between
+	// them does not show as you walk). The camera's distance only changes how finely it is taken; the fog is the
+	// same. Game units.
+	static const float PoolVolumeFull = 350.0;
+	static const float PoolVolumeEnd = 560.0;
+	static const uint PoolVolumeSamples = 6u;
+	static const float PoolVoxel = 21.0;
+
+	float Hash3(int3 cell)
+	{
+		return Random::pcg3d(uint3(cell)).x * (1.0 / 4294967296.0);
+	}
+
+	float ValueNoise3(float3 p)
+	{
+		const float3 base = floor(p);
+		const float3 f = p - base;
+		const float3 u = f * f * (3.0 - 2.0 * f);
+		const int3 c = int3(base);
+		const float lower = lerp(lerp(Hash3(c), Hash3(c + int3(1, 0, 0)), u.x), lerp(Hash3(c + int3(0, 1, 0)), Hash3(c + int3(1, 1, 0)), u.x), u.y);
+		const float upper = lerp(lerp(Hash3(c + int3(0, 0, 1)), Hash3(c + int3(1, 0, 1)), u.x), lerp(Hash3(c + int3(0, 1, 1)), Hash3(c + int3(1, 1, 1)), u.x), u.y);
+		return lerp(lower, upper, u.z);
+	}
+
+	// How much denser or thinner than its profile the fog is at a point inside the layer: 0 in a gap, up to 2 in a
+	// tendril, 1 on average. xyAbs: absolute; h: height over the floor; flow: the air's velocity there.
+	float PoolTexture(float2 xyAbs, float h, float2 flow)
+	{
+		const float3 p = float3(xyAbs - WindTravel - flow * PoolGrainDrag, 1.6 * h) / PoolVoxel;
+		const float n = 0.65 * ValueNoise3(p) + 0.35 * ValueNoise3(p * 2.3 + 17.0);
+		return lerp(1.0, 2.0 * smoothstep(0.28, 0.72, n), Wispiness);
+	}
 
 	// The soft profile, cut off at `cap`: the mean density along a straight piece of ray whose height runs from ha
 	// to hb, counting nothing above the cap; and the density integrated from h up to the cap.
@@ -150,8 +188,15 @@ namespace GroundFog
 	// position: where the ray ends, camera-relative. normal: of what it ends on, from the depth buffer.
 	// tNear: where the nearest of the output pixel's scene pixels lies along the ray.
 	// lightDir: toward the sun or moon that lights the scene.
-	Pool EvaluatePool(float3 position, float3 dir, float tEnd, float camZ, float3 normal, float tNear, float3 lightDir, inout uint taps)
+	// lightSun, lightSunWeight: where the volume is taken (near the camera), how much of the sun reaches the fog the
+	// pixel sees (the sun map at each place, weighted by what that place adds), and how much that should stand for
+	// the pixel's own sun lookup. lightSky: how much of the sky's light reaches it (less low down in thick fog).
+	Pool EvaluatePool(float3 position, float3 dir, float tEnd, float camZ, float3 normal, float tNear, float3 lightDir, inout uint taps,
+		out float lightSun, out float lightSunWeight, out float lightSky)
 	{
+		lightSun = 1.0;
+		lightSunWeight = 0.0;
+		lightSky = 1.0;
 		Pool pool;
 		pool.tau = pool.tauNear = pool.t = pool.z = pool.above = pool.amount = 0.0;
 		pool.speed = 0.0;
@@ -329,25 +374,92 @@ namespace GroundFog
 		const float shape = lerp(0.8, 1.2, billow);
 		// The amount sets the top as well as the density: a thin wisp lies a hand high and is see-through, a pool's
 		// core stands to the full height and is dense.
-		const float top = max(thick * Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) * lerp(0.2, 1.0, smoothstep(0.05, 1.3, amount)) * shape, 1.0);
+		const float breath = 1.0 + (Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) - 1.0) * PoolBreathShare;
+		const float top = max(thick * breath * lerp(0.2, 1.0, smoothstep(0.05, 1.3, amount)) * shape, 1.0);
 		const SoftProfile profile = MakeSoftProfile(top, 0.0, NearFalloff);
 		// Fog thrown up is the same fog over more height: thinner, though not by all of it (it is stirred up too).
-		const float extinction = PoolExtinction * amount * range * share * certain * lerp(1.0, floorness, ground) * rsqrt(1.0 + max(lift, 0.0)) / shape;
+		const float place = range * share * certain * lerp(1.0, floorness, ground) * rsqrt(1.0 + max(lift, 0.0)) / shape;
+		const float extinction = PoolExtinction * amount * place;
 		const float end = start + rise * stretch;
-		const float tau = extinction * ClippedLineMean(profile, start, end, limit) * stretch;
+		float tau = extinction * ClippedLineMean(profile, start, end, limit) * stretch;
+		if (tau <= 0.0)
+			return pool;
+		// In front of the nearest scene pixel: the same integral over the part of the stretch beyond it.
+		const float back = tEnd - tNear;
+		float tauFront = back < stretch ? min(extinction * ClippedLineMean(profile, start + rise * back, end, limit) * (stretch - back), tau) : 0.0;
+		const float lit = clamp(start + 0.25 * top, 0.15 * top, min(top, limit));
+		float atT = tEnd - 0.4 * within;
+		float atZ = z - start + lit;
+		float above = PoolExtinction * amount * ClippedAbove(profile, lit, limit);
+		// Low in thick fog less of the sky reaches it: half of what the fog above the point takes counts.
+		lightSky = lerp(1.0, exp(-0.7 * above), 0.5);
+
+		// The volume, near the camera.
+		const float near = 1.0 - smoothstep(PoolVolumeFull, PoolVolumeEnd, tEnd);
+		if (near > 0.0 && within > 1.0) {
+			const float step = within / float(PoolVolumeSamples);
+			const float sunZ = max(lightDir.z, 0.15);
+			float transmittance = 1.0;
+			float vTau = 0.0, vFront = 0.0, vWeight = 0.0, vT = 0.0, vZ = 0.0, vAbove = 0.0, vSun = 0.0, vSky = 0.0;
+			// From the camera's side to the surface, so each place is seen through the fog in front of it.
+			[unroll] for (uint i = 0u; i < PoolVolumeSamples; ++i)
+			{
+				const float s = step * (float(PoolVolumeSamples - 1u - i) + 0.5);
+				const float h = start + rise * s;
+				if (h >= limit)
+					continue;
+				const float2 at = position.xy - dir.xy * s;
+				const float2 atUv = SimUv(at);
+				const float4 here = FogSim.SampleLevel(LinearSampler, atUv, 0);
+				const float sunHere = FogSlope.SampleLevel(LinearSampler, atUv, 0).w;
+				taps += 2u;
+				const float a = clamp(here.z, 0.0, PoolAmountMax);
+				if (a <= 0.0)
+					continue;
+				const float topHere = max(thick * breath * lerp(0.2, 1.0, smoothstep(0.05, 1.3, a)) * shape, 1.0);
+				const SoftProfile p = MakeSoftProfile(topHere, 0.0, NearFalloff);
+				const float density = PoolExtinction * a * place * SoftDensity(p, h) * PoolTexture(at + FrameBuffer::CameraPosAdjust.xy, h, here.xy);
+				const float d = density * step;
+				if (d <= 0.0)
+					continue;
+				const float aboveHere = PoolExtinction * a * ClippedAbove(p, h, limit);
+				const float weight = transmittance * OneMinusExp(d);
+				vTau += d;
+				if (s > back)
+					vFront += d;
+				vWeight += weight;
+				vT += weight * (tEnd - s);
+				vZ += weight * (z - dir.z * s);
+				vAbove += weight * aboveHere;
+				// The sun at this place, through the fog above it toward the sun; the sky, less low in thick fog.
+				vSun += weight * saturate(sunHere) * exp(-SelfShadow * aboveHere / sunZ);
+				vSky += weight * lerp(1.0, exp(-0.7 * aboveHere), 0.5);
+				transmittance *= exp(-d);
+			}
+			if (vWeight > 1e-5) {
+				// The self shadow is in vSun already: the lighting is given no fog above.
+				tau = lerp(tau, vTau, near);
+				tauFront = lerp(tauFront, vFront, near);
+				atT = lerp(atT, vT / vWeight, near);
+				atZ = lerp(atZ, vZ / vWeight, near);
+				above = lerp(above, 0.0, near);
+				lightSun = vSun / vWeight;
+				lightSunWeight = near;
+				lightSky = lerp(lightSky, vSky / vWeight, near);
+			} else {
+				// No fog anywhere along it close up: none, blending out as the closed form takes over.
+				tau *= 1.0 - near;
+				tauFront *= 1.0 - near;
+			}
+		}
 		if (tau <= 0.0)
 			return pool;
 		// Levels off: no single place can turn the pool into a wall.
 		pool.tau = tau <= PoolTauKnee ? tau : PoolTauKnee + (PoolTauMax - PoolTauKnee) * OneMinusExp((tau - PoolTauKnee) / (PoolTauMax - PoolTauKnee));
-		// In front of the nearest scene pixel: the same integral over the part of the stretch beyond it.
-		const float back = tEnd - tNear;
-		if (back < stretch)
-			pool.tauNear = min(extinction * ClippedLineMean(profile, start + rise * back, end, limit) * (stretch - back), tau) * pool.tau / tau;
-
-		const float lit = clamp(start + 0.25 * top, 0.15 * top, min(top, limit));
-		pool.t = tEnd - 0.4 * within;
-		pool.z = z - start + lit;
-		pool.above = PoolExtinction * amount * ClippedAbove(profile, lit, limit);
+		pool.tauNear = min(tauFront, tau) * pool.tau / tau;
+		pool.t = atT;
+		pool.z = atZ;
+		pool.above = above;
 
 		// THE HEIGHT RULE, last: see PoolHardTop. The height of this surface over its floor: for what stands in the
 		// fog, over the lowest floor around it and toward the camera; for ground, over the floor it lies on (the

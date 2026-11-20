@@ -25,6 +25,7 @@
 #include "Features/HeatHaze.h"
 #include "Features/Rainbows.h"
 #include "Features/GroundFog.h"
+#include "Features/LightShafts.h"
 #include "Features/HiZOcclusion.h"
 #include "Features/HorizonFix.h"
 #include "Features/IBL.h"
@@ -285,6 +286,7 @@ const std::vector<Feature*>& Feature::GetFeatureList()
 		&globals::features::heatHaze,
 		&globals::features::rainbows,
 		&globals::features::groundFog,
+		&globals::features::lightShafts,
 		&globals::features::cameraFX,
 		&globals::features::capsuleShadows,
 		&globals::features::neuralRendering,

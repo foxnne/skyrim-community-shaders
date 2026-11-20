@@ -25,6 +25,7 @@
 #include "Features/HeatHaze.h"
 #include "Features/Rainbows.h"
 #include "Features/GroundFog.h"
+#include "Features/LightShafts.h"
 #include "Features/HiZOcclusion.h"
 #include "Features/HorizonFix.h"
 #include "Features/IBL.h"
@@ -143,6 +144,7 @@ namespace globals
 		HeatHaze heatHaze{};
 		Rainbows rainbows{};
 		GroundFog groundFog{};
+		LightShafts lightShafts{};
 		CameraFX cameraFX{};
 		CapsuleShadows capsuleShadows{};
 		NeuralRendering neuralRendering{};

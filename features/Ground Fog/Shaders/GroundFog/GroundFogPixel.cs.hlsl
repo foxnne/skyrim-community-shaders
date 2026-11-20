@@ -871,19 +871,26 @@ namespace GroundFog
 		visibility * GroundFog::SelfShadowing(tauAbove, physSky.masserDir.z), diffuseVisibility);
 	light += AtmosphereLight(2u, lightPos, dir, physSky.secundaDir, physSky.secundaColor, 0.0, albedo,
 		visibility * GroundFog::SelfShadowing(tauAbove, physSky.secundaDir.z), diffuseVisibility);
-	// Dense fog scatters many times before the light leaves it, which evens out the direction it leaves in: beside
-	// the forward-peaked single scattering above, a share of the sun's and moons' light (after the atmosphere, so
-	// warm at a low sun) comes out evenly to every side.
-	if (GroundFog::SunWrap > 0.0) {
+	// What a white surface lying where the pool lies would send back of the sun and moons: that is what the pool is
+	// lit like, a white diffuse body in the scene's light (the same colour after the atmosphere, the same shadow
+	// from the sun map, its own depth over the point), and never more. Its lumpy top catches a low light better
+	// than level ground does, hence the least angle. The thin layers further out keep the scattering of a haze
+	// (the forward-peaked phase above) with a share of it sent out evenly.
+	{
 		const float3 planet = PhysSky::GetMediumPlanetPosition(lightPos);
 		const float3 lightDirs[3] = { physSky.sunDir, physSky.masserDir, physSky.secundaDir };
 		const float3 lightColors[3] = { physSky.sunlightColor, physSky.masserColor, physSky.secundaColor };
+		float3 white = 0.0;
 		[unroll] for (uint l = 0u; l < 3u; ++l)
 		{
-			if (any(lightColors[l] > 0.0) && dot(lightDirs[l], lightDirs[l]) >= 0.5)
-				light += lightColors[l] * PhysSky::SampleAtmosphereLightTr(PhysSky::TexTrLut, LinearSampler, planet, lightDirs[l], physSky.diskAngularRadius[l]) *
-				         (albedo * GroundFog::SunWrap * 0.0795775 * visibility * GroundFog::SelfShadowing(tauAbove, lightDirs[l].z));
+			if (any(lightColors[l] > 0.0) && dot(lightDirs[l], lightDirs[l]) >= 0.5) {
+				const float3 arriving = lightColors[l] * PhysSky::SampleAtmosphereLightTr(PhysSky::TexTrLut, LinearSampler, planet, lightDirs[l], physSky.diskAngularRadius[l]) *
+				                        (visibility * GroundFog::SelfShadowing(tauAbove, lightDirs[l].z));
+				light += arriving * (albedo * GroundFog::SunWrap * 0.0795775);
+				white += arriving * (albedo * 0.3183099 * max(lightDirs[l].z, 0.2));
+			}
 		}
+		light = lerp(light, white, poolShare);
 	}
 	// The pool's lumpy top: the side of a billow toward the light is brighter, the side away from it darker.
 	light *= lerp(1.0, lerp(0.55, 1.3, pool.sunSide), poolShare);
@@ -924,7 +931,8 @@ namespace GroundFog
 	if (GroundFog::SunLimit > 0.0) {
 		static const float3 luma = float3(0.2126, 0.7152, 0.0722);
 		const float cap = GroundFog::SunLimit * dot(skyLight, luma);
-		light *= cap / max(cap + dot(light, luma), 1e-6);
+		// The pool needs no such limit: it is lit like a white surface, which is the most it can be.
+		light *= lerp(cap / max(cap + dot(light, luma), 1e-6), 1.0, poolShare);
 	}
 	light += skyLight;
 

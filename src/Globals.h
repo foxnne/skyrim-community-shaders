@@ -56,6 +56,7 @@ struct ProceduralNightSky;
 struct HeatHaze;
 struct Rainbows;
 struct GroundFog;
+struct GroundCover;
 struct LightShafts;
 struct CameraFX;
 struct CapsuleShadows;
@@ -178,6 +179,7 @@ namespace globals
 		extern HeatHaze heatHaze;
 		extern Rainbows rainbows;
 		extern GroundFog groundFog;
+		extern GroundCover groundCover;
 		extern LightShafts lightShafts;
 		extern CameraFX cameraFX;
 		extern CapsuleShadows capsuleShadows;

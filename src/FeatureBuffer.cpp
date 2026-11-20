@@ -9,6 +9,7 @@
 #include "Features/ExtendedMaterials.h"
 #include "Features/ExtendedTranslucency.h"
 #include "Features/GrassLighting.h"
+#include "Features/GroundCover.h"
 #include "Features/HairBacklighting.h"
 #include "Features/HairSpecular.h"
 #include "Features/HorizonFix.h"
@@ -90,5 +91,6 @@ std::pair<unsigned char*, size_t> GetFeatureBufferData(bool a_inWorld)
 		globals::features::postProcessing.GetCommonBufferData(),
 		globals::features::physicalSky.cbData,
 		globals::features::viewAtmosphere.settings,
-		globals::features::treeWind.GetCommonBufferData());
+		globals::features::treeWind.GetCommonBufferData(),
+		globals::features::groundCover.GetCommonBufferData());
 }

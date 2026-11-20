@@ -238,6 +238,13 @@ float GustPsi(float2 p)
 				GroundFog::FogFloor.Load(int3(left.x, up.y, 0)), GroundFog::FogFloor.Load(int3(right.x, up.y, 0)));
 			const float near = min(level, min(min(min(floors.x, floors.y), min(floors.z, floors.w)), min(min(corners.x, corners.y), min(corners.z, corners.w))));
 			raised = smoothstep(RaisedStart, RaisedEnd, near - lowest);
+			// And a floor far above the terrain is not one the fog lies on, however wide it is: a roof seen from
+			// above, the top of a cliff of rock meshes. Floors up to Floor Max Height over the terrain map (roads on
+			// fill, bridges, town floors; at least 2 m) still count.
+			if (SimFlags & 1u) {
+				const float floorMax = max(GroundFog::FloorMax, 140.0);
+				raised = max(raised, smoothstep(floorMax, floorMax + 105.0, level - groundZ));
+			}
 			// For the drawing of the pool: z says how much this texel is a floor the fog lies on (known, and not
 			// the top of a raised thing), and the slope is weighted by it.
 			floorSlope.xyz = float3(floorSlope.xy, 1.0) * (1.0 - raised);

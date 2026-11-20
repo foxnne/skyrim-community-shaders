@@ -44,8 +44,9 @@ struct GroundCover : Feature
 		bool UseLevelMap = true;        // plain level from the level map when the worldspace has one
 		float PlainLevel = -5000.0f;    // world z of the plain when no level map is used
 		float PlainLevelOffset = 0.0f;  // added to the plain level from either source
-		float SlopeMin = 0.5f;          // normal z where cover starts
-		float SlopeMax = 0.85f;         // normal z of full cover
+		float RiseHeight = 300.0f;      // cover fades in over this height above the plain level: none on rocks lying on the plain
+		float SlopeMin = 0.3f;          // normal z where cover starts
+		float SlopeMax = 0.7f;          // normal z of full cover
 		float NoisePatchSize = 1600.0f;
 		float NoiseDetailSize = 220.0f;
 		float NoiseAmount = 0.6f;
@@ -54,15 +55,16 @@ struct GroundCover : Feature
 		float LuminanceMatch = 0.5f;  // 0: rock keeps its own brightness, 1: takes the grass's
 		float GlossReduction = 0.6f;
 		float CreaseDarkening = 0.3f;
-		float GreyLimit = 0.35f;       // albedo saturation above which a surface is not rock; 1 = no test
-		float WhiteLimit = 0.7f;       // albedo brightness above which a surface is snow or chalk, not rock; 1 = no test
-		float RegionCoverage = 0.05f;  // least share of the surrounding cell that must grow grass
+		float GreyLimit = 0.35f;          // saturation of sqrt(albedo) above which a surface is not rock; 1 = no test
+		float WhiteLimit = 0.85f;         // max channel of sqrt(albedo) above which a surface is snow, not rock; 1 = no test
+		float RegionCoverage = 0.02f;     // least share of the surrounding 4 x 4 cells that must grow grass
+		float MinObjectRadius = 1200.0f;  // placed rock smaller than this (bound radius, game units) is left alone: boulders, piles
 		bool AffectObjectLOD = true;
 		bool AffectTerrain = false;
 		bool Scree = false;
 		float ScreeStrength = 0.35f;
 		float ScreeHeight = 2500.0f;
-		uint DebugView = 0;  // 1: cover weight in magenta
+		uint DebugView = 0;  // see GroundCover::Debug in GroundCover.hlsli; 1: cover weight in magenta, 2: why not
 	};
 	Settings settings;
 
@@ -98,7 +100,8 @@ struct GroundCover : Feature
 		float2 MapOffset{};
 
 		float WhiteLimit = 1;
-		float pad[3]{};
+		float RiseHeight = 0;
+		float pad[2]{};
 	};
 	static_assert(sizeof(PerFrame) == 112);
 
@@ -143,6 +146,7 @@ private:
 
 	std::vector<std::string> rockModels;  // lower-case parts of model paths, see models.txt
 	ankerl::unordered_dense::map<RE::FormID, bool> rockBaseCache;
+	ankerl::unordered_dense::map<RE::FormID, float> rockRadiusCache;  // bound radius of the loaded 3D, by reference
 
 	/** Lists the maps in Data\\textures\\GrassColour\\GrassColourMaps. */
 	void FindMaps();
@@ -150,6 +154,8 @@ private:
 	/** Loads the maps of the current worldspace once per worldspace. Render thread. */
 	void EnsureMaps();
 	bool IsRock(RE::TESObjectREFR* a_ref);
+	/** Bound radius of the reference's loaded 3D (scaled), 0 when it has none. */
+	float GetRadius(RE::TESObjectREFR* a_ref);
 	void SetupGeometry(RE::BSRenderPass* a_pass);
 
 	struct Hooks

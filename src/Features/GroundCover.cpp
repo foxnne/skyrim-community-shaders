@@ -14,6 +14,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	UseLevelMap,
 	PlainLevel,
 	PlainLevelOffset,
+	RiseHeight,
 	SlopeMin,
 	SlopeMax,
 	NoisePatchSize,
@@ -27,6 +28,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	GreyLimit,
 	WhiteLimit,
 	RegionCoverage,
+	MinObjectRadius,
 	AffectObjectLOD,
 	AffectTerrain,
 	Scree,
@@ -115,6 +117,7 @@ void GroundCover::EnsureMaps()
 		return;
 	// One attempt per worldspace: a map that fails to load is not tried again every frame.
 	mapWorldspace = name;
+	rockRadiusCache.clear();
 	colourMap = nullptr;
 	levelMap = nullptr;
 	mapState = name.empty() ? "interior" : "no grass colour map for this worldspace";
@@ -178,6 +181,7 @@ GroundCover::PerFrame GroundCover::GetCommonBufferData()
 	data.CreaseDarkening = settings.CreaseDarkening;
 	data.GreyLimit = settings.GreyLimit;
 	data.WhiteLimit = settings.WhiteLimit;
+	data.RiseHeight = settings.RiseHeight;
 	data.RegionCoverage = settings.RegionCoverage;
 	// The shader adds the level map's altitude to this when kLevelMap is set.
 	data.PlainLevel = settings.PlainLevelOffset + (useLevelMap ? 0.0f : settings.PlainLevel);
@@ -226,13 +230,31 @@ bool GroundCover::IsRock(RE::TESObjectREFR* a_ref)
 	return rock;
 }
 
+float GroundCover::GetRadius(RE::TESObjectREFR* a_ref)
+{
+	const auto id = a_ref->GetFormID();
+	if (const auto cached = rockRadiusCache.find(id); cached != rockRadiusCache.end())
+		return cached->second;
+	const auto* root = a_ref->Get3D();
+	if (!root)
+		return 0.0f;  // not cached: it is asked again once the 3D is there
+	const float radius = root->worldBound.radius;
+	if (rockRadiusCache.size() > 16384)
+		rockRadiusCache.clear();
+	rockRadiusCache.emplace(id, radius);
+	return radius;
+}
+
 void GroundCover::SetupGeometry(RE::BSRenderPass* a_pass)
 {
 	using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
 	auto& descriptor = globals::state->permutationData.ExtraShaderDescriptor;
 	const auto* property = a_pass->shaderProperty;
-	// Decals on a rock belong to the rock's reference but are not rock.
-	if (a_pass->geometry && !(property && property->flags.any(Flag::kDecal, Flag::kDynamicDecal)) && IsRock(a_pass->geometry->GetUserData()))
+	// Decals on a rock belong to the rock's reference but are not rock. Small rock (boulders and piles on the
+	// plain) is left alone: the cover belongs on the mountains' feet.
+	auto* ref = a_pass->geometry ? a_pass->geometry->GetUserData() : nullptr;
+	if (ref && !(property && property->flags.any(Flag::kDecal, Flag::kDynamicDecal)) && IsRock(ref) &&
+		(settings.MinObjectRadius <= 0.0f || GetRadius(ref) >= settings.MinObjectRadius))
 		descriptor |= static_cast<uint>(State::ExtraShaderDescriptors::GroundCover);
 	else
 		descriptor &= ~static_cast<uint>(State::ExtraShaderDescriptors::GroundCover);
@@ -280,6 +302,10 @@ void GroundCover::DrawSettings()
 		ImGui::SliderFloat("Plain Level Offset", &settings.PlainLevelOffset, -10000.0f, 10000.0f, "%.0f");
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("Raises or lowers the plain level, from the map or from Plain Level.");
+		}
+		ImGui::SliderFloat("Rise Height", &settings.RiseHeight, 0.0f, 3000.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("No cover at or below the plain level; it fades in over this height above it. Keeps it off rocks lying on the plain. 0 = no fade.");
 		}
 		ImGui::TreePop();
 	}
@@ -338,6 +364,10 @@ void GroundCover::DrawSettings()
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("How bright a surface may be and still count as rock. Keeps the cover off snow painted on a mesh. 1 = no test.");
 		}
+		ImGui::SliderFloat("Min Rock Size", &settings.MinObjectRadius, 0.0f, 8000.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("Placed rock smaller than this (bound radius, game units) is left alone: boulders and piles. 0 = all rock in the model list.");
+		}
 		ImGui::SliderFloat("Region Grass", &settings.RegionCoverage, 0.0f, 0.5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("Share of the surrounding cell that must grow grass. Keeps the cover out of regions without any.");
@@ -355,9 +385,18 @@ void GroundCover::DrawSettings()
 		ImGui::TreePop();
 	}
 
-	bool debugWeight = settings.DebugView == 1;
-	if (ImGui::Checkbox("Show Cover in Magenta", &debugWeight))
-		settings.DebugView = debugWeight ? 1u : 0u;
+	static constexpr const char* debugViews[] = { "Off", "Cover (magenta)", "Why not (first failing term)", "Slope term", "Height over plain",
+		"Rise x band term", "Noise", "Snow term (1 - snow)", "Grey test", "White test", "Region test", "Surfaces it runs on" };
+	int debugView = static_cast<int>(std::min<uint>(settings.DebugView, std::size(debugViews) - 1));
+	if (ImGui::Combo("Debug View", &debugView, debugViews, static_cast<int>(std::size(debugViews))))
+		settings.DebugView = static_cast<uint>(debugView);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text(
+			"Why not: red too steep, white snow, yellow too colourful, cyan too bright, orange no grass in the area,\n"
+			"blue at or below the plain, purple above the band, green passes (brighter = more cover).\n"
+			"Surfaces the layer does not run on are dark grey in every view from Why not on.\n"
+			"Height: blue below the plain, green to red up the band, dark red above it. Single terms: black 0, white 1.");
+	}
 }
 
 void GroundCover::LoadSettings(json& o_json)
@@ -383,6 +422,9 @@ void GroundCover::LoadSettings(json& o_json)
 	sanitize(settings.CreaseDarkening, defaults.CreaseDarkening, 0.0f, 1.0f);
 	sanitize(settings.GreyLimit, defaults.GreyLimit, 0.01f, 1.0f);
 	sanitize(settings.WhiteLimit, defaults.WhiteLimit, 0.05f, 1.0f);
+	sanitize(settings.RiseHeight, defaults.RiseHeight, 0.0f, 100000.0f);
+	sanitize(settings.MinObjectRadius, defaults.MinObjectRadius, 0.0f, 100000.0f);
+	settings.DebugView = std::min(settings.DebugView, 11u);
 	sanitize(settings.RegionCoverage, defaults.RegionCoverage, 0.0f, 1.0f);
 	sanitize(settings.ScreeStrength, defaults.ScreeStrength, 0.0f, 1.0f);
 	sanitize(settings.ScreeHeight, defaults.ScreeHeight, 1.0f, 100000.0f);

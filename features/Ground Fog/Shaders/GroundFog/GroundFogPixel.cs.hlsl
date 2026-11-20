@@ -183,6 +183,52 @@ namespace GroundFog
 		return GroundFill;
 	}
 
+	// The fog over a unit of ground, as optical depth straight up, of each layer where it rests at its mean amount.
+	float PoolColumn()
+	{
+		// The pool's soft profile up to the lower of its thickness and its cut holds about 0.45 of it at full
+		// density; what rests in a dip is about PoolRestMean of the mean amount.
+		return PoolExtinction * PoolDensityScale * 0.45 * min(PoolThickness, PoolHardTop) * PoolRestMean;
+	}
+
+	float SheetColumn(float top)
+	{
+		return GroundExtinction * MakeProfile(top, 0.0).total;
+	}
+
+	float ValleyColumn()
+	{
+		return FarExtinction * MakeProfile(0.7 * FarThickness, 0.0).total;
+	}
+
+	// The sheet as the bridge between the pool and the valley layer, so the three are one body of fog with no ring
+	// where one hands over to the next. Near the pool the sheet takes the pool's height and its column of fog; by
+	// FadeStart (or twice the pool's reach) it is the sheet the settings make; and as it fades out into the valley
+	// layer its column goes BridgeToValley of the way (in log) toward the valley layer's. Between, the column
+	// changes geometrically with distance. x: factor on the sheet's density, y: on its top.
+	float2 SheetBridge(float t)
+	{
+		if (DebugMode == 1u || DebugMode == 2u)
+			return 1.0;
+		const float meanTop = 0.42 * Thickness;
+		const float own = SheetColumn(meanTop);
+		if (own <= 0.0)
+			return 1.0;
+		float logColumn = log(own);
+		float topScale = 1.0;
+		const float poolColumn = PoolColumn();
+		if (PoolExtinction > 0.0 && poolColumn > 0.0) {
+			const float w = smoothstep(0.5 * PoolEnd, max(FadeStart, 2.0 * PoolEnd), t);
+			logColumn = lerp(log(poolColumn), logColumn, w);
+			topScale = lerp(min(min(PoolThickness, PoolHardTop) / meanTop, 1.0), 1.0, w);
+		}
+		const float valleyColumn = ValleyColumn();
+		if (FarExtinction > 0.0 && valleyColumn > 0.0)
+			logColumn = lerp(logColumn, log(valleyColumn), BridgeToValley * smoothstep(FadeStart, FadeEnd, t));
+		// The profile's column is proportional to its top.
+		return float2(clamp(exp(logColumn) / (own * topScale), 0.01, 100.0), topScale);
+	}
+
 	// How much a visible surface counts as the ground, by its height above the mapped ground. Rocks, roads, steps
 	// and ground meshes do; roofs, bridges and tree crowns do not. The caller multiplies by how much it faces up.
 	float SurfaceWeight(float above)
@@ -308,13 +354,19 @@ namespace GroundFog
 			// Shared by the sheet and the near volume: they are one body of fog, thin far away and tall close by,
 			// placed by the resting amount (the same pieces as RestingAmountAt, with the slow reads held).
 			float place = RestingAmount(coverage, ground, joint.shade, BurnSunlitNear, xyAbs, reach);
-			if (place > 0.0 && BasinStrength > 0.0) {
+			if (place > 0.0 && (BasinStrength > 0.0 || SheetPooling > 0.0)) {
 				if (Stale(slow.tAround, joint.t)) {
 					slow.around = GroundAround(xy, BasinRadius);
 					slow.tAround = joint.t;
 					++taps;
 				}
-				place *= Basin(slow.around, ground.terrain);
+				// Like the pool: in what lies lower than the land around it, over water and in shade; open level
+				// ground and rises keep only SheetFlat. (By the basin rule alone level ground kept two thirds of
+				// the most there is, and the fog was everywhere.)
+				const float hollow = clamp((slow.around - ground.terrain) * InvBasinDepth, -1.0, 1.0);
+				const float low = max(smoothstep(-0.05, 0.5, hollow), ground.water);
+				const float pooled = (1.0 + BasinStrength) * low + SheetFlat + SheetShade * joint.shade * smoothstep(-0.2, 0.0, hollow);
+				place *= lerp(BasinStrength > 0.0 ? Basin(slow.around, ground.terrain) : 1.0, pooled, SheetPooling);
 			}
 			place *= DensityModifier(xyAbs, reach);
 			// Inside the simulation's window: by how far the fog there is from rest (a wake, a pile-up).
@@ -322,10 +374,12 @@ namespace GroundFog
 				place *= SimDisturbance(xy);
 				++taps;
 			}
-			joint.sheet.place = place * sheetFade;
+			// One body with the pool and the valley layer: its column of fog continues theirs (SheetBridge).
+			const float2 bridge = SheetBridge(joint.t);
+			joint.sheet.place = place * sheetFade * bridge.x;
 			joint.near.place = place * nearFade;
 			if (joint.sheet.inside)
-				joint.sheet.top = LayerTop(xyAbs, reach);
+				joint.sheet.top = max(LayerTop(xyAbs, reach) * bridge.y, 1.0);
 			if (joint.near.inside)
 				joint.near.top = max(NearThickness * Breathing(xyAbs), 1.0);
 		}

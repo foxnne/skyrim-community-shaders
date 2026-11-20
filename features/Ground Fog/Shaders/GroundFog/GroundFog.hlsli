@@ -128,6 +128,18 @@ namespace GroundFog
 	static const float2 ValleySlope = float2(0.2, 0.5);
 	static const float2 ValleyDoubt = float2(0.9, 2.5);
 	static const float ValleyLowest = 0.4;
+	//
+	// The sheet between the pool and the valley layer (GroundFogPixel.cs.hlsl, SheetBridge and its placement). It
+	// rests like the pool: in what lies lower than the land around it (the basin read), over water and in terrain
+	// shade, SheetPooling of the way from the old basin rule; open level ground keeps SheetFlat, shade adds up to
+	// SheetShade. Its column of fog goes BridgeToValley of the way to the valley layer's as it fades into it.
+	// PoolRestMean: what the pool shows of its column where it hands over, relative to its mean amount: what rests in
+	// a dip, times the levelling off of its optical depth seen at a grazing angle (PoolTauKnee), about half.
+	static const float SheetPooling = 0.85;
+	static const float SheetFlat = 0.06;
+	static const float SheetShade = 0.4;
+	static const float BridgeToValley = 0.6;
+	static const float PoolRestMean = 0.5;
 
 	struct Cell
 	{

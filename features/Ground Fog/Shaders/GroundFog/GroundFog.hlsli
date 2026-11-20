@@ -110,6 +110,18 @@ namespace GroundFog
 
 	static const float TopLimit = 0.3;  // banks raise the layer by at most this share per unit of BankStrength
 
+	// ---------------------------------------------------------------------------------------------------------
+	// Tuning of the bridged fog (pool, sheet and valley layer as one body). Shader constants, so they can be tried
+	// by hot reload; the ones worth a setting are promoted to GroundFogCB.
+	//
+	// Lighting, the same for every layer: fog droplets scatter forward. A Henyey-Greenstein lobe of FogForward, with
+	// SunWrap of the light sent out evenly, plus two octaves of multiple scattering (Wrenninge's approximation):
+	// each octave is FogMultiple times as strong as the one before, sees the light through FogMultipleReach times
+	// as much of the fog above it, and is half as forward. So thick fog in shade glows softly instead of going grey.
+	static const float FogForward = 0.6;
+	static const float FogMultiple = 0.6;
+	static const float FogMultipleReach = 0.35;
+
 	struct Cell
 	{
 		float extinction;  // mean extinction of the cell, per game unit
@@ -750,6 +762,36 @@ namespace GroundFog
 	float SelfShadowing(float tauAbove, float lightZ)
 	{
 		return exp(-SelfShadow * tauAbove / max(lightZ, 0.15));
+	}
+
+	float PhaseHG(float cosine, float g)
+	{
+		const float g2 = g * g;
+		const float denom = max(1.0 + g2 - 2.0 * g * cosine, 1e-4);
+		return 0.0795775 * (1.0 - g2) / (denom * sqrt(denom));
+	}
+
+	// Light the fog scatters toward the camera per unit of incoming light and of extinction, for a light whose
+	// direction makes `cosine` with the view ray, through fog of optical depth tauAbove over the point (toward the
+	// light, along the vertical). Single scattering plus two octaves of multiple scattering; see FogForward.
+	// body: optical depth of the fog around the point, which is how much light there is to scatter more than once:
+	// a thin veil gets almost none of the octaves, a thick bank all of them.
+	float FogScatter(float cosine, float tauAbove, float lightZ, float body)
+	{
+		const float tauToLight = SelfShadow * tauAbove / max(lightZ, 0.15);
+		const float multiple = OneMinusExp(max(body, 0.0));
+		float sum = 0.0;
+		float strength = 1.0;
+		float reach = 1.0;
+		float g = FogForward;
+		[unroll] for (uint i = 0u; i < 3u; ++i)
+		{
+			sum += strength * lerp(PhaseHG(cosine, g), 0.0795775, SunWrap) * exp(-reach * tauToLight);
+			strength *= FogMultiple * multiple;
+			reach *= FogMultipleReach;
+			g *= 0.5;
+		}
+		return sum;
 	}
 
 	// Mean incident sky radiance, clouds included.

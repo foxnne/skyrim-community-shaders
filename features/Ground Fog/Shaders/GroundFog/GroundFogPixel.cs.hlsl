@@ -926,36 +926,33 @@ namespace GroundFog
 	const float skyDimming = lerp(1.0, sqrt(saturate(cloud)), GroundFog::CloudDarkening);
 	diffuseVisibility *= skyDimming;
 
-	float3 light = AtmosphereLight(0u, lightPos, dir, physSky.sunDir, physSky.sunlightColor, 0.0, albedo,
-		visibility * GroundFog::SelfShadowing(tauAbove, physSky.sunDir.z), diffuseVisibility);
-	light += AtmosphereLight(1u, lightPos, dir, physSky.masserDir, physSky.masserColor, 0.0, albedo,
-		visibility * GroundFog::SelfShadowing(tauAbove, physSky.masserDir.z), diffuseVisibility);
-	light += AtmosphereLight(2u, lightPos, dir, physSky.secundaDir, physSky.secundaColor, 0.0, albedo,
-		visibility * GroundFog::SelfShadowing(tauAbove, physSky.secundaDir.z), diffuseVisibility);
-	// What a white surface lying where the pool lies would send back of the sun and moons: that is what the pool is
-	// lit like, a white diffuse body in the scene's light (the same colour after the atmosphere, the same shadow
-	// from the sun map, its own depth over the point), and never more. Its lumpy top catches a low light better
-	// than level ground does, hence the least angle. The thin layers further out keep the scattering of a haze
-	// (the forward-peaked phase above) with a share of it sent out evenly.
+	// One way of lighting for every layer, so the pool, the sheet and the valley layer meet without a seam in colour
+	// or brightness: a scattering medium (GroundFog::FogScatter), forward peaked like fog droplets, with multiple
+	// scattering that brightens a thick body, lit by the sun and moons in the colour the atmosphere gives them at
+	// the fog. The atmosphere's own multiple scattering (the medium volume's term) comes on top, as for the shared
+	// volume. The pool was lit like a white diffuse surface: that read as a grey film whatever the light did.
+	const float valleyShare = seen.valley / seen.share;
+	float3 light = AtmosphereLight(0u, lightPos, dir, physSky.sunDir, physSky.sunlightColor, 0.0, albedo, 0.0, diffuseVisibility);
+	light += AtmosphereLight(1u, lightPos, dir, physSky.masserDir, physSky.masserColor, 0.0, albedo, 0.0, diffuseVisibility);
+	light += AtmosphereLight(2u, lightPos, dir, physSky.secundaDir, physSky.secundaColor, 0.0, albedo, 0.0, diffuseVisibility);
 	{
 		const float3 planet = PhysSky::GetMediumPlanetPosition(lightPos);
 		const float3 lightDirs[3] = { physSky.sunDir, physSky.masserDir, physSky.secundaDir };
 		const float3 lightColors[3] = { physSky.sunlightColor, physSky.masserColor, physSky.secundaColor };
-		float3 white = 0.0;
+		// How much fog there is around the point to scatter light more than once: the fog over it and a share of
+		// what the ray went through (a bank seen edge-on is thick around every point of it).
+		const float body = 2.0 * tauAbove + 0.35 * min(seen.tau, 6.0) + poolShare;
 		[unroll] for (uint l = 0u; l < 3u; ++l)
 		{
 			if (any(lightColors[l] > 0.0) && dot(lightDirs[l], lightDirs[l]) >= 0.5) {
-				const float3 arriving = lightColors[l] * PhysSky::SampleAtmosphereLightTr(PhysSky::TexTrLut, LinearSampler, planet, lightDirs[l], physSky.diskAngularRadius[l]) *
-				                        (visibility * GroundFog::SelfShadowing(tauAbove, lightDirs[l].z));
-				light += arriving * (albedo * GroundFog::SunWrap * 0.0795775);
-				white += arriving * (albedo * 0.3183099 * max(lightDirs[l].z, 0.2));
+				const float3 arriving = lightColors[l] * PhysSky::SampleAtmosphereLightTr(PhysSky::TexTrLut, LinearSampler, planet, lightDirs[l], physSky.diskAngularRadius[l]) * visibility;
+				light += arriving * albedo * GroundFog::FogScatter(dot(dir, lightDirs[l]), tauAbove, lightDirs[l].z, body);
 			}
 		}
-		light = lerp(light, white, poolShare);
 	}
-	// The pool's lumpy top: the side of a billow toward the light is brighter, the side away from it darker.
-	// (Both are about 0.5 on average, and these average 1: shading only, no light is lost.)
-	light *= lerp(1.0, lerp(0.7, 1.3, pool.sunSide), poolShare);
+	// The pool's lumpy top: the side of a billow toward the light is a little brighter, the side away from it a
+	// little darker. (Both are about 0.5 on average: shading only, no light is lost.)
+	light *= lerp(1.0, lerp(0.8, 1.2, pool.sunSide), poolShare);
 	light *= GroundFog::SunScale;
 	// Sky light reaches fog in the shadow of terrain and objects too, so it takes no direct visibility.
 	// The sky's light on the fog is what the open sky gives, less what stands over the fog: under a canopy or
@@ -999,8 +996,9 @@ namespace GroundFog
 	if (GroundFog::SunLimit > 0.0) {
 		static const float3 luma = float3(0.2126, 0.7152, 0.0722);
 		const float cap = GroundFog::SunLimit * dot(skyLight, luma);
-		// The pool needs no such limit: it is lit like a white surface, which is the most it can be.
-		light *= lerp(cap / max(cap + dot(light, luma), 1e-6), 1.0, poolShare);
+		// Only the sheet: the valley layer far away keeps its glow toward the sun (that is what makes a distant
+		// bank read as lit mist), and the pool is lit as a thick body whose brightness its own scattering bounds.
+		light *= lerp(cap / max(cap + dot(light, luma), 1e-6), 1.0, saturate(poolShare + valleyShare));
 	}
 	light += skyLight;
 

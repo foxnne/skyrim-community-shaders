@@ -108,6 +108,7 @@ public:
 		bool EnableMultiBounce = false;
 		bool UseDynamicCubemapsAsFallback = true;
 		float DiffuseCubemapMult = 1.0f;
+		float FallbackSkyBoost = 1.0f;  // share of the up-facing sky boost in the ambient fallback
 		// NRD REBLUR
 		bool EnableREBLUR = true;
 		NRD::REBLURSettings Reblur;
@@ -170,8 +171,10 @@ public:
 		uint ReplaceAmbient;
 		float AOPower;
 		float ILSaturation;
-		float pad0[3];
+		float FallbackSkyBoost;
+		float pad0[2];
 	};
+	static_assert(sizeof(SharedData) == 32);
 
 	SharedData GetCommonBufferData();
 

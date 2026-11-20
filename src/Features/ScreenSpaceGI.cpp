@@ -37,6 +37,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	EnableMultiBounce,
 	UseDynamicCubemapsAsFallback,
 	DiffuseCubemapMult,
+	FallbackSkyBoost,
 	EnableREBLUR,
 	Reblur,
 	DiffusePrepassBlurRadius,
@@ -228,6 +229,13 @@ void ScreenSpaceGI::DrawSettings()
 						resetReblurHistory = true;
 						hasMultiBounceHistory = false;
 					}
+					if (ImGui::SliderFloat(T(TKEY("fallback_sky_boost"), "Sky Fill Boost"), &settings.FallbackSkyBoost, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp)) {
+						resetReblurHistory = true;
+						hasMultiBounceHistory = false;
+					}
+					if (auto _tt = Util::HoverTooltipWrapper()) {
+						ImGui::Text("%s", T(TKEY("fallback_sky_boost_tooltip"), "Extra sky light on surfaces that face up, outdoors, where indirect rays miss the screen. The extra is larger the lower Skylighting's Min Diffuse Visibility is. 1 = full: brighter open ground and forest floor, flatter sun to shade contrast. 0 = none: darker shade, stronger sun."));
+					}
 				}
 			}
 		}
@@ -360,6 +368,7 @@ void ScreenSpaceGI::LoadSettings(json& o_json)
 	ResetIfOutOfRange(settings.AOPower, 0.0f, 6.0f, defaults.AOPower);
 	ResetIfOutOfRange(settings.GIStrength, 0.0f, 6.0f, defaults.GIStrength);
 	ResetIfOutOfRange(settings.DiffuseCubemapMult, 0.0f, 5.0f, defaults.DiffuseCubemapMult);
+	settings.FallbackSkyBoost = Util::ClampFinite(settings.FallbackSkyBoost, defaults.FallbackSkyBoost, 0.0f, 1.0f);
 	ResetIfOutOfRange(settings.DiffusePrepassBlurRadius, 0.0f, 75.0f, defaults.DiffusePrepassBlurRadius);
 	if (settings.QuarterRes)
 		settings.HalfRes = false;
@@ -1203,6 +1212,7 @@ ScreenSpaceGI::SharedData ScreenSpaceGI::GetCommonBufferData()
 	data.ReplaceAmbient = (data.EnableIL && UsesCubemapFallback()) ? 1u : 0u;
 	data.AOPower = settings.AOPower;
 	data.ILSaturation = appliedE11Overlay.active ? userSettings.E11ILSaturation : 1.0f;
+	data.FallbackSkyBoost = std::clamp(settings.FallbackSkyBoost, 0.0f, 1.0f);
 	return data;
 }
 

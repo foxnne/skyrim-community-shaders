@@ -442,7 +442,8 @@ namespace SharedData
 		uint ReplaceAmbient;
 		float AOPower;
 		float ILSaturation;
-		float3 pad0;
+		float FallbackSkyBoost;  // share of the up-facing sky boost in the ambient fallback, 1 = full, 0 = none
+		float2 pad0;
 	};
 
 	struct SSRSettings

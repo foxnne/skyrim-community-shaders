@@ -1,5 +1,7 @@
 {
     "_meta": {
+        "feature.screen_space_gi.fallback_sky_boost": "Sky Fill Boost",
+        "feature.screen_space_gi.fallback_sky_boost_tooltip": "Extra sky light on surfaces that face up, outdoors, where indirect rays miss the screen. The extra is larger the lower Skylighting's Min Diffuse Visibility is. 1 = full: brighter open ground and forest floor, flatter sun to shade contrast. 0 = none: darker shade, stronger sun.",
         "feature.tree_wind.near_tree_min_roughness": "Leaf Roughness Floor",
         "feature.tree_wind.near_tree_min_roughness_tooltip": "Leaves are never glossier than this. Higher = what is left of the shine spreads into a soft sheen and reflections on leaves blur. 0 = as the mesh has it.",
         "feature.tree_wind.near_tree_screen_shadow": "Leaf Contact Shadows",

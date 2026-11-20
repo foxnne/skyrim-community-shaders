@@ -114,9 +114,13 @@ static const float RaisedEnd = 60.0;
 // that with the camera still it comes to rest and stays.
 // Pooling: what level ground holds of the even amount, the mean rise of the floor around a place (game units) that
 // adds the whole even amount to it (and a place that much above its surroundings holds none), and the most.
-static const float RestFlat = 0.5;
-static const float RestDepth = 35.0;
-static const float RestMax = 1.6;
+// Level open ground holds little (RestFlat of the even amount: a few thin wisps), and the fog gathers where the
+// floor lies lower than the floor around it: the mean rise of the floor 2, 4 and 8 m out (RestDepth of it gives the
+// whole even amount more), and of the terrain map about 6 m out (RestDepthMap). A rise holds none.
+static const float RestFlat = 0.12;
+static const float RestDepth = 25.0;
+static const float RestDepthMap = 50.0;
+static const float RestMax = 1.8;
 static const float FloorDropSlack = 1.0;
 static const float FloorRiseSlack = 8.0;
 static const float MaxSpeed = 1500.0;
@@ -176,6 +180,7 @@ float GustPsi(float2 p)
 	float4 floorSlope = 0.0;
 	float raised = 0.0;
 	float lowness = RestFlat;
+	float edge = 0.0;  // how steeply what rests changes here: the rim of a pool
 	if (had) {
 		const int2 left = max(before - int2(1, 0), 0);
 		const int2 right = min(before + int2(1, 0), last);
@@ -186,6 +191,7 @@ float GustPsi(float2 p)
 		const float4 d = GroundFog::FogSim.Load(int3(down, 0));
 		const float4 u = GroundFog::FogSim.Load(int3(up, 0));
 		const float2 carried = GroundFog::FogSim.Load(int3(before, 0)).xy;
+		edge = saturate(length(float2(r.w - l.w, u.w - d.w)) * 2.0);
 
 		// 1. Carry.
 		const float2 from = clamp(float2(before) + 0.5 - carried * DeltaTime / TexelSize, 0.5, float2(size) - 0.5);
@@ -249,14 +255,15 @@ float GustPsi(float2 p)
 			// the top of a raised thing), and the slope is weighted by it.
 			floorSlope.xyz = float3(floorSlope.xy, 1.0) * (1.0 - raised);
 
-			// How low this floor lies among the floor around it, a stride and two strides out: the mean of how
-			// far the floor there stands above it. What stands far above it is a wall or a thing, not ground,
-			// and says nothing; what lies far below counts as a step down and no more.
-			static const int2 around[16] = { int2(4, 0), int2(-4, 0), int2(0, 4), int2(0, -4), int2(3, 3), int2(-3, 3), int2(3, -3), int2(-3, -3),
-				int2(8, 0), int2(-8, 0), int2(0, 8), int2(0, -8), int2(6, 6), int2(-6, 6), int2(6, -6), int2(-6, -6) };
+			// How low this floor lies among the floor around it, 2, 4 and 8 m out: the mean of how far the floor
+			// there stands above it. What stands far above it is a wall or a thing, not ground, and says nothing;
+			// what lies far below counts as a step down and no more.
+			static const int2 around[24] = { int2(5, 0), int2(-5, 0), int2(0, 5), int2(0, -5), int2(4, 4), int2(-4, 4), int2(4, -4), int2(-4, -4),
+				int2(10, 0), int2(-10, 0), int2(0, 10), int2(0, -10), int2(7, 7), int2(-7, 7), int2(7, -7), int2(-7, -7),
+				int2(20, 0), int2(-20, 0), int2(0, 20), int2(0, -20), int2(14, 14), int2(-14, 14), int2(14, -14), int2(-14, -14) };
 			float sum = 0.0;
 			float count = 0.0;
-			[unroll] for (uint m = 0u; m < 16u; ++m)
+			[unroll] for (uint m = 0u; m < 24u; ++m)
 			{
 				const float other = GroundFog::FogFloor.Load(int3(clamp(before + around[m], 0, last), 0));
 				if (other < GroundFog::FloorUnknown) {
@@ -266,9 +273,15 @@ float GustPsi(float2 p)
 				}
 			}
 			if (count >= 4.0)
-				lowness = clamp(RestFlat + sum / count / RestDepth, 0.0, RestMax);
+				lowness = RestFlat + sum / count / RestDepth;
 		}
 	}
+
+	// And the terrain: how much lower than the land about 6 m around this place is (not over water, whose bed is
+	// under its level surface). Then hold it to its range: a rise holds nothing.
+	if (SimFlags & 1u)
+		lowness += (1.0 - water) * clamp(GroundFog::GroundAround(xy, 420.0) - groundZ, -RaisedEnd, 2.0 * RaisedEnd) / RestDepthMap;
+	lowness = clamp(lowness, 0.0, RestMax);
 
 	// Swirl: the curl of a slowly changing noise carried with the wind.
 	if (Swirl > 0.0) {
@@ -278,7 +291,8 @@ float GustPsi(float2 p)
 										GroundFog::ValueNoise(p + float2(0.0, e)) - GroundFog::ValueNoise(p - float2(0.0, e))) /
 		                        (2.0 * e);
 		// The share that grows with the speed stays below what the damping takes, so eddies cannot feed themselves.
-		velocity += float2(gradient.y, -gradient.x) * Swirl * (6.0 + 0.25 * min(length(velocity - drift), 300.0)) * DeltaTime;
+		// Three times as strong at the rim of a pool, so its edge curls and breaks up while its middle lies still.
+		velocity += float2(gradient.y, -gradient.x) * Swirl * (6.0 + 0.25 * min(length(velocity - drift), 300.0)) * (1.0 + 2.0 * edge) * DeltaTime;
 	}
 
 	// Movers.
@@ -315,7 +329,7 @@ float GustPsi(float2 p)
 	// Water is level, and fog lies on it.
 	lowness = lerp(lowness, max(lowness, 1.0), water);
 	const float place = open * (1.0 - raised) * lerp(1.0, lowness, Pooling);
-	rest = GroundFog::RestPattern(xyAbs, TexelSize, place);
+	rest = GroundFog::RestPattern(xyAbs, TexelSize, place, SwirlTime);
 	float amount = max(rest + delta, 0.0) * gain;
 	amount = max(amount * wear, min(amount, WakeFloor * rest));
 	amount += (rest - amount) * RefillRate;

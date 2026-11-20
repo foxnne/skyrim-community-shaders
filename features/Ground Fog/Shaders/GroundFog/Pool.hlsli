@@ -325,7 +325,9 @@ namespace GroundFog
 		// lower and denser (the column's fog is proportional to the scale, so the density is divided by it), and the
 		// shape averages 1.
 		const float shape = lerp(0.8, 1.2, billow);
-		const float top = max(thick * Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) * lerp(0.4, 1.0, saturate(amount)) * shape, 1.0);
+		// The amount sets the top as well as the density: a thin wisp lies a hand high and is see-through, a pool's
+		// core stands to the full height and is dense.
+		const float top = max(thick * Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) * lerp(0.2, 1.0, smoothstep(0.05, 1.3, amount)) * shape, 1.0);
 		const SoftProfile profile = MakeSoftProfile(top, 0.0, NearFalloff);
 		// Fog thrown up is the same fog over more height: thinner, though not by all of it (it is stirred up too).
 		const float extinction = PoolExtinction * amount * range * share * certain * lerp(1.0, floorness, ground) * rsqrt(1.0 + max(lift, 0.0)) / shape;

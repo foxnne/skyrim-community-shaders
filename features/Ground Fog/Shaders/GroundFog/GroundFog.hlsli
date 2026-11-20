@@ -437,10 +437,12 @@ namespace GroundFog
 	// The noise the wisps of the pool are cut from: the two-octave value noise of the resting fog in Iwillbewarlock's
 	// GroundFog (EqFog in its WindShaders.h, GPL-3.0: weights 2/3 and 1/3, riding the wind), here bent by a broader
 	// noise so the shapes are drawn out and curl. About 0.5, standard deviation 0.16.
-	float WispNoise(float2 xyAbs)
+	// time, seconds: the bend changes over about half a minute, so the shapes curl, merge and break up in still
+	// air too instead of only travelling with the wind.
+	float WispNoise(float2 xyAbs, float time)
 	{
 		const float2 p = (xyAbs - WindTravel) * InvWispScale;
-		const float2 bend = float2(ValueNoise(p * 0.45 + 3.1), ValueNoise(p * 0.45 + 9.7)) - 0.5;
+		const float2 bend = float2(ValueNoise(p * 0.45 + 3.1 + time * float2(0.031, -0.023)), ValueNoise(p * 0.45 + 9.7 + time * float2(-0.027, 0.029))) - 0.5;
 		const float2 q = p + 1.8 * bend;
 		return (2.0 * ValueNoise(q) + ValueNoise(q * 2.3 + 17.0)) / 3.0;
 	}
@@ -457,13 +459,13 @@ namespace GroundFog
 	// travel. The finest structure is added where the pool is drawn (Pool.hlsli), below the simulation's texels.
 	static const float WispPeak = 2.2;
 	static const float WispFeather = 0.34;
-	float RestPattern(float2 xyAbs, float reach, float budget)
+	float RestPattern(float2 xyAbs, float reach, float budget, float time)
 	{
 		const float even = DensityModifier(xyAbs, reach) * budget;
 		if (Wispiness <= 0.0)
 			return even;
 		const float threshold = lerp(0.70, 0.26, saturate(budget / 1.2));
-		const float inside = saturate((WispNoise(xyAbs) - threshold) / WispFeather);
+		const float inside = saturate((WispNoise(xyAbs, time) - threshold) / WispFeather);
 		const float wisp = WispPeak * sqrt(clamp(budget, 0.5, 1.6)) * inside * sqrt(inside) * smoothstep(0.0, 0.15, budget);
 		return lerp(even, wisp, Wispiness);
 	}

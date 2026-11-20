@@ -37,9 +37,10 @@
 #	undef SNOW_COVER
 #endif
 
-// Ground Cover grows on rock: static, opaque geometry, object LOD and terrain. Alpha-tested draws are plants, the
-// trees of object LOD among them.
-#if defined(SKINNED) || defined(SKIN) || defined(EYE) || defined(HAIR) || defined(TREE_ANIM) || defined(DO_ALPHA_TEST) || defined(WORLD_MAP) || defined(FUR_SHELLS)
+// Ground Cover grows on rock: static geometry, object LOD and terrain. Near alpha-tested draws are plants. Object
+// LOD can be alpha tested as a whole block (one atlas for rock and trees), so it keeps the layer; its tree crowns are
+// skipped at run time by their flags and the grey test.
+#if defined(SKINNED) || defined(SKIN) || defined(EYE) || defined(HAIR) || defined(TREE_ANIM) || (defined(DO_ALPHA_TEST) && !defined(LOD)) || defined(WORLD_MAP) || defined(FUR_SHELLS)
 #	undef GROUND_COVER
 #endif
 
@@ -2841,25 +2842,43 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 #	if defined(GROUND_COVER)
 	// After Snow Cover: snow lies on top of the ground cover, never under it.
-#		if defined(LANDSCAPE) || defined(LODLANDSCAPE) || defined(LODLANDNOISE)
+	// Draw path, for debug view 11: 0 placed mesh, 1 object LOD, 2 terrain, 3 terrain LOD.
+#		if defined(LODLANDSCAPE) || defined(LODLANDNOISE)
+	const uint groundCoverPath = 3;
+	const bool groundCoverTerrain = true;
+	const bool groundCoverSurface = (SharedData::groundCoverSettings.Flags & GroundCover::Flags::Terrain) != 0;
+#		elif defined(LANDSCAPE)
+	const uint groundCoverPath = 2;
 	const bool groundCoverTerrain = true;
 	const bool groundCoverSurface = (SharedData::groundCoverSettings.Flags & GroundCover::Flags::Terrain) != 0;
 #		elif defined(LOD)
+	const uint groundCoverPath = 1;
 	const bool groundCoverTerrain = false;
-	const bool groundCoverSurface = (SharedData::groundCoverSettings.Flags & GroundCover::Flags::ObjectLOD) != 0;
+	// Tree crowns in object LOD: Tree Wind and Snow Cover flag those draws.
+	const bool groundCoverSurface = (SharedData::groundCoverSettings.Flags & GroundCover::Flags::ObjectLOD) != 0 &&
+	                                (Permutation::ExtraShaderDescriptor & (Permutation::ExtraFlags::LODTreeCrown | Permutation::ExtraFlags::SnowLODTree)) == 0;
 #		else
+	const uint groundCoverPath = 0;
 	const bool groundCoverTerrain = false;
 	const bool groundCoverSurface = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::GroundCover) != 0;
 #		endif
-	[branch] if (SharedData::groundCoverSettings.DebugView >= GroundCover::Debug::Why && SharedData::groundCoverSettings.Enabled && !groundCoverSurface && inWorld)
+#		if defined(DEFERRED)
+	const bool groundCoverDeferred = true;
+#		else
+	const bool groundCoverDeferred = false;
+#		endif
+	// Not inWorld: forward draws only have it through the per-draw flag, and LOD can be drawn outside the deferred
+	// pass. The world map is compiled out; reflections are left alone.
+	const bool groundCoverRuns = SharedData::groundCoverSettings.Enabled && !inReflection;
+	[branch] if (groundCoverRuns && SharedData::groundCoverSettings.DebugView == GroundCover::Debug::Eligible)
+	{
+		material.BaseColor = GroundCover::DebugDrawPath(groundCoverPath, groundCoverSurface, groundCoverDeferred, inWorld, input.Position.xy);
+	}
+	else if (groundCoverRuns && SharedData::groundCoverSettings.DebugView >= GroundCover::Debug::Why && !groundCoverSurface)
 	{
 		material.BaseColor = GroundCover::DebugNotEligible(material.BaseColor);
 	}
-	else if (SharedData::groundCoverSettings.DebugView == GroundCover::Debug::Eligible && SharedData::groundCoverSettings.Enabled && inWorld)
-	{
-		material.BaseColor = float3(1, 0, 1);
-	}
-	else if (SharedData::groundCoverSettings.Enabled && groundCoverSurface && inWorld)
+	else if (groundCoverRuns && groundCoverSurface)
 	{
 #		if defined(SNOW_COVER)
 		const float groundCoverSnow = snowFactor;

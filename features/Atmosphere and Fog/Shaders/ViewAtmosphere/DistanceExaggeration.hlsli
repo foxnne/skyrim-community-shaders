@@ -24,10 +24,16 @@ namespace ViewAtmosphere
 		const float2 strength = (clamp(settings.distanceExaggeration, 1.0, 16.0) - 1.0) * float2(1.0, saturate(settings.distanceExaggerationHaze));
 		const float start = max(settings.distanceExaggerationStart, 0.0) / GAME_UNIT_TO_M;
 		const float span = max(settings.distanceExaggerationFull / GAME_UNIT_TO_M - start, 1.0 / GAME_UNIT_TO_M);
-		const float t = saturate((distance - start) / span);
+		// The exaggeration stands for a world that is larger horizontally; heights are real. So the ramp follows the
+		// horizontal distance: ground straight below a high camera (a flight, a peak) keeps physical air, while the
+		// horizon keeps the full effect. At eye level the horizontal and the slant distance are the same.
+		const float cosElevation = sqrt(saturate(1.0 - sinElevation * sinElevation));
+		const float horizontal = distance * cosElevation;
+		const float t = saturate((horizontal - start) / span);
 		const float ramp = t * t * (3.0 - 2.0 * t);
 		// Integral of the ramp from the camera to here: the extra length an unlimited ray has gathered so far.
-		const float gathered = span * t * t * t * (1.0 - 0.5 * t) + max(distance - start - span, 0.0);
+		// Integrated over the horizontal distance, then turned back into length along the ray.
+		const float gathered = (span * t * t * t * (1.0 - 0.5 * t) + max(horizontal - start - span, 0.0)) / max(cosElevation, 1e-3);
 
 		// A surface can never have more air in front of it than the sky behind it has in total, or it would end up
 		// hazier than the sky it stands against. Lengths are weighted by density relative to the camera: the whole

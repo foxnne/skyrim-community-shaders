@@ -50,20 +50,20 @@ namespace GroundFog
 	// The simulation's amount counts up to this, and the pool's optical depth along a ray levels off at PoolTauMax:
 	// whatever the simulation or the floor map does in one place, the pool stays a veil.
 	static const float PoolAmountMax = 4.0;
-	static const float PoolTauKnee = 1.5;
-	static const float PoolTauMax = 2.5;
+	static const float PoolTauKnee = 0.7;
+	static const float PoolTauMax = 1.5;
 	// The finest structure of the pool, below the simulation's texels: size of its cells in game units (0.6 m and
 	// a third of that), and how far the air's velocity bends it, in seconds of travel.
 	static const float PoolGrain = 42.0;
 	// Kept short: it is a displacement by the present velocity, not one carried over time, so as the flow dies down
 	// the strands move back by as much (at 0.5 s they visibly sprang back after a runner had stopped).
 	static const float PoolGrainDrag = 0.15;
-	// THE HEIGHT RULE. The pool is a blanket a foot thick at its thickest. No surface more than PoolHardTop above
-	// its floor ever receives pool fog, whatever the settings, the simulation or the floor map say: EvaluatePool
-	// ends with that test (PoolHeightRule), after everything else. The fog itself is cut off at that height too:
-	// its profile keeps the scale Near Thickness gives it (so it is dense nearly up to the cut), and nothing of it
-	// is counted above PoolHardTop. Game units (0.35 m).
-	static const float PoolHardTop = 24.5;
+	// THE HEIGHT RULE. The pool reaches knee height at its thickest. No surface more than PoolHardTop above its
+	// floor ever receives pool fog, whatever the settings, the simulation or the floor map say: EvaluatePool ends
+	// with that test (PoolHeightRule), after everything else. The fog itself thins to nothing by that height: its
+	// profile is scaled to the lower of Near Thickness and the cut (so it has a soft top, not a lid at the cut),
+	// and its top is broken into wisps by the volume's noise. Game units (0.5 m).
+	static const float PoolHardTop = 35.0;
 	// Fog that is struck may stand up to this many times taller for a moment, over the ground only (a plume is
 	// seen against the ground behind it; it still puts nothing on a surface above PoolHardTop).
 	static const float PoolPlumeMax = 2.0;
@@ -72,7 +72,7 @@ namespace GroundFog
 	static const float PoolGroundFacing = 0.5;
 	static const float PoolGroundBand = 7.0;
 	// The pool's top rises and falls with Breathing at this share of its strength: still fog barely breathes.
-	static const float PoolBreathShare = 0.3;
+	static const float PoolBreathShare = 0.1;
 	// The pool's volume. Inside the layer the density varies with height as well as with place (3D noise fixed in
 	// the world, riding the wind, bent by the air's motion): tendrils and gaps at different heights, a broken top.
 	// Within PoolVolumeFull of the camera it is integrated through the layer at PoolVolumeSamples places along the
@@ -80,9 +80,17 @@ namespace GroundFog
 	// closed-form path stands for it (the noise averages 1 there, so the two agree on the mean and the blend between
 	// them does not show as you walk). The camera's distance only changes how finely it is taken; the fog is the
 	// same. Game units.
-	static const float PoolVolumeFull = 350.0;
-	static const float PoolVolumeEnd = 560.0;
-	static const uint PoolVolumeSamples = 6u;
+	static const float PoolVolumeFull = 600.0;
+	static const float PoolVolumeEnd = 900.0;
+	static const uint PoolVolumeSamples = 8u;
+	// Opacity. The pool's extinction is PoolDensityScale of the near layer's (a veil you see the ground through), and
+	// its optical depth along a ray levels off from PoolTauKnee; where the flow has pushed fog together (the amount
+	// stands above what rests there) up to PoolPileKnee, so a wake's rim and a heap read as denser fog.
+	static const float PoolDensityScale = 0.55;
+	static const float PoolPileKnee = 1.6;
+	// Something standing in the fog (a wall, a trunk, a leg) gets the fog in front of its foot only up to this share
+	// of the layer's height, fading from the first value to the second: it never looks coated.
+	static const float2 PoolStandingFade = float2(0.2, 0.65);
 	static const float PoolVoxel = 21.0;
 
 	float Hash3(int3 cell)
@@ -101,13 +109,16 @@ namespace GroundFog
 		return lerp(lower, upper, u.z);
 	}
 
-	// How much denser or thinner than its profile the fog is at a point inside the layer: 0 in a gap, up to 2 in a
-	// tendril, 1 on average. xyAbs: absolute; h: height over the floor; flow: the air's velocity there.
-	float PoolTexture(float2 xyAbs, float h, float2 flow)
+	// How much denser or thinner than its profile the fog is at a point inside the layer: 0 in a gap, up to about 1.7
+	// in a tendril. xyAbs: absolute; h: height over the floor; top: the layer's top there; flow: the air's velocity.
+	// Low down the noise is cut at a low threshold (the fog is nearly whole), toward the top at a high one: the top is
+	// broken into separate wisps and tufts with clear air between them, at different heights, instead of a surface.
+	float PoolTexture(float2 xyAbs, float h, float top, float2 flow)
 	{
 		const float3 p = float3(xyAbs - WindTravel - flow * PoolGrainDrag, 1.6 * h) / PoolVoxel;
 		const float n = 0.65 * ValueNoise3(p) + 0.35 * ValueNoise3(p * 2.3 + 17.0);
-		return lerp(1.0, 2.0 * smoothstep(0.28, 0.72, n), Wispiness);
+		const float cut = lerp(0.22, 0.6, saturate(h / max(top, 1.0)));
+		return lerp(1.0, 1.7 * smoothstep(cut, cut + 0.3, n), Wispiness);
 	}
 
 	// The soft profile, cut off at `cap`: the mean density along a straight piece of ray whose height runs from ha
@@ -329,7 +340,7 @@ namespace GroundFog
 		// less.
 		const float standing = dir.z < 0.0 && riseFloor >= PoolMinSlope ? 1.0 : 0.0;
 		rise = lerp(max(max(riseFloor, -dir.z), PoolMinSlope), rise, ground);
-		const float certain = lerp(standing, 1.0, ground);
+		const float certain = lerp(standing * (1.0 - smoothstep(PoolStandingFade.x, PoolStandingFade.y, start / max(limit, 1.0))), 1.0, ground);
 		if (certain <= 0.0)
 			return pool;
 
@@ -375,11 +386,11 @@ namespace GroundFog
 		// The amount sets the top as well as the density: a thin wisp lies a hand high and is see-through, a pool's
 		// core stands to the full height and is dense.
 		const float breath = 1.0 + (Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) - 1.0) * PoolBreathShare;
-		const float top = max(thick * breath * lerp(0.2, 1.0, smoothstep(0.05, 1.3, amount)) * shape, 1.0);
+		const float top = max(min(thick, limit) * breath * lerp(0.3, 1.0, smoothstep(0.05, 1.3, amount)) * shape, 1.0);
 		const SoftProfile profile = MakeSoftProfile(top, 0.0, NearFalloff);
 		// Fog thrown up is the same fog over more height: thinner, though not by all of it (it is stirred up too).
 		const float place = range * share * certain * lerp(1.0, floorness, ground) * rsqrt(1.0 + max(lift, 0.0)) / shape;
-		const float extinction = PoolExtinction * amount * place;
+		const float extinction = PoolExtinction * PoolDensityScale * amount * place;
 		const float end = start + rise * stretch;
 		float tau = extinction * ClippedLineMean(profile, start, end, limit) * stretch;
 		if (tau <= 0.0)
@@ -390,7 +401,7 @@ namespace GroundFog
 		const float lit = clamp(start + 0.25 * top, 0.15 * top, min(top, limit));
 		float atT = tEnd - 0.4 * within;
 		float atZ = z - start + lit;
-		float above = PoolExtinction * amount * ClippedAbove(profile, lit, limit);
+		float above = PoolExtinction * PoolDensityScale * amount * ClippedAbove(profile, lit, limit);
 		// Low in thick fog less of the sky reaches it: half of what the fog above the point takes counts.
 		lightSky = lerp(1.0, exp(-0.7 * above), 0.5);
 
@@ -416,13 +427,13 @@ namespace GroundFog
 				const float a = clamp(here.z, 0.0, PoolAmountMax);
 				if (a <= 0.0)
 					continue;
-				const float topHere = max(thick * breath * lerp(0.2, 1.0, smoothstep(0.05, 1.3, a)) * shape, 1.0);
+				const float topHere = max(min(thick, limit) * breath * lerp(0.3, 1.0, smoothstep(0.05, 1.3, a)) * shape, 1.0);
 				const SoftProfile p = MakeSoftProfile(topHere, 0.0, NearFalloff);
-				const float density = PoolExtinction * a * place * SoftDensity(p, h) * PoolTexture(at + FrameBuffer::CameraPosAdjust.xy, h, here.xy);
+				const float density = PoolExtinction * PoolDensityScale * a * place * SoftDensity(p, h) * PoolTexture(at + FrameBuffer::CameraPosAdjust.xy, h, topHere, here.xy);
 				const float d = density * step;
 				if (d <= 0.0)
 					continue;
-				const float aboveHere = PoolExtinction * a * ClippedAbove(p, h, limit);
+				const float aboveHere = PoolExtinction * PoolDensityScale * a * ClippedAbove(p, h, limit);
 				const float weight = transmittance * OneMinusExp(d);
 				vTau += d;
 				if (s > back)
@@ -455,7 +466,10 @@ namespace GroundFog
 		if (tau <= 0.0)
 			return pool;
 		// Levels off: no single place can turn the pool into a wall.
-		pool.tau = tau <= PoolTauKnee ? tau : PoolTauKnee + (PoolTauMax - PoolTauKnee) * OneMinusExp((tau - PoolTauKnee) / (PoolTauMax - PoolTauKnee));
+		const float pile = saturate((state.z / max(state.w, 0.05) - 1.0) / 1.5);
+		const float knee = lerp(PoolTauKnee, PoolPileKnee, pile);
+		const float most = knee + (PoolTauMax - PoolTauKnee);
+		pool.tau = tau <= knee ? tau : knee + (most - knee) * OneMinusExp((tau - knee) / (most - knee));
 		pool.tauNear = min(tauFront, tau) * pool.tau / tau;
 		pool.t = atT;
 		pool.z = atZ;

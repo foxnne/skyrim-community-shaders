@@ -150,7 +150,7 @@ cbuffer VolumetricCloudConstants : register(b1)
 	float4 MiddleCloudBandShape;  // thickness contrast, displacement (game units), wavelength (game units), enabled
 	float4 HorizonCloudShape;     // coverage (0 = none), base altitude, top altitude (game units), type (0 towers .. 1 bank)
 	float4 HorizonCloudLayer;     // distance of the near shell (game units), density, drift (turns), brightness
-	float4 HorizonCloudExtra;     // shape seed, unused
+	float4 HorizonCloudExtra;     // shape seed, far shell distance scale, sunlit face radiance, light falloff inside the cloud
 };
 Texture2D<float4> TexTransmittance : register(t1);
 Texture3D<float4> TexAerialPerspective : register(t2);

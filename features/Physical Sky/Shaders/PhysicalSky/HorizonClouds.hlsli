@@ -4,23 +4,17 @@
 // Horizon clouds: banks and towers far beyond the ray-marched range (tens of kilometres past the map), seen edge-on
 // where the sky meets the sea or the land.
 //
-// They are drawn as two upright shells around the camera, at the set distance and at 1.8 times that. Each sky ray
+// They are drawn as two upright shells around the camera, at the set distance and at a multiple of it (1.8 by default). Each sky ray
 // meets a shell at a known height above the curved sea, so the band sits on the horizon from the ground and sinks
 // below eye level from altitude, the way real distant cloud does. The shape is a noise function of direction and
 // height (no textures, no marching, nothing stored between frames, so nothing can flicker or pop); the light is the
 // same sun or moon colour through the same air as the ray-marched clouds, and the air in front comes from the same
 // aerial perspective data as the sky behind. Evaluated once per sky pixel when the cloud result is filtered.
 //
-// Tuning by shader reload:
-#ifndef HORIZON_CLOUD_FAR_SCALE
-#	define HORIZON_CLOUD_FAR_SCALE 1.8  // distance of the second shell, as a multiple of the first
-#endif
-#ifndef HORIZON_CLOUD_LIT
-#	define HORIZON_CLOUD_LIT 0.22  // radiance of a fully sunlit cloud face per unit of sun illuminance (white card: 0.318)
-#endif
-#ifndef HORIZON_CLOUD_SHADE
-#	define HORIZON_CLOUD_SHADE 4.0  // how fast light dies inside the cloud; higher = darker bases and far sides
-#endif
+// Live in HorizonCloudExtra (Physical Sky's menu, Horizon Clouds):
+// y: distance of the second shell, as a multiple of the first (1.8)
+// z: radiance of a fully sunlit cloud face per unit of sun illuminance (0.22; a white card is 0.318)
+// w: how fast light dies inside the cloud; higher = darker bases and far sides (4)
 
 float3 CloudScreenRay(uint2 pixel);
 
@@ -198,12 +192,12 @@ namespace HorizonClouds
 		const float behind = dot(light.xy, outward);
 		const float topTowardLight = TopHeight(turn + warp + along * 0.35 / shell.towerPeriod, mask, shell);
 		const float depthTowardLight = max(topTowardLight * lumps - (height + light.z * 0.25), 0.0);
-		const float lit = exp(-depthTowardLight * HORIZON_CLOUD_SHADE);
+		const float lit = exp(-depthTowardLight * HorizonCloudExtra.w);
 		const float facing = saturate(0.5 - 0.6 * behind);
 		const float3 position = eye + direction * range;
 		const float3 sun = GetCloudDirectionalLightColor() * sampleExternalSunTransmittance(position, light);
 		const float rim = Phase::HG(dot(direction, light), 0.75) * 0.25 * (1.0 - thickness) * (1.0 - thickness) * CloudDisc().w;
-		float3 radiance = sun * (HORIZON_CLOUD_LIT * lerp(0.14, 1.0, facing) * (0.25 + 0.75 * lit) * (0.8 + 0.2 * detail) + rim);
+		float3 radiance = sun * (HorizonCloudExtra.z * lerp(0.14, 1.0, facing) * (0.25 + 0.75 * lit) * (0.8 + 0.2 * detail) + rim);
 		radiance += SampleCloudAmbientRadiance() * (0.55 + 0.45 * saturate(height / max(top, 1e-3)));
 		radiance *= info.cloudLightingScale * max(HorizonCloudLayer.w, 0.0);
 
@@ -236,7 +230,8 @@ namespace HorizonClouds
 		const float horizontal = sqrt(saturate(1.0 - direction.z * direction.z));
 		[branch] if (horizontal < 0.5) return;
 		const float nearAltitude = eye.z + distance * direction.z / horizontal + distance * distance / (2.0 * info.planetRadius);
-		const float farDistance = distance * HORIZON_CLOUD_FAR_SCALE;
+		const float farScale = max(HorizonCloudExtra.y, 1.0);
+		const float farDistance = distance * farScale;
 		const float farAltitude = eye.z + farDistance * direction.z / horizontal + farDistance * farDistance / (2.0 * info.planetRadius);
 		const float limit = HorizonCloudShape.y + 1.5 * (HorizonCloudShape.z - HorizonCloudShape.y);
 		[branch] if (min(nearAltitude, farAltitude) > limit || max(nearAltitude, farAltitude) < HorizonCloudShape.y) return;
@@ -249,7 +244,7 @@ namespace HorizonClouds
 		float4 band = front;
 		[branch] if (front.a < 0.995)
 		{
-			const float4 back = Sample(direction, eye, farDistance, seed + 500u, HorizonCloudLayer.z / HORIZON_CLOUD_FAR_SCALE + 0.37, ap, unified);
+			const float4 back = Sample(direction, eye, farDistance, seed + 500u, HorizonCloudLayer.z / farScale + 0.37, ap, unified);
 			band = float4(front.rgb + (1.0 - front.a) * back.rgb, 1.0 - (1.0 - front.a) * (1.0 - back.a));
 		}
 		if (band.a <= 0.0)

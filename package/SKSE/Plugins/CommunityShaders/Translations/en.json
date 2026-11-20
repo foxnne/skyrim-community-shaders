@@ -1,5 +1,11 @@
 {
     "_meta": {
+        "feature.physical_sky.horizon_far_scale": "Second Band Distance",
+        "feature.physical_sky.horizon_far_scale_desc": "How far out the second band stands, as a multiple of Distance. Higher = it sits lower and hazier behind the first, for more depth.",
+        "feature.physical_sky.horizon_shade": "Self-Shading",
+        "feature.physical_sky.horizon_shade_desc": "How fast sunlight dies inside the cloud. Higher = darker bases and far sides, more contrast. 0 = evenly lit.",
+        "feature.physical_sky.horizon_sunlit": "Sunlit Face Brightness",
+        "feature.physical_sky.horizon_sunlit_desc": "How bright the faces turned to the sun are, apart from the sky light on the cloud. A white card in the sun is 0.32. Brightness above scales sun and sky light together.",
         "feature.screen_space_gi.fallback_sky_boost": "Sky Fill Boost",
         "feature.screen_space_gi.fallback_sky_boost_tooltip": "Extra sky light on surfaces that face up, outdoors, where indirect rays miss the screen. The extra is larger the lower Skylighting's Min Diffuse Visibility is. 1 = full: brighter open ground and forest floor, flatter sun to shade contrast. 0 = none: darker shade, stronger sun.",
         "feature.tree_wind.near_tree_min_roughness": "Leaf Roughness Floor",
@@ -3081,7 +3087,7 @@
     "feature.physical_sky.horizon_coverage_now": "Coverage now",
     "feature.physical_sky.horizon_density": "Density",
     "feature.physical_sky.horizon_distance": "Distance",
-    "feature.physical_sky.horizon_distance_desc": "Distance to the nearer of the two bands; the second stands at 1.8 times this. Farther bands sit lower behind the curve of the sea and take more haze.",
+    "feature.physical_sky.horizon_distance_desc": "Distance to the nearer of the two bands; the second stands at Second Band Distance times this. Farther bands sit lower behind the curve of the sea and take more haze.",
     "feature.physical_sky.horizon_enabled": "Enable Horizon Clouds",
     "feature.physical_sky.horizon_pleasant": "Pleasant / Unclassified",
     "feature.physical_sky.horizon_rainy": "Rainy",

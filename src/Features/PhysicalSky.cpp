@@ -145,7 +145,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	HorizonCloudSettings,
-	enabled, coverage, baseAltitude, topAltitude, type, density, distance, brightness, seed,
+	enabled, coverage, baseAltitude, topAltitude, type, density, distance, brightness, seed, farScale, sunlit, shade,
 	pleasantAmount, cloudyAmount, rainyAmount, snowAmount)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
@@ -1457,9 +1457,18 @@ void PhysicalSky::DrawHorizonCloudSection()
 			ImGui::Text("%s", T(TKEY("horizon_top_desc"), "Height of the tallest towers above sea level. At 60 km, 3 km of cloud stands about 3 degrees above the horizon."));
 		ImGui::SliderFloat(T(TKEY("horizon_distance"), "Distance"), &horizon.distance, 45.f, 150.f, "%.0f km", ImGuiSliderFlags_AlwaysClamp);
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::Text("%s", T(TKEY("horizon_distance_desc"), "Distance to the nearer of the two bands; the second stands at 1.8 times this. Farther bands sit lower behind the curve of the sea and take more haze."));
+			ImGui::Text("%s", T(TKEY("horizon_distance_desc"), "Distance to the nearer of the two bands; the second stands at Second Band Distance times this. Farther bands sit lower behind the curve of the sea and take more haze."));
+		ImGui::SliderFloat(T(TKEY("horizon_far_scale"), "Second Band Distance"), &horizon.farScale, 1.2f, 3.f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("horizon_far_scale_desc"), "How far out the second band stands, as a multiple of Distance. Higher = it sits lower and hazier behind the first, for more depth."));
 		ImGui::SliderFloat(T(TKEY("horizon_density"), "Density"), &horizon.density, 0.f, 4.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		ImGui::SliderFloat(T(TKEY("horizon_brightness"), "Brightness"), &horizon.brightness, 0.f, 3.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderFloat(T(TKEY("horizon_sunlit"), "Sunlit Face Brightness"), &horizon.sunlit, 0.f, 0.6f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("horizon_sunlit_desc"), "How bright the faces turned to the sun are, apart from the sky light on the cloud. A white card in the sun is 0.32. Brightness above scales sun and sky light together."));
+		ImGui::SliderFloat(T(TKEY("horizon_shade"), "Self-Shading"), &horizon.shade, 0.f, 12.f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("horizon_shade_desc"), "How fast sunlight dies inside the cloud. Higher = darker bases and far sides, more contrast. 0 = evenly lit."));
 		ImGui::SliderFloat(T(TKEY("horizon_seed"), "Shape Seed"), &horizon.seed, 0.f, 64.f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
 
 		ImGui::SeparatorText(T(TKEY("horizon_weather_class"), "Amount by Weather Class"));

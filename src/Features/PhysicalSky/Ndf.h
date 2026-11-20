@@ -437,9 +437,12 @@ struct HorizonCloudSettings
 	float topAltitude = 3200.f;    // metres; the tallest towers reach this
 	float type = 0.25f;            // 0: separate cumulus towers, 1: one flat stratus bank
 	float density = 1.f;
-	float distance = 60.f;         // km to the near shell; the far shell is at 1.8 times this
+	float distance = 60.f;         // km to the near shell; the far shell is at farScale times this
 	float brightness = 1.f;
 	float seed = 0.f;
+	float farScale = 1.8f;         // distance of the second shell, as a multiple of the first
+	float sunlit = 0.22f;          // radiance of a fully sunlit cloud face per unit of sun illuminance (white card: 0.318)
+	float shade = 4.f;             // how fast light dies inside the cloud; higher = darker bases and far sides
 	// Multiplies coverage by the class of the game weather (blended across weather transitions). A scene that
 	// sets coverage for one weather is still multiplied by its class, so set that class to 1 to author freely.
 	float pleasantAmount = 0.6f;   // also weathers without a class

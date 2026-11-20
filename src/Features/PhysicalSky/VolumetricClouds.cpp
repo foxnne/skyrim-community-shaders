@@ -1267,7 +1267,8 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 		.horizonShape = { horizonCoverage, horizonBase / Util::Units::GAME_UNIT_TO_M, horizonTop / Util::Units::GAME_UNIT_TO_M, bandValue(horizon.type, 0.f, 1.f, 0.25f) },
 		.horizonLayer = { KilometersToGameUnits(bandValue(horizon.distance, 45.f, 150.f, 60.f)), bandValue(horizon.density, 0.f, 4.f, 1.f),
 			static_cast<float>(horizonCloudDrift), bandValue(horizon.brightness, 0.f, 3.f, 1.f) },
-		.horizonExtra = { std::floor(bandValue(horizon.seed, 0.f, 64.f, 0.f)), 0.f, 0.f, 0.f },
+		.horizonExtra = { std::floor(bandValue(horizon.seed, 0.f, 64.f, 0.f)), bandValue(horizon.farScale, 1.2f, 3.f, 1.8f),
+			bandValue(horizon.sunlit, 0.f, 0.6f, 0.22f), bandValue(horizon.shade, 0.f, 12.f, 4.f) },
 	};
 	cloudStormManager.UpdateLighting(lighting.dropletDiameter);
 	cloudStormManager.UpdateMotion(volWind.stormTime, previousWind.stormTime,

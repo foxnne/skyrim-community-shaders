@@ -522,7 +522,7 @@ struct PhysicalSky final : public Feature
 		float4 middleBandShape;
 		float4 horizonShape;  // coverage (0 = none), base altitude, top altitude (game units), type
 		float4 horizonLayer;  // near shell distance (game units), density, drift (turns), brightness
-		float4 horizonExtra;  // shape seed, unused
+		float4 horizonExtra;  // shape seed, far shell distance scale, sunlit face radiance, light falloff inside the cloud
 	};
 	static_assert(sizeof(VolumetricCloudCB) == 1392);
 	static_assert(offsetof(VolumetricCloudCB, dirlightDir) == 48);

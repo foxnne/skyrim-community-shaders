@@ -33,7 +33,6 @@ namespace SceneSettingsPolicy
 		{ "PhysicalSky", "cloudOriginalMix" },
 		{ "PhysicalSky", "silverLiningMix" },
 		{ "PhysicalSky", "silverLiningSpread" },
-		{ "PhysicalSky", "cloudShadowRemapRange" },
 		{ "PhysicalSky", "cloudMap", "type" },
 		{ "PhysicalSky", "cloudMap", "localTexelSize" },
 		{ "PhysicalSky", "cloudMap", "texture" },

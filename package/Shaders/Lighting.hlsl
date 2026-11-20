@@ -3029,7 +3029,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		dirLightColor *= PhysSky::SampleDirLightTr(SampShadowMaskSampler);
 		const float3 cloudTransmittance = PhysSky::GetDirlightTransmittance(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, SampColorSampler, true);
 		deckGroundColor = dirLightColor * PhysSky::GetCloudDeckGroundLight(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, cloudTransmittance.x);
-		dirLightColor *= cloudTransmittance;
+		dirLightColor *= PhysSky::RemapSurfaceCloudShadow(cloudTransmittance);
 	}
 #	endif
 

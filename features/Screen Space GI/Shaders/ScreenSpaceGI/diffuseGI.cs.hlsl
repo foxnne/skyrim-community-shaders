@@ -90,6 +90,14 @@ static const float SSGI_EXP_FACTOR = 2.0;
 static const float SSGI_FALLBACK_POWER = 1.0;
 static const float SSGI_FALLBACK_MIP = 3.0;
 
+// foxnne sun balance: the ambient fallback raises sky light on up-facing surfaces by
+// 1 + n.z * (1 - Min Diffuse Visibility) (x1.71 at the look pack's 0.29). That lifts open ground and the floor
+// under a canopy alike and halves the direct : ambient ratio. 1 keeps that boost, 0 removes it; a define so it
+// can be tuned by shader reload.
+#ifndef SSGI_FALLBACK_SKY_BOOST
+#	define SSGI_FALLBACK_SKY_BOOST 1.0
+#endif
+
 // sin/cos of the positive bit-center offsets from the projected receiver normal.
 // The negative half is mirrored, reducing the table and avoiding per-bit sincos.
 static const float2 SSGI_BIT_SIN_COS[SSGI_MAX_RAY / 2] = {
@@ -195,7 +203,7 @@ float3 SampleDiffuseFallbackCubemap(float3 worldPos, float3 worldNormal, float3 
 	if (!SharedData::InInterior) {
 		float fadeOutFactor = Skylighting::GetFadeOutFactor(worldPos);
 		float3 skylightingNormal = normalize(float3(worldNormal.xy, max(0, worldNormal.z)));
-		float skylightingBoost = 1.0 + saturate(worldNormal.z) * (1.0 - SharedData::skylightingSettings.MinDiffuseVisibility);
+		float skylightingBoost = 1.0 + SSGI_FALLBACK_SKY_BOOST * saturate(worldNormal.z) * (1.0 - SharedData::skylightingSettings.MinDiffuseVisibility);
 		sh2 skylightingSH = Skylighting::Sample(worldPos, worldDir);
 		skylightingDiffuse = Skylighting::EvaluateDiffuse(skylightingSH, skylightingNormal, fadeOutFactor) * skylightingBoost;
 	}

@@ -101,6 +101,8 @@ namespace Permutation
 		static const uint IsSecunda = (1 << 23);
 		// Crown of a tree in object LOD; see LOD_TREE_LIGHTING in Lighting.hlsl.
 		static const uint LODTreeCrown = (1 << 24);
+		// Placed rock that Ground Cover may grow on; see GroundCover.hlsli.
+		static const uint GroundCover = (1 << 25);
 	}
 
 	namespace ExtraFeatureFlags

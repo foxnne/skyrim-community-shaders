@@ -1,0 +1,9 @@
+# Ground Cover: which placed objects count as rock. One entry per line, matched anywhere in the model path of the
+# object's base form (lower case, backslashes, relative to Data\meshes). Only statics are tested. '#' starts a comment.
+# Object LOD and terrain are not chosen here: see "Object LOD" and "Terrain" in the feature's menu.
+landscape\mountains\
+landscape\rocks\
+rockcliff
+mountaincliff
+mountaintrim
+mountainpeak

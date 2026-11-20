@@ -37,6 +37,12 @@
 #	undef SNOW_COVER
 #endif
 
+// Ground Cover grows on rock: static, opaque geometry, object LOD and terrain. Alpha-tested draws are plants, the
+// trees of object LOD among them.
+#if defined(SKINNED) || defined(SKIN) || defined(EYE) || defined(HAIR) || defined(TREE_ANIM) || defined(DO_ALPHA_TEST) || defined(WORLD_MAP) || defined(FUR_SHELLS)
+#	undef GROUND_COVER
+#endif
+
 // The crowns of trees in object LOD have no define of their own: Tree Wind marks their draws with
 // ExtraFlags::LODTreeCrown, and they are lit as foliage (lodTreeLightingSettings). Same draws as TREE_WIND_VS.
 #if defined(PSHADER) && defined(TREE_WIND) && defined(VC) && !defined(TRUE_PBR) && !defined(TREE_ANIM) && !defined(LOD) && !defined(LODLANDSCAPE) && !defined(LANDSCAPE) && !defined(SKINNED) && !defined(SKIN) && !defined(EYE) && !defined(HAIR)
@@ -1103,6 +1109,10 @@ bool UseSkylightingShadowVisibility()
 #	if defined(SNOW_COVER)
 #		undef SNOW
 #		include "SnowCover/SnowCover.hlsli"
+#	endif
+
+#	if defined(GROUND_COVER)
+#		include "GroundCover/GroundCover.hlsli"
 #	endif
 
 #	if defined(CS_HAIR_SHADING)
@@ -2828,6 +2838,39 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		endif
 	}
 #	endif  // SNOW_COVER
+
+#	if defined(GROUND_COVER)
+	// After Snow Cover: snow lies on top of the ground cover, never under it.
+#		if defined(LANDSCAPE) || defined(LODLANDSCAPE) || defined(LODLANDNOISE)
+	const bool groundCoverTerrain = true;
+	const bool groundCoverSurface = (SharedData::groundCoverSettings.Flags & GroundCover::Flags::Terrain) != 0;
+#		elif defined(LOD)
+	const bool groundCoverTerrain = false;
+	const bool groundCoverSurface = (SharedData::groundCoverSettings.Flags & GroundCover::Flags::ObjectLOD) != 0;
+#		else
+	const bool groundCoverTerrain = false;
+	const bool groundCoverSurface = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::GroundCover) != 0;
+#		endif
+	[branch] if (SharedData::groundCoverSettings.Enabled && groundCoverSurface && inWorld)
+	{
+#		if defined(SNOW_COVER)
+		const float groundCoverSnow = snowFactor;
+#		else
+		const float groundCoverSnow = 0;
+#		endif
+#		if defined(SKYLIGHTING)
+		const float groundCoverSkyOpen = smoothstep(0, 0.75, SphericalHarmonics::Unproject(skylightingSH, float3(0, 0, 1)));
+#		else
+		const float groundCoverSkyOpen = 1;
+#		endif
+		const float groundCover = GroundCover::Apply(material, worldNormal, input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz, length(viewPosition.xyz), groundCoverSnow, groundCoverSkyOpen, groundCoverTerrain);
+#		if defined(LOD_LAND_BLEND) && defined(TRUE_PBR)
+		// As Snow Cover does: the covered ground keeps its colour through the fade to terrain LOD, which grows the same cover.
+		lodLandFadeFactor = groundCover + (1 - groundCover) * lodLandFadeFactor;
+		lodLandColor.rgb = lerp(lodLandColor.rgb, material.BaseColor * Color::PBRLightingScale, groundCover);
+#		endif
+	}
+#	endif  // GROUND_COVER
 
 #	if defined(LANDSCAPE)
 	[branch] if (input.LandBlendWeights2.z > 0.0)

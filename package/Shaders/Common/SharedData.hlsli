@@ -806,6 +806,38 @@ namespace SharedData
 		float3 pad0;
 	};
 
+	// Ground Cover; mirrors GroundCover::PerFrame
+	struct GroundCoverSettings
+	{
+		uint Enabled;
+		uint Flags;  // GroundCover::Flags in GroundCover.hlsli
+		float Strength;
+		float BandHeight;
+
+		float SlopeMin;
+		float SlopeMax;
+		float InvPatchSize;
+		float InvDetailSize;
+
+		float NoiseAmount;
+		float Saturation;
+		float Brightness;
+		float LuminanceMatch;
+
+		float GlossReduction;
+		float CreaseDarkening;
+		float GreyLimit;
+		float RegionCoverage;
+
+		float PlainLevel;  // world z of the plain, or the offset to the level map
+		float ScreeStrength;
+		float ScreeHeight;
+		uint DebugView;
+
+		float2 MapScale;
+		float2 MapOffset;
+	};
+
 	cbuffer FeatureData : register(b6)
 	{
 		GrassLightingSettings grassLightingSettings;
@@ -841,6 +873,7 @@ namespace SharedData
 		PhysSkyData physSkyData;
 		ViewAtmosphereSettings viewAtmosphereSettings;
 		LODTreeLightingSettings lodTreeLightingSettings;
+		GroundCoverSettings groundCoverSettings;
 	};
 
 	Texture2D<float4> DepthTexture : register(t17);

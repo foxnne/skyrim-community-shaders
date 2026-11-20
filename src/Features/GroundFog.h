@@ -84,7 +84,7 @@ struct GroundFog : Feature
 		float ReactiveStrength = 1.0f;  // how much of the fog a mover clears; 0 leaves only the displacement
 		float ImpulseStrength = 1.0f;   // how hard jumps, landings, swings, casts, shouts and impacts strike the fog; 0 = they do not
 		// The simulation the pool is drawn from.
-		float SettleTime = 12.0f;   // seconds over which disturbed fog returns to its resting amount
+		float SettleTime = 25.0f;   // seconds over which disturbed fog returns to its resting amount (slow recovery, user 2026-11-20)
 		float Wispiness = 1.0f;     // 0: even patches; 1: separate wisps with clear air between them
 		float WispScale = 4.0f;     // size of the wisps, meters
 		float DownhillFlow = 1.0f;  // how strongly the fog runs down slopes and steps into the low places

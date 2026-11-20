@@ -629,7 +629,7 @@ namespace GroundFog
 		return;
 	}
 
-#if GROUND_FOG_POOL_DEBUG > 0
+#if GROUND_FOG_POOL_DEBUG > 0 && GROUND_FOG_POOL_DEBUG < 5
 	{
 		// The pool's debug view chosen by #define (see Pool.hlsli), opaque over the scene within the pool's reach.
 		// 1 Floor map. Blue: no floor known under the pixel. Green: ground, the fog lies on it. Red: stands in the
@@ -679,6 +679,11 @@ namespace GroundFog
 	++taps;
 	const bool march = camZ + min(dir.z * tEnd, 0.0) - GroundFog::GroundMaxAlong(0.0, endXY) <= GroundFog::SlabTop(0.0, tEnd, lift, floorLift, valleyLift);
 	if (!march && pool.tau <= 0.0) {
+#if GROUND_FOG_POOL_DEBUG >= 5
+		FogOut[pixel] = float4(0.0, 0.0, 0.0, 1e-4);
+		FogAuxOut[pixel] = float4(auxDepths, 1e-4, 0.0);
+		return;
+#endif
 		FogOut[pixel] = debugTaps ? float4(GroundFog::TapColor(taps) * GroundFog::SkyMean() * 4.0, 0.5) : clear;
 		FogAuxOut[pixel] = debugTaps ? float4(auxDepths, 0.5, 0.0) : clearAux;
 		return;
@@ -850,6 +855,11 @@ namespace GroundFog
 		return;
 	}
 	if (seen.share < 1.0 / 2048.0) {
+#if GROUND_FOG_POOL_DEBUG >= 5
+		FogOut[pixel] = float4(0.0, 0.0, 0.0, 1e-4);
+		FogAuxOut[pixel] = float4(auxDepths, 1e-4, 0.0);
+		return;
+#endif
 		FogOut[pixel] = clear;
 		FogAuxOut[pixel] = clearAux;
 		return;
@@ -945,28 +955,34 @@ namespace GroundFog
 	// Sky light reaches fog in the shadow of terrain and objects too, so it takes no direct visibility.
 	// The sky's light on the fog is what the open sky gives, less what stands over the fog: under a canopy or
 	// beside a wall it gets as little of it as the ground there does, or it would glow against that ground.
-	// Two measures, the lower counts: the Skylighting probes a meter over the fog, where they are running; and how
-	// much of the ground a few meters around is in the sun's shadow (the sun map, read wide), which is there
-	// whenever the pool is.
+	// Where the Skylighting probes run, they say how much of the sky the fog sees, as they do for the ground.
+	// Without them, how much of the ground a few meters around is in the sun's shadow (the sun map, read wide)
+	// stands in, and only weakly: a shadow is not a roof (a street in the shadow of a wall at a low sun still has
+	// the sky over it). Taking that stand-in at full strength (as before) made the fog in any shadow as dim as the
+	// ground there, so it vanished against it.
 	float skyOpen = 1.0;
 	if (GroundFog::CanopyShade > 0.0) {
-		const float2 shadeUv = GroundFog::SimUv(lightPos.xy);
-		const float mapped = GroundFog::SimInside(shadeUv);
-		if (mapped > 0.0) {
-			uint slopeWidth, slopeHeight;
-			GroundFog::FogSlope.GetDimensions(slopeWidth, slopeHeight);
-			const float2 wide = 7.0 / float2(slopeWidth, slopeHeight);
-			const float lit = 0.25 * (GroundFog::FogSlope.SampleLevel(LinearSampler, shadeUv + wide * float2(1.0, 0.4), 0).w + GroundFog::FogSlope.SampleLevel(LinearSampler, shadeUv + wide * float2(-0.4, 1.0), 0).w +
-										 GroundFog::FogSlope.SampleLevel(LinearSampler, shadeUv + wide * float2(-1.0, -0.4), 0).w + GroundFog::FogSlope.SampleLevel(LinearSampler, shadeUv + wide * float2(0.4, -1.0), 0).w);
-			skyOpen = lerp(1.0, lerp(0.3, 1.0, lit), mapped);
-		}
+		bool probed = false;
 #ifdef SKYLIGHTING
 		if (ViewAtmosphere::Data[0].flags.z & 8u) {
-			const float3 probeAt = lightPos + float3(0.0, 0.0, 70.0);
+			const float3 probeAt = lightPos + float3(0.0, 0.0, 20.0);
 			const float seen = Skylighting::CosineLobeVisibility(Skylighting::SampleNoBias(probeAt), float3(0.0, 0.0, 1.0), Skylighting::GetFadeOutFactor(probeAt));
-			skyOpen = min(skyOpen, max(Skylighting::MixDiffuse(saturate(seen)), 0.15));
+			skyOpen = max(Skylighting::MixDiffuse(saturate(seen)), 0.15);
+			probed = true;
 		}
 #endif
+		if (!probed) {
+			const float2 shadeUv = GroundFog::SimUv(lightPos.xy);
+			const float mapped = GroundFog::SimInside(shadeUv);
+			if (mapped > 0.0) {
+				uint slopeWidth, slopeHeight;
+				GroundFog::FogSlope.GetDimensions(slopeWidth, slopeHeight);
+				const float2 wide = 7.0 / float2(slopeWidth, slopeHeight);
+				const float lit = 0.25 * (GroundFog::FogSlope.SampleLevel(LinearSampler, shadeUv + wide * float2(1.0, 0.4), 0).w + GroundFog::FogSlope.SampleLevel(LinearSampler, shadeUv + wide * float2(-0.4, 1.0), 0).w +
+											 GroundFog::FogSlope.SampleLevel(LinearSampler, shadeUv + wide * float2(-1.0, -0.4), 0).w + GroundFog::FogSlope.SampleLevel(LinearSampler, shadeUv + wide * float2(0.4, -1.0), 0).w);
+				skyOpen = lerp(1.0, lerp(0.65, 1.0, lit), mapped);
+			}
+		}
 		skyOpen = lerp(1.0, skyOpen, GroundFog::CanopyShade);
 	}
 	// And the folds between its billows see less of the sky than their tops.
@@ -985,6 +1001,18 @@ namespace GroundFog
 
 	// A uniform medium of this light per unit of extinction; the composite multiplies by the opacity at the depth
 	// of each of its pixels.
+#if GROUND_FOG_POOL_DEBUG == 5
+	// 5: the light the fog adds to the scene at this pixel (all the fog this pass draws; near the camera that is the
+	// pool), at the scene's exposure, opaque, so it can be set beside the ground it lies on.
+	FogOut[pixel] = float4(min(max(light, 0.0), 65504.0) * GroundFog::OneMinusExp(seen.tau), 1e-4);
+	FogAuxOut[pixel] = float4(auxDepths, 1e-4, 0.0);
+	return;
+#elif GROUND_FOG_POOL_DEBUG == 6
+	// 6: how much of the scene behind the fog it takes away (1 - transmittance), as grey: white all of it.
+	FogOut[pixel] = float4(GroundFog::OneMinusExp(seen.tau) * GroundFog::SkyMean() * 4.0, 1e-4);
+	FogAuxOut[pixel] = float4(auxDepths, 1e-4, 0.0);
+	return;
+#endif
 	FogOut[pixel] = float4(min(max(light, 0.0), 65504.0), exp(-seen.tau));
 	// w: the share of the fog in front of the nearest depth that is the pool, which lies at the end of the ray and
 	// not along it.

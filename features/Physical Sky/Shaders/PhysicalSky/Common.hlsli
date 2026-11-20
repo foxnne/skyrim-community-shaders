@@ -846,6 +846,17 @@ Texture2D<float4> TexSkyTail : register(t66);
 		}
 		return light;
 	}
+
+	// foxnne sun balance: Cloud Shadow Remap on the direct light of a surface, as ApShadow applies it to the air.
+	// The remap was only read by the aerial-perspective shadow, so the setting never reached terrain, objects or
+	// grass. With the default range [0, 1] this returns the transmittance unchanged. An upper bound below 1 lets
+	// thin cloud and the far-field mean pass the full beam (clear days keep their sun); the lower bound keeps
+	// thick cloud dark.
+	float3 RemapSurfaceCloudShadow(float3 cloudTransmittance)
+	{
+		const float2 range = SharedData::physSkyData.cloudShadowRemapRange;
+		return Remap(cloudTransmittance.x, range.x, range.y, 0.0, 1.0).xxx;
+	}
 #endif
 
 	float3 GetMediumPlanetPosition(float3 position)

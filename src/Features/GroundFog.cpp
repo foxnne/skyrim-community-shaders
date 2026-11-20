@@ -1,5 +1,8 @@
 #include "GroundFog.h"
 
+#include <DirectXTex.h>
+#include <pystring/pystring.h>
+
 #include "Features/CloudShadows.h"
 #include "Features/ExponentialHeightFog.h"
 #include "Features/TerrainShadows.h"
@@ -33,6 +36,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	WindResponse,
 	BasinStrength,
 	WaterPreference,
+	ShoreSoftness,
+	WaterPatchiness,
 	Albedo,
 	SunScale,
 	SkyAmbientScale,
@@ -85,6 +90,8 @@ namespace
 	constexpr float kMaxWindDriftSpeed = 6.0f;
 	constexpr float kMaxBasinStrength = 4.0f;
 	constexpr float kMaxWaterPreference = 4.0f;
+	constexpr float kMinShoreSoftness = 0.05f;
+	constexpr float kMaxShoreSoftness = 3.0f;
 	constexpr float kMaxLightScale = 4.0f;
 	constexpr float kMaxGroundFill = 8.0f;
 	constexpr float kMaxSurfaceBlend = 10.0f;
@@ -161,12 +168,109 @@ namespace
 	// Debug views: a 1 m hard-topped slab, dense enough to see its top and where it meets the ground.
 	constexpr float kDebugThickness = 1.0f;
 	constexpr float kDebugDensity = 0.25f;
+
+	// The worldspace whose land (and height map) the current one uses, as Terrain Shadows picks it.
+	RE::TESWorldSpace* LandWorldspace()
+	{
+		auto tes = globals::game::tes;
+		auto worldspace = tes ? tes->GetRuntimeData2().worldSpace : nullptr;
+		while (worldspace && worldspace->parentWorld && worldspace->parentUseFlags.any(RE::TESWorldSpace::ParentUseFlag::kUseLandData))
+			worldspace = worldspace->parentWorld;
+		return worldspace;
+	}
 }
 
 void GroundFog::SetupResources()
 {
 	volumeConstants = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<VolumeData>(), "GroundFog::VolumeData");
 	flowConstants = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<FlowData>(), "GroundFog::FlowData");
+	FindWaterMaps();
+}
+
+void GroundFog::FindWaterMaps()
+{
+	// Baked by terrain-heightmap/build_watermap.py. Not under textures\\Terrain, which Terrain Shadows scans for
+	// height maps.
+	waterMapFiles.clear();
+	std::error_code error;
+	for (auto const& entry : std::filesystem::directory_iterator{ std::filesystem::path{ L"Data\\textures\\GroundFog\\WaterMaps\\" }, error }) {
+		const auto path = entry.path();
+		if (path.extension() != ".dds")
+			continue;
+		const auto fields = pystring::split(path.stem().string(), ".");
+		if (fields.size() != 6 || fields[1] != "WaterMap") {
+			logger::debug("[Ground Fog] {} is not named like a water map", path.filename().string());
+			continue;
+		}
+		try {
+			WaterMapFile file;
+			file.path = path;
+			file.minX = std::stoi(fields[2]);
+			file.minY = std::stoi(fields[3]);
+			file.maxX = std::stoi(fields[4]);
+			file.maxY = std::stoi(fields[5]);
+			waterMapFiles[fields[0]] = file;
+			logger::info("[Ground Fog] Water map found: {}", path.filename().string());
+		} catch (const std::exception& e) {
+			logger::debug("[Ground Fog] Failed to parse {}: {}", path.filename().string(), e.what());
+		}
+	}
+}
+
+ID3D11ShaderResourceView* GroundFog::EnsureWaterMap(const TerrainShadows::HeightMapBinding& a_map)
+{
+	const auto worldspace = LandWorldspace();
+	const std::string name = worldspace ? worldspace->GetFormEditorID() : "";
+	if (name == waterMapWorldspace)
+		return waterMap ? waterMap->srv.get() : nullptr;
+	// One attempt per worldspace: a map that fails to load is not tried again every frame.
+	waterMapWorldspace = name;
+	waterMap = nullptr;
+	waterMapTexel = 0.0f;
+	waterMapState = "none for this worldspace";
+	const auto found = waterMapFiles.find(name);
+	if (found == waterMapFiles.end())
+		return nullptr;
+	const auto& file = found->second;
+
+	// It must cover the height map's rectangle: the shader reads both with one uv.
+	const float west = (0.5f / a_map.width - a_map.scaleOffset.z) / a_map.scaleOffset.x;
+	const float north = -(0.5f / a_map.height + a_map.scaleOffset.w) / a_map.scaleOffset.y;
+	const float extentX = 1.0f / a_map.scaleOffset.x;
+	const float extentY = -1.0f / a_map.scaleOffset.y;
+	const float cellsX = static_cast<float>(file.maxX - file.minX + 1);
+	const float cellsY = static_cast<float>(file.maxY - file.minY + 1);
+	if (std::abs(west - file.minX * 4096.0f) > 64.0f || std::abs(north - (file.maxY + 1) * 4096.0f) > 64.0f ||
+		std::abs(extentX - cellsX * 4096.0f) > 64.0f || std::abs(extentY - cellsY * 4096.0f) > 64.0f) {
+		waterMapState = "does not cover the height map's cells";
+		logger::warn("[Ground Fog] {} does not cover the same cells as the height map; not used", file.path.filename().string());
+		return nullptr;
+	}
+
+	DirectX::ScratchImage image;
+	ID3D11Resource* resource = nullptr;
+	if (FAILED(DirectX::LoadFromDDSFile(file.path.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, image)) ||
+		image.GetMetadata().format != DXGI_FORMAT_R16G16B16A16_UNORM ||
+		FAILED(DirectX::CreateTexture(globals::d3d::device, image.GetImages(), image.GetImageCount(), image.GetMetadata(), &resource))) {
+		waterMapState = "could not be loaded (needs RGBA16_UNORM)";
+		logger::warn("[Ground Fog] {} could not be loaded as an RGBA16_UNORM texture; not used", file.path.filename().string());
+		return nullptr;
+	}
+	waterMap = eastl::make_unique<Texture2D>(reinterpret_cast<ID3D11Texture2D*>(resource), "GroundFog::WaterMap");
+	D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
+	srv.Format = waterMap->desc.Format;
+	srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+	srv.Texture2D.MipLevels = waterMap->desc.MipLevels;
+	waterMap->CreateSRV(srv);
+	if (!waterMap->srv) {
+		waterMap = nullptr;
+		waterMapState = "could not be loaded";
+		return nullptr;
+	}
+	waterMapTexel = cellsX * 4096.0f / static_cast<float>(waterMap->desc.Width);
+	waterMapState = std::format("{} x {}, {} levels, {:.0f} units per texel", waterMap->desc.Width, waterMap->desc.Height, waterMap->desc.MipLevels, waterMapTexel);
+	logger::info("[Ground Fog] Water map loaded for {}: {}", name, waterMapState);
+	return waterMap->srv.get();
 }
 
 void GroundFog::UpdateFloorOffset(float a_deltaTime)
@@ -459,7 +563,7 @@ float GroundFog::TimeOfDayAmount(float& a_daylight) const
 	return blend(settings.EveningAmount, settings.MorningAmount, (hour - sunsetEnd) / night);
 }
 
-GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView*& a_heightMap)
+GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView*& a_heightMap, ID3D11ShaderResourceView*& a_waterMap)
 {
 	effectiveAmount = 0.0f;
 	if (!settings.Enabled)
@@ -576,6 +680,11 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 	a_data.BurnSunlitFar = std::lerp(1.0f, timeAmount, burn);  // the valley layer burns off with the day as well
 	a_data.BurnShaded = std::lerp(1.0f, settings.MorningAmount, burn);
 	a_data.BurnRetention = settings.VolumeInjection ? 0.0f : burn * settings.ShadowRetention * daylight;
+	// Water: from the baked map where the worldspace has one, else from the engine's cells around the camera.
+	a_waterMap = EnsureWaterMap(map);
+	a_data.InvShoreDepth = 1.0f / (std::clamp(settings.ShoreSoftness, kMinShoreSoftness, kMaxShoreSoftness) * unitsPerMeter);
+	a_data.WaterPatchiness = slab ? 0.0f : settings.WaterPatchiness;
+	a_data.WaterTexel = a_waterMap ? waterMapTexel : 0.0f;
 	a_data.FlowWindow = {};
 	a_heightMap = map.srv;
 	return Status::kActive;
@@ -588,8 +697,9 @@ bool GroundFog::BindForVolume(ID3D11DeviceContext* a_context)
 		return false;
 	VolumeData data{};
 	ID3D11ShaderResourceView* heightMap = nullptr;
+	ID3D11ShaderResourceView* water = nullptr;
 	lastBindFrame = globals::state->frameCount;
-	status = loaded && volumeConstants ? Update(data, heightMap) : Status::kDisabled;
+	status = loaded && volumeConstants ? Update(data, heightMap, water) : Status::kDisabled;
 	if (status != Status::kActive)
 		return false;
 
@@ -599,9 +709,12 @@ bool GroundFog::BindForVolume(ID3D11DeviceContext* a_context)
 	previousHeightMap = nullptr;
 	a_context->CSGetConstantBuffers(kConstantSlot, 1, previousConstants.put());
 	a_context->CSGetShaderResources(kHeightMapSlot, 1, previousHeightMap.put());
+	previousWaterMap = nullptr;
+	a_context->CSGetShaderResources(kWaterMapSlot, 1, previousWaterMap.put());
 	auto* constants = volumeConstants->CB();
 	a_context->CSSetConstantBuffers(kConstantSlot, 1, &constants);
 	a_context->CSSetShaderResources(kHeightMapSlot, 1, &heightMap);
+	a_context->CSSetShaderResources(kWaterMapSlot, 1, &water);
 	bound = true;
 	return true;
 }
@@ -614,8 +727,11 @@ void GroundFog::UnbindForVolume(ID3D11DeviceContext* a_context)
 	auto* heightMap = previousHeightMap.get();
 	a_context->CSSetConstantBuffers(kConstantSlot, 1, &constants);
 	a_context->CSSetShaderResources(kHeightMapSlot, 1, &heightMap);
+	auto* water = previousWaterMap.get();
+	a_context->CSSetShaderResources(kWaterMapSlot, 1, &water);
 	previousConstants = nullptr;
 	previousHeightMap = nullptr;
+	previousWaterMap = nullptr;
 	bound = false;
 }
 
@@ -649,12 +765,14 @@ bool GroundFog::EnsureShaders()
 	return pixelCS && pyramidCS && pyramidFirstCS;
 }
 
-bool GroundFog::EnsureHeightPyramid(ID3D11DeviceContext* a_context, ID3D11ShaderResourceView* a_heightMap)
+bool GroundFog::EnsureHeightPyramid(ID3D11DeviceContext* a_context, ID3D11ShaderResourceView* a_heightMap, ID3D11ShaderResourceView* a_waterMap)
 {
-	if (heightPyramid && heightPyramidSource.get() == a_heightMap)
+	// The pyramid's bound includes the water surfaces of the water map it was built with.
+	if (heightPyramid && heightPyramidSource.get() == a_heightMap && heightPyramidWater.get() == a_waterMap)
 		return true;
 	heightPyramid = nullptr;
 	heightPyramidSource = nullptr;
+	heightPyramidWater = nullptr;
 	heightPyramidLevels = 0;
 
 	constexpr DXGI_FORMAT format = DXGI_FORMAT_R16G16_UNORM;
@@ -711,11 +829,16 @@ bool GroundFog::EnsureHeightPyramid(ID3D11DeviceContext* a_context, ID3D11Shader
 		auto* source = level == 0 ? a_heightMap : previousLevel.get();
 		auto* uav = target.get();
 		a_context->CSSetShaderResources(0, 1, &source);
+		// The first level takes in the water surfaces (slot 1; reads as "no water" when there is no map).
+		if (level == 0)
+			a_context->CSSetShaderResources(1, 1, &a_waterMap);
 		a_context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
 		a_context->CSSetShader(level == 0 ? pyramidFirstCS.get() : pyramidCS.get(), nullptr, 0);
 		a_context->Dispatch((std::max(desc.Width >> level, 1u) + 7u) / 8u, (std::max(desc.Height >> level, 1u) + 7u) / 8u, 1);
 		a_context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
 		a_context->CSSetShaderResources(0, 1, &nullSrv);
+		if (level == 0)
+			a_context->CSSetShaderResources(1, 1, &nullSrv);
 		previousLevel = thisLevel;
 	}
 	globals::profiler->EndPass();
@@ -724,6 +847,7 @@ bool GroundFog::EnsureHeightPyramid(ID3D11DeviceContext* a_context, ID3D11Shader
 
 	heightPyramid = std::move(pyramid);
 	heightPyramidSource.copy_from(a_heightMap);
+	heightPyramidWater.copy_from(a_waterMap);
 	heightPyramidLevels = desc.MipLevels;
 	return true;
 }
@@ -772,8 +896,9 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 	// (after wind), no 16-bit height map. Nothing is dispatched then.
 	VolumeData data{};
 	ID3D11ShaderResourceView* heightMap = nullptr;
+	ID3D11ShaderResourceView* water = nullptr;
 	lastBindFrame = globals::state->frameCount;
-	status = Update(data, heightMap);
+	status = Update(data, heightMap, water);
 	if (status != Status::kActive)
 		return false;
 	// The lighting reads the shared volume's inputs and flags of this frame.
@@ -783,7 +908,7 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 		return false;
 	}
 	auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
-	if (!main.texture || !EnsureShaders() || !EnsureHeightPyramid(a_context, heightMap)) {
+	if (!main.texture || !EnsureShaders() || !EnsureHeightPyramid(a_context, heightMap, water)) {
 		status = Status::kNoResources;
 		return false;
 	}
@@ -809,9 +934,9 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 	a_context->CSGetConstantBuffers(kConstantSlot, 1, oldConstants.put());
 	auto* constants = volumeConstants->CB();
 	a_context->CSSetConstantBuffers(kConstantSlot, 1, &constants);
-	static_assert(kFlowMapSlot == kHeightPyramidSlot + 1);
-	ID3D11ShaderResourceView* ground[] = { heightMap, heightPyramid->srv.get(), flowMap };
-	a_context->CSSetShaderResources(kHeightMapSlot, 3, ground);
+	static_assert(kFlowMapSlot == kHeightPyramidSlot + 1 && kWaterMapSlot == kFlowMapSlot + 1);
+	ID3D11ShaderResourceView* ground[] = { heightMap, heightPyramid->srv.get(), flowMap, water };
+	a_context->CSSetShaderResources(kHeightMapSlot, 4, ground);
 	atmosphere.BindLightingInputs(a_context);
 	ID3D11UnorderedAccessView* outputs[] = { fogTexture->uav.get(), fogAuxTexture->uav.get() };
 	a_context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
@@ -827,8 +952,8 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 
 	ID3D11UnorderedAccessView* nullOutputs[2]{};
 	a_context->CSSetUnorderedAccessViews(0, 2, nullOutputs, nullptr);
-	ID3D11ShaderResourceView* nullGround[3]{};
-	a_context->CSSetShaderResources(kHeightMapSlot, 3, nullGround);
+	ID3D11ShaderResourceView* nullGround[4]{};
+	a_context->CSSetShaderResources(kHeightMapSlot, 4, nullGround);
 	auto* previous = oldConstants.get();
 	a_context->CSSetConstantBuffers(kConstantSlot, 1, &previous);
 	compositeInputs[0] = fogTexture->srv.get();
@@ -922,7 +1047,13 @@ void GroundFog::DrawSettings()
 		Util::HoverTip(T(TKEY("basin_strength_tooltip"), "Gathers fog in dips and thins it on rises. At 1 a hollow holds twice as much and a rise holds none."));
 
 		ImGui::SliderFloat(T(TKEY("water_preference"), "Over Water"), &settings.WaterPreference, 0.0f, kMaxWaterPreference, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-		Util::HoverTip(T(TKEY("water_preference_tooltip"), "Amount over water against land. 0 keeps water clear. Water is only known near you, so distant lakes get none."));
+		Util::HoverTip(T(TKEY("water_preference_tooltip"), "How much more fog lies over water than over land. 1 is the same, 0 keeps water clear. It comes in with the water's depth at the shore and through the patches below. With a water map for the worldspace this works at any distance; without one, water is only known in the cells around you."));
+
+		ImGui::SliderFloat(T(TKEY("shore_softness"), "Shore Softness"), &settings.ShoreSoftness, kMinShoreSoftness, kMaxShoreSoftness, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("shore_softness_tooltip"), "Water depth over which the fog over water comes in at a shore. The edge follows the lake bed, so shallow shores get a wide soft edge and steep banks a narrow one."));
+
+		ImGui::SliderFloat(T(TKEY("water_patchiness"), "Water Patchiness"), &settings.WaterPatchiness, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("water_patchiness_tooltip"), "How uneven the fog over water is: broad thick and thin areas, patches and wisps that drift with the wind. 0 is an even sheet over the whole lake."));
 
 		ImGui::SliderFloat(T(TKEY("fade_start"), "Fade Start"), &settings.FadeStart, 0.0f, kMaxFadeStart, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("fade_start_tooltip"), "Distance at which the fog starts to thin out."));
@@ -1070,6 +1201,9 @@ void GroundFog::DrawDebugSection()
 	ImGui::Text("%s: %.2f m", T(TKEY("debug_floor_offset"), "Floor under you above the map"), floorOffset * Util::Units::GAME_UNIT_TO_M);
 	ImGui::Text("%s: %u / %u", T(TKEY("debug_flow_emitters"), "Things moving the fog"), flowEmitterCount, kMaxFlowEmitters);
 	ImGui::Text("%s: %.0f x %.0f, DXGI %d", T(TKEY("debug_height_map"), "Height map"), heightMapSize.x, heightMapSize.y, static_cast<int>(heightMapFormat));
+	ImGui::Text("%s: %s", T(TKEY("debug_water_map"), "Water map"), waterMapState.empty() ? "-" : waterMapState.c_str());
+	if (!waterMap)
+		ImGui::TextUnformatted(T(TKEY("debug_water_fallback"), "Water comes from the cells around you only"));
 }
 
 void GroundFog::LoadSettings(json& o_json)
@@ -1093,6 +1227,8 @@ void GroundFog::LoadSettings(json& o_json)
 	sanitize(settings.WindResponse, defaults.WindResponse, 0.0f, 1.0f);
 	sanitize(settings.BasinStrength, defaults.BasinStrength, 0.0f, kMaxBasinStrength);
 	sanitize(settings.WaterPreference, defaults.WaterPreference, 0.0f, kMaxWaterPreference);
+	sanitize(settings.ShoreSoftness, defaults.ShoreSoftness, kMinShoreSoftness, kMaxShoreSoftness);
+	sanitize(settings.WaterPatchiness, defaults.WaterPatchiness, 0.0f, 1.0f);
 	sanitize(settings.Albedo, defaults.Albedo, 0.0f, 1.0f);
 	sanitize(settings.SunScale, defaults.SunScale, 0.0f, kMaxLightScale);
 	sanitize(settings.SkyAmbientScale, defaults.SkyAmbientScale, 0.0f, kMaxLightScale);

@@ -49,10 +49,15 @@ public:
 		float distanceExaggerationStart = 150.0f;  // metres: physical up to here
 		float distanceExaggerationFull = 1500.0f;  // metres: full factor from here on
 		float distanceExaggerationHaze = 0.35f;    // share of the factor given to aerosol haze (air always gets all of it)
-		float padding = 0.0f;
+		float distanceExaggerationLimit = 5.0f;    // optical depth (strongest channel) at which the added air stops
+		float cloudDistanceExaggeration = 1.0f;    // share of the exaggeration the air in front of clouds takes
+		// Weather (Follow Vanilla Fog) height fog: 0 = lit by the weather's fog colour, 1 = lit by the sun, moons and sky like the air
+		float heightFogSkyLight = 0.0f;
+		float padding[2] = {};
 	} settings;
 	STATIC_ASSERT_ALIGNAS_16(Settings);
-	static_assert(sizeof(Settings) == 80);
+	static_assert(sizeof(Settings) == 96);  // ViewAtmosphereSettings in SharedData.hlsli
+	static_assert(offsetof(Settings, distanceExaggerationLimit) == 76 && offsetof(Settings, heightFogSkyLight) == 84);
 	/** @brief True when surfaces read the exaggerated copy of the integrated medium. */
 	bool DistanceExaggerationActive() const { return settings.distanceExaggeration > 1.0005f; }
 

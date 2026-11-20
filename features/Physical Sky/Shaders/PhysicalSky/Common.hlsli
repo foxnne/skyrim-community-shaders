@@ -675,14 +675,13 @@ Texture2D<float4> TexSkyTail : register(t66);
 			const float cloudT = lerp(1.0, TexVolCubeTr.SampleLevel(samp, viewDir, 0), visibility);
 			const float frontSet = ViewAtmosphere::CloudExaggerated(depth, ViewAtmosphere::Data[0].grids[0].depth.y) ? ViewAtmosphere::SurfaceSet() : 0.0;
 			ViewAtmosphere::Medium front = ViewAtmosphere::SampleReflection(uv, min(depth, distance), samp, frontSet);
-#if CLOUD_DISTANCE_EXAGGERATION_PERCENT > 0 && CLOUD_DISTANCE_EXAGGERATION_PERCENT < 100
-			[branch] if (frontSet > 0.0)
+			const float share = ViewAtmosphere::CloudExaggerationShare();
+			[branch] if (frontSet > 0.0 && share < 0.999)
 			{
 				const ViewAtmosphere::Medium physical = ViewAtmosphere::SampleReflection(uv, min(depth, distance), samp);
-				front.luminance = lerp(physical.luminance, front.luminance, CLOUD_DISTANCE_EXAGGERATION_PERCENT * 0.01);
-				front.transmittance = lerp(physical.transmittance, front.transmittance, CLOUD_DISTANCE_EXAGGERATION_PERCENT * 0.01);
+				front.luminance = lerp(physical.luminance, front.luminance, share);
+				front.transmittance = lerp(physical.transmittance, front.transmittance, share);
 			}
-#endif
 			const float3 flash = SharedData::physSkyData.lightningColorIntensity.w * SharedData::physSkyData.lightningBolt.z > 0.0 ?
 			                         TexLightningReflection.SampleLevel(samp, viewDir, 0).rgb * (SharedData::physSkyData.lightningColorIntensity.w * SharedData::physSkyData.lightningBolt.z) :
 			                         0.0;

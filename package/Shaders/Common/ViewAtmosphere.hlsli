@@ -85,18 +85,20 @@ namespace ViewAtmosphere
 	// air in front of a cloud is now what a surface at the same distance gets (same extra path, same limit, so a
 	// cloud never ends up hazier than the clear sky behind it). The clear sky, the sun, the moons and the stars
 	// stay physical.
-	// Percent of the exaggeration that clouds take: 100 = like a surface, 0 = physical (the old behaviour). Values
-	// in between cost a second lookup. Tunable by shader reload.
-#ifndef CLOUD_DISTANCE_EXAGGERATION_PERCENT
-#	define CLOUD_DISTANCE_EXAGGERATION_PERCENT 100
-#endif
+	// Share of the exaggeration that clouds take (viewAtmosphereSettings.cloudDistanceExaggeration, Distance Haze on
+	// Clouds in the menu): 1 = like a surface, 0 = physical (the old behaviour). Values in between cost a second
+	// lookup.
+	float CloudExaggerationShare()
+	{
+		return saturate(SharedData::viewAtmosphereSettings.cloudDistanceExaggeration);
+	}
 
 	/// Whether a cloud at this distance takes the exaggerated air. Cloud past the end of the volume (the horizon
 	/// band, tens of kilometres out) stands at its true distance, which already holds more air than any exaggerated
 	/// surface inside the map, and the volume cannot tell it from the sky: it stays physical.
 	bool CloudExaggerated(float cloudDistance, float volumeEnd)
 	{
-		return CLOUD_DISTANCE_EXAGGERATION_PERCENT > 0 && cloudDistance < volumeEnd * 0.999;
+		return CloudExaggerationShare() > 0.0 && cloudDistance < volumeEnd * 0.999;
 	}
 
 	float3 Position(Grid grid, uint3 coord, float3 offset)

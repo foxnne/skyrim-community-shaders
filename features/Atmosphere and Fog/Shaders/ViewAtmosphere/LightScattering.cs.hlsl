@@ -69,11 +69,9 @@ namespace ExponentialHeightFog
 
 // foxnne sun balance: in Follow Vanilla Fog mode the height fog is lit by the weather's fog colour, used as a
 // radiance that does not follow the sun, the moons or the cloud cover (pale blue fog under a dark night sky).
-// 1 lights it from the same sources as the air instead; 0 keeps the weather colour. Albedo is the share of the
-// fog's extinction that scatters. Defines, so they can be tuned by shader reload.
-#ifndef HEIGHT_FOG_LIGHT_FROM_SKY
-#	define HEIGHT_FOG_LIGHT_FROM_SKY 0
-#endif
+// viewAtmosphereSettings.heightFogSkyLight (Fog Lit by Sky in the menu) blends toward lighting it from the same
+// sources as the air instead: 0 keeps the weather colour, 1 is all sky. Albedo is the share of the fog's extinction
+// that scatters; a define, so it can be tuned by shader reload.
 #ifndef HEIGHT_FOG_SKY_ALBEDO
 #	define HEIGHT_FOG_SKY_ALBEDO 0.95
 #endif
@@ -144,18 +142,18 @@ float4 AnalyticalFogSource(float3 position, float3 materialPosition, float visib
 			fog *= fade;
 		} else {
 			fog = AnalyticalFogSource(position, center, visibility);
-#	if HEIGHT_FOG_LIGHT_FROM_SKY
 			// Weather fog lit like the air: sun and moons through the transmittance LUT plus the multiple scattering
 			// LUT, with the cloud and terrain visibility of this cell. Replaces the weather's fog colour, which is a
 			// constant radiance: it stays as bright at night and under cloud as the weather record says.
-			if (SharedData::exponentialHeightFogSettings.useVanillaFogSettings != 0 && sky.enabled && fog.a > 0.0) {
+			const float fogSkyLight = saturate(SharedData::viewAtmosphereSettings.heightFogSkyLight);
+			[branch] if (fogSkyLight > 0.0 && SharedData::exponentialHeightFogSettings.useVanillaFogSettings != 0 && sky.enabled && fog.a > 0.0)
+			{
 				const float3 fogScattering = fog.a * HEIGHT_FOG_SKY_ALBEDO;
 				float3 fogLight = AtmosphereLight(0u, position, direction, sky.sunDir, sky.sunlightColor, 0.0, fogScattering, atmosphereVisibility, diffuseVisibility);
 				fogLight += AtmosphereLight(1u, position, direction, sky.masserDir, sky.masserColor, 0.0, fogScattering, atmosphereVisibility, diffuseVisibility);
 				fogLight += AtmosphereLight(2u, position, direction, sky.secundaDir, sky.secundaColor, 0.0, fogScattering, atmosphereVisibility, diffuseVisibility);
-				fog.rgb = fogLight * sky.apLumMix;
+				fog.rgb = lerp(fog.rgb, fogLight * sky.apLumMix, fogSkyLight);
 			}
-#	endif
 		}
 		fog *= 1000.0 / GAME_UNIT_TO_M;
 		light += fog.rgb;

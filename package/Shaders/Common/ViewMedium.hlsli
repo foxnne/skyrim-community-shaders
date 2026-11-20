@@ -47,14 +47,13 @@ namespace ViewMedium
 	{
 		const bool exaggerated = ViewAtmosphere::CloudExaggerated(cloudDistance, ViewAtmosphere::Data[0].grids[2].depth.y);
 		ViewAtmosphere::Medium front = SampleHeightMedium(position, screenUV, samplerState, exaggerated);
-#if CLOUD_DISTANCE_EXAGGERATION_PERCENT > 0 && CLOUD_DISTANCE_EXAGGERATION_PERCENT < 100
-		[branch] if (exaggerated && ViewAtmosphere::Enabled() && ViewAtmosphere::SurfaceSet() > 0.0)
+		const float share = ViewAtmosphere::CloudExaggerationShare();
+		[branch] if (exaggerated && share < 0.999 && ViewAtmosphere::Enabled() && ViewAtmosphere::SurfaceSet() > 0.0)
 		{
 			const ViewAtmosphere::Medium physical = SampleHeightMedium(position, screenUV, samplerState, false);
-			front.luminance = lerp(physical.luminance, front.luminance, CLOUD_DISTANCE_EXAGGERATION_PERCENT * 0.01);
-			front.transmittance = lerp(physical.transmittance, front.transmittance, CLOUD_DISTANCE_EXAGGERATION_PERCENT * 0.01);
+			front.luminance = lerp(physical.luminance, front.luminance, share);
+			front.transmittance = lerp(physical.transmittance, front.transmittance, share);
 		}
-#endif
 		return front;
 	}
 

@@ -41,7 +41,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	distanceExaggeration,
 	distanceExaggerationStart,
 	distanceExaggerationFull,
-	distanceExaggerationHaze)
+	distanceExaggerationHaze,
+	distanceExaggerationLimit,
+	cloudDistanceExaggeration,
+	heightFogSkyLight)
 
 void ViewAtmosphere::LoadSettings(json& value)
 {
@@ -69,6 +72,9 @@ void ViewAtmosphere::LoadSettings(json& value)
 	settings.distanceExaggerationStart = bounded(settings.distanceExaggerationStart, defaults.distanceExaggerationStart, 0.0f, 2000.0f);
 	settings.distanceExaggerationFull = bounded(settings.distanceExaggerationFull, defaults.distanceExaggerationFull, 100.0f, 8000.0f);
 	settings.distanceExaggerationHaze = bounded(settings.distanceExaggerationHaze, defaults.distanceExaggerationHaze, 0.0f, 1.0f);
+	settings.distanceExaggerationLimit = bounded(settings.distanceExaggerationLimit, defaults.distanceExaggerationLimit, 0.5f, 12.0f);
+	settings.cloudDistanceExaggeration = bounded(settings.cloudDistanceExaggeration, defaults.cloudDistanceExaggeration, 0.0f, 1.0f);
+	settings.heightFogSkyLight = bounded(settings.heightFogSkyLight, defaults.heightFogSkyLight, 0.0f, 1.0f);
 	lastFrame = UINT32_MAX;
 }
 
@@ -134,6 +140,16 @@ void ViewAtmosphere::DrawSettings()
 	ImGui::SliderFloat(T(TKEY("distance_exaggeration_full"), "Exaggeration Full"), &settings.distanceExaggerationFull, 100.0f, 8000.0f, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
 	ImGui::SliderFloat(T(TKEY("distance_exaggeration_haze"), "Exaggeration Haze Share"), &settings.distanceExaggerationHaze, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	ImGui::TextWrapped("%s", T(TKEY("distance_exaggeration_ranges_hint"), "Everything nearer than the start keeps physical air; the full factor applies beyond the second distance. Haze share is how much of the factor also thickens the grey aerosol haze: blue air gives depth, haze flattens."));
+	ImGui::SliderFloat(T(TKEY("distance_exaggeration_limit"), "Distance Haze Limit"), &settings.distanceExaggerationLimit, 0.5f, 12.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("distance_exaggeration_limit_tooltip"), "How thick the added air may get before it stops building up. Lower = the farthest mountains keep a darker, clearer silhouette. Higher = they fade further into the sky colour. 5 is the value used so far."));
+	ImGui::SliderFloat(T(TKEY("cloud_distance_exaggeration"), "Distance Haze on Clouds"), &settings.cloudDistanceExaggeration, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("cloud_distance_exaggeration_tooltip"), "How much of the exaggerated air also lies in front of clouds. 1 = a cloud behind a mountain is as hazy as the mountain. 0 = clouds keep physical air and look crisper than the land in front of them. Values in between cost one extra lookup per pixel. The clear sky, sun, moons and stars are never changed."));
+	ImGui::SeparatorText(T(TKEY("height_fog_header"), "Height Fog Light"));
+	ImGui::SliderFloat(T(TKEY("height_fog_sky_light"), "Fog Lit by Sky"), &settings.heightFogSkyLight, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("height_fog_sky_light_tooltip"), "Height fog that follows the game's weather fog is lit by the weather's fog colour, which stays as bright at night and under cloud as the weather says. This blends toward lighting it by the sun, the moons and the sky like the air: 0 = weather colour, 1 = all sky. Only applies with Physical Sky on, the height fog in Follow Vanilla Fog mode and volumetric fog off."));
 	if (!IsReady() && ImGui::TreeNode(T(TKEY("standalone_sampling"), "Standalone Fog Sampling"))) {
 		ImGui::TextWrapped("%s", T(TKEY("standalone_hint"), "These controls only affect the separate volumetric fog path."));
 		ImGui::SliderFloat(T(TKEY("depth_distribution"), "Depth Distribution Scale"), &settings.depthDistribution, 1.0f, 128.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);

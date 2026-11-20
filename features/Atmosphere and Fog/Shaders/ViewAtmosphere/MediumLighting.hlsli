@@ -64,7 +64,25 @@ float MediumVisibility(float3 position, out float atmosphereVisibility, out floa
 			const float3 posLS = mul(light.ShadowProj[cascade], float4(position + FrameBuffer::CameraPosAdjust.xyz, 1)).xyz;
 			if (all(posLS.xy >= 0.0) && all(posLS.xy <= 1.0)) {
 				const float bias = SharedData::viewAtmosphereSettings.shadowBias;
+#ifdef MEDIUM_SOFT_CASCADE
+				// For a medium that lies on a surface (Ground Fog), where the edge of a shadow is seen at full
+				// size: four taps a texel and a half apart, each filtered between its four texels, so the edge
+				// is a smooth ramp three texels wide instead of steps the size of a shadow texel.
+				uint mapWidth, mapHeight, mapLayers;
+				DirectionalShadowMap.GetDimensions(mapWidth, mapHeight, mapLayers);
+				const float2 mapSize = float2(mapWidth, mapHeight);
+				float lit = 0.0;
+				[unroll] for (uint tap = 0u; tap < 4u; ++tap)
+				{
+					const float2 tapUv = posLS.xy + (float2(tap & 1u, tap >> 1u) - 0.5) * 1.5 / mapSize;
+					const float2 f = frac(tapUv * mapSize - 0.5);
+					const float4 open = float4(DirectionalShadowMap.GatherRed(LinearSampler, float3(tapUv, cascade)) > posLS.z - bias);
+					lit += lerp(lerp(open.w, open.z, f.x), lerp(open.x, open.y, f.x), f.y);
+				}
+				visibility *= 0.25 * lit;
+#else
 				visibility *= dot(float4(DirectionalShadowMap.GatherRed(LinearSampler, float3(posLS.xy, cascade)) > posLS.z - bias), 0.25);
+#endif
 			}
 		}
 	}

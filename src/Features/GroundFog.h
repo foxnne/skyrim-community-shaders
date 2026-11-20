@@ -52,6 +52,7 @@ struct GroundFog : Feature
 		float SunScale = 1.0f;
 		float SkyAmbientScale = 1.0f;
 		float SelfShadow = 1.0f;
+		float SunDiffusion = 0.5f;  // share of the sun and moon light the fog sends out evenly to all sides
 		float GroundFill = 0.25f;  // share of Thickness
 		// Pixel pass.
 		float SurfaceBlendDistance = 3.0f;  // end of the view ray over which the ground becomes the visible surface
@@ -81,6 +82,7 @@ struct GroundFog : Feature
 		float SettleTime = 6.0f;    // seconds over which disturbed fog returns to its resting amount
 		float DownhillFlow = 1.0f;  // how strongly the fog runs down slopes and steps into the low places
 		float Swirl = 1.0f;         // eddies in still fog and, more, in fog that is moving
+		float Pooling = 1.0f;       // 0: the pool rests evenly; 1: in dips and at the foot of slopes, little on level ground
 		bool HalfResolution = true;
 		float StepGrowth = 0.3f;  // size of terrain detail the march follows, as a share of the distance from the camera
 		int MaxSteps = 72;
@@ -159,7 +161,7 @@ struct GroundFog : Feature
 		float PoolExtinction;
 		float PoolThickness;
 		float PoolEnd;
-		float PoolPad;
+		float SunWrap;
 	};
 	static_assert(sizeof(VolumeData) == 304);
 	static_assert(offsetof(VolumeData, MapZ) == 16);
@@ -217,7 +219,7 @@ struct GroundFog : Feature
 		float RestUniform;
 		uint32_t SimFlags;
 		float FloorRise;
-		float SimPad;
+		float Pooling;
 		FlowEmitter Emitters[kMaxFlowEmitters];
 	};
 	static_assert(sizeof(FlowEmitter) == 32);

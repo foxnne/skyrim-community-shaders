@@ -41,6 +41,8 @@
 
 #define COMPUTESHADER
 #define PS_LINEAR_SHADOW_SAMPLER
+// The fog lies on the ground, where a shadow's edge is seen at full size: the cascades are read filtered.
+#define MEDIUM_SOFT_CASCADE
 #include "Common/Random.hlsli"
 #include "Common/ViewAtmosphere.hlsli"
 #include "PhysicalSky/Common.hlsli"
@@ -270,7 +272,9 @@ namespace GroundFog
 	void Shade(inout Joint joint, Ray ray, float2 xy, GroundSample ground, float reach, inout Slow slow, inout uint taps)
 	{
 		const float2 xyAbs = xy + FrameBuffer::CameraPosAdjust.xy;
-		const float sheetFade = 1.0 - smoothstep(FadeStart, FadeEnd, joint.t);
+		// Where the pool lies the sheet does not: it is laid on the height map, which near the camera puts it on
+		// walls and banks. It comes in exactly as the pool goes out.
+		const float sheetFade = (1.0 - smoothstep(FadeStart, FadeEnd, joint.t)) * (PoolExtinction > 0.0 ? smoothstep(0.5 * PoolEnd, PoolEnd, joint.t) : 1.0);
 		// The valley layer comes in exactly as the sheet goes out, so there is no ring where the sheet ends.
 		const float valleyFade = FarExtinction > 0.0 ? (1.0 - sheetFade) * (1.0 - smoothstep(0.75 * FarEnd, FarEnd, joint.t)) : 0.0;
 		const float nearFade = NearExtinction > 0.0 ? 1.0 - smoothstep(0.5 * NearEnd, NearEnd, joint.t) : 0.0;
@@ -559,7 +563,7 @@ namespace GroundFog
 	const float valleyLift = anchor ? 2.0 * anchorReach : 0.0;
 	const bool debugTaps = GroundFog::DebugMode == 4u;
 	const float4 clear = float4(0.0, 0.0, 0.0, 1.0);
-	const float4 clearAux = float4(auxDepths, 1.0, 1.0);
+	const float4 clearAux = float4(auxDepths, 1.0, 0.0);
 
 	// Where the nearest of the four scene pixels lies along this ray.
 	const float tNear = viewNear < viewFar * 0.98 ? min(sceneDistance * viewNear / viewFar, tEnd) : tEnd;
@@ -596,7 +600,7 @@ namespace GroundFog
 	const bool march = camZ + min(dir.z * tEnd, 0.0) - GroundFog::GroundMaxAlong(0.0, endXY) <= GroundFog::SlabTop(0.0, tEnd, lift, floorLift, valleyLift);
 	if (!march && pool.tau <= 0.0) {
 		FogOut[pixel] = debugTaps ? float4(GroundFog::TapColor(taps) * GroundFog::SkyMean() * 4.0, 0.5) : clear;
-		FogAuxOut[pixel] = debugTaps ? float4(auxDepths, 0.5, 1.0) : clearAux;
+		FogAuxOut[pixel] = debugTaps ? float4(auxDepths, 0.5, 0.0) : clearAux;
 		return;
 	}
 
@@ -761,7 +765,7 @@ namespace GroundFog
 
 	if (debugTaps) {
 		FogOut[pixel] = float4(GroundFog::TapColor(taps) * GroundFog::SkyMean() * 4.0, 0.5);
-		FogAuxOut[pixel] = float4(auxDepths, 0.5, 1.0);
+		FogAuxOut[pixel] = float4(auxDepths, 0.5, 0.0);
 		return;
 	}
 	if (seen.share < 1.0 / 2048.0) {
@@ -813,6 +817,20 @@ namespace GroundFog
 		visibility * GroundFog::SelfShadowing(tauAbove, physSky.masserDir.z), diffuseVisibility);
 	light += AtmosphereLight(2u, lightPos, dir, physSky.secundaDir, physSky.secundaColor, 0.0, albedo,
 		visibility * GroundFog::SelfShadowing(tauAbove, physSky.secundaDir.z), diffuseVisibility);
+	// Dense fog scatters many times before the light leaves it, which evens out the direction it leaves in: beside
+	// the forward-peaked single scattering above, a share of the sun's and moons' light (after the atmosphere, so
+	// warm at a low sun) comes out evenly to every side.
+	if (GroundFog::SunWrap > 0.0) {
+		const float3 planet = PhysSky::GetMediumPlanetPosition(lightPos);
+		const float3 lightDirs[3] = { physSky.sunDir, physSky.masserDir, physSky.secundaDir };
+		const float3 lightColors[3] = { physSky.sunlightColor, physSky.masserColor, physSky.secundaColor };
+		[unroll] for (uint l = 0u; l < 3u; ++l)
+		{
+			if (any(lightColors[l] > 0.0) && dot(lightDirs[l], lightDirs[l]) >= 0.5)
+				light += lightColors[l] * PhysSky::SampleAtmosphereLightTr(PhysSky::TexTrLut, LinearSampler, planet, lightDirs[l], physSky.diskAngularRadius[l]) *
+				         (albedo * GroundFog::SunWrap * 0.0795775 * visibility * GroundFog::SelfShadowing(tauAbove, lightDirs[l].z));
+		}
+	}
 	light *= GroundFog::SunScale;
 	// Sky light reaches fog in the shadow of terrain and objects too, so it takes no direct visibility.
 	light += albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming;
@@ -820,5 +838,7 @@ namespace GroundFog
 	// A uniform medium of this light per unit of extinction; the composite multiplies by the opacity at the depth
 	// of each of its pixels.
 	FogOut[pixel] = float4(min(max(light, 0.0), 65504.0), exp(-seen.tau));
-	FogAuxOut[pixel] = float4(auxDepths, exp(-tauNear), 1.0);
+	// w: the share of the fog in front of the nearest depth that is the pool, which lies at the end of the ray and
+	// not along it.
+	FogAuxOut[pixel] = float4(auxDepths, exp(-tauNear), tauNear > 1e-5 ? saturate(pool.tauNear / tauNear) : 0.0);
 }

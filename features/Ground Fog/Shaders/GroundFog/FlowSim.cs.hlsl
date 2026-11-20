@@ -25,12 +25,16 @@
 //      fluid around a moving cylinder: inside its radius the fog moves with it; outside it is pushed aside ahead
 //      and drawn back in behind. Emitters with a burst add an outward ring (an impact). Each also stirs a share
 //      of the fog away. Heat sources, spells and explosions are further emitters: see GatherSimEmitters.
-// 4. Settle: the amount goes toward the resting amount over RefillTime. That is the one rule that places all of
+// 4. Settle: the amount goes toward the resting amount over RefillTime. With Pooling the resting amount follows
+//    the floor map at the scale of a few strides: a dip, a gutter or the foot of a slope holds the most, level open
+//    ground a little, a rise none. So the settling keeps what the downhill flow gathers instead of evening it out. A floor that stands above the lowest floor
+//    around it (the top of a wall, a cart, a rock, a steep bank) holds none. That is the one rule that places all of
 //    the fog (GroundFog::RestingAmountAt: low ground, water, shade, time of day) times the drifting patches.
 //    Without terrain data (SimFlags bit 0 clear) the resting amount is RestUniform: the hook for interiors.
 // 5. Floor: the lowest up-facing surface the pixel pass saw in and around this texel last frame (FloorSeen) is
 //    folded into the floor map. It drops to a lower sighting at once and rises to a higher one slowly, so a table
-//    top or a shoulder passing over a texel does not become its floor. The slope of the floor over about a meter
+//    top or a shoulder passing over a texel does not become its floor; differences of a few units are left alone,
+//    so with the camera still the map does not change from frame to frame. The slope of the floor over about a meter
 //    is written out beside it (GroundFog::FogSlope) for the drawing of the pool.
 
 #define COMPUTESHADER
@@ -73,7 +77,7 @@ cbuffer SimCB : register(b3)
 	float RestUniform;  // resting amount where there is no terrain data
 	uint SimFlags;      // bit 0: terrain data is bound (height map, water, terrain shadow)
 	float FloorRise;    // share of the way up to a higher floor sighting gone over this step
-	float SimPad;
+	float Pooling;  // 0: the fog rests evenly; 1: in the low places of the floor, little on level ground, none on rises
 	Emitter Emitters[MaxEmitters];
 };
 
@@ -83,7 +87,23 @@ RWTexture2D<float4> StateOut : register(u0);
 RWTexture2D<float> FloorOut : register(u1);
 RWTexture2D<float4> SlopeOut : register(u2);
 
-static const float MaxAmount = 6.0;
+static const float MaxAmount = 4.0;
+// The most a place holds relative to what rests there, and at least this much room for fog passing through.
+static const float MaxPile = 2.5;
+static const float MinRoom = 0.2;
+// A floor this far above the lowest floor within a stride or so of it is a raised thing (the top of a wall, a cart,
+// a rock, a steep bank): the fog does not rest on it. Game units; between the two it thins.
+static const float RaisedStart = 25.0;
+static const float RaisedEnd = 60.0;
+// The floor map follows a lower sighting at once and a higher one slowly, but only beyond these (game units), so
+// that with the camera still it comes to rest and stays.
+// Pooling: what level ground holds of the even amount, the mean rise of the floor around a place (game units) that
+// adds the whole even amount to it (and a place that much above its surroundings holds none), and the most.
+static const float RestFlat = 0.3;
+static const float RestDepth = 35.0;
+static const float RestMax = 1.6;
+static const float FloorDropSlack = 1.0;
+static const float FloorRiseSlack = 8.0;
 static const float MaxSpeed = 1500.0;
 static const float SwirlSize = 140.0;  // game units per cell of the swirl noise (2 m)
 
@@ -102,14 +122,18 @@ static const float SwirlSize = 140.0;  // game units per cell of the swirl noise
 	const float2 xy = Corner + (float2(pixel) + 0.5) * TexelSize;
 	const float2 xyAbs = xy + FrameBuffer::CameraPosAdjust.xy;
 	float rest = RestUniform;
+	float water = 0.0;
 	if (SimFlags & 1u)
-		rest = GroundFog::RestingAmountAt(xy, TexelSize, GroundFog::BurnSunlitNear);
+		rest = GroundFog::RestingAmountAt(xy, TexelSize, GroundFog::BurnSunlitNear, water);
 	rest *= GroundFog::DensityModifier(xyAbs, TexelSize);
+	const float open = rest;
 
 	float2 velocity = Wind;
 	float amount = rest;
 	float level = GroundFog::FloorEmpty;
 	float4 floorSlope = 0.0;
+	float raised = 0.0;
+	float lowness = RestFlat;
 	if (had) {
 		const int2 left = max(before - int2(1, 0), 0);
 		const int2 right = min(before + int2(1, 0), last);
@@ -150,8 +174,38 @@ static const float SwirlSize = 140.0;  // game units per cell of the swirl noise
 			if (all(corners < GroundFog::FloorUnknown))
 				smooth = 0.5 * slope + 0.25 * float2((corners.y - corners.x) + (corners.w - corners.z), (corners.z - corners.x) + (corners.w - corners.y)) / (2.0 * TexelSize);
 			floorSlope = float4(clamp(smooth, -2.0, 2.0), 1.0, 0.0);
-			slope *= min(1.0, rsqrt(max(dot(slope, slope), 1e-6)));
+			// The fog runs down slopes. A step or a wall is not a slope: nothing accelerates through it, or the
+			// fog would pile up without bound at its foot.
+			slope *= 1.0 - smoothstep(0.35, 0.8, length(slope));
 			velocity -= Downhill * slope * DeltaTime;
+		}
+
+		// How far this floor stands above the lowest floor around it, three texels out.
+		if (level < GroundFog::FloorUnknown) {
+			static const int2 ring[8] = { int2(3, 0), int2(-3, 0), int2(0, 3), int2(0, -3), int2(2, 2), int2(-2, 2), int2(2, -2), int2(-2, -2) };
+			float lowest = min(min(floors.x, floors.y), min(floors.z, floors.w));
+			[unroll] for (uint k = 0u; k < 8u; ++k)
+				lowest = min(lowest, GroundFog::FogFloor.Load(int3(clamp(before + ring[k], 0, last), 0)));
+			raised = smoothstep(RaisedStart, RaisedEnd, level - lowest);
+
+			// How low this floor lies among the floor around it, a stride and two strides out: the mean of how
+			// far the floor there stands above it. What stands far above it is a wall or a thing, not ground,
+			// and says nothing; what lies far below counts as a step down and no more.
+			static const int2 around[16] = { int2(4, 0), int2(-4, 0), int2(0, 4), int2(0, -4), int2(3, 3), int2(-3, 3), int2(3, -3), int2(-3, -3),
+				int2(8, 0), int2(-8, 0), int2(0, 8), int2(0, -8), int2(6, 6), int2(-6, 6), int2(6, -6), int2(-6, -6) };
+			float sum = 0.0;
+			float count = 0.0;
+			[unroll] for (uint m = 0u; m < 16u; ++m)
+			{
+				const float other = GroundFog::FogFloor.Load(int3(clamp(before + around[m], 0, last), 0));
+				if (other < GroundFog::FloorUnknown) {
+					const float above = other - level;
+					sum += above > RaisedEnd ? 0.0 : max(above, -RaisedEnd);
+					count += 1.0;
+				}
+			}
+			if (count >= 4.0)
+				lowness = clamp(RestFlat + sum / count / RestDepth, 0.0, RestMax);
 		}
 	}
 
@@ -185,9 +239,12 @@ static const float SwirlSize = 140.0;  // game units per cell of the swirl noise
 		amount *= saturate(1.0 - emitter.clear * ClearStrength * bell);
 	}
 
-	// 4. Settle.
+	// 4. Settle. Nothing rests on raised things, and no place holds more than MaxPile times what rests there.
+	// Water is level, and fog lies on it.
+	lowness = lerp(lowness, max(lowness, 1.0), water);
+	rest = open * (1.0 - raised) * lerp(1.0, lowness, Pooling);
 	amount += (rest - amount) * RefillRate;
-	amount = clamp(amount, 0.0, MaxAmount);
+	amount = clamp(amount, 0.0, min(MaxAmount, max(MaxPile * rest, MinRoom * (1.0 - raised))));
 	velocity = clamp(velocity, -MaxSpeed, MaxSpeed);
 	if (!(amount >= 0.0) || !(dot(velocity, velocity) < 1.0e9)) {
 		amount = rest;
@@ -204,8 +261,12 @@ static const float SwirlSize = 140.0;  // game units per cell of the swirl noise
 				seen = min(seen, FloorSeen.Load(int3(clamp(before + int2(dx, dy), 0, last), 0)));
 		}
 	}
-	if (seen < GroundFog::FloorUnknown)
-		level = level >= GroundFog::FloorUnknown || seen < level ? seen : level + (seen - level) * FloorRise;
+	if (seen < GroundFog::FloorUnknown) {
+		if (level >= GroundFog::FloorUnknown || seen < level - FloorDropSlack)
+			level = seen;
+		else if (seen > level + FloorRiseSlack)
+			level += (seen - level) * FloorRise;
+	}
 	FloorOut[pixel] = level;
 	SlopeOut[pixel] = floorSlope;
 }

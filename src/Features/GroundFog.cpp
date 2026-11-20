@@ -42,6 +42,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	SunScale,
 	SkyAmbientScale,
 	SelfShadow,
+	SunDiffusion,
 	GroundFill,
 	SurfaceBlendDistance,
 	SurfaceMaxHeight,
@@ -64,6 +65,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	SettleTime,
 	DownhillFlow,
 	Swirl,
+	Pooling,
 	HalfResolution,
 	StepGrowth,
 	MaxSteps,
@@ -440,13 +442,14 @@ uint32_t GroundFog::GatherSimEmitters(FlowEmitter* a_emitters, double a_originX,
 		if (!std::isfinite(speed) || speed < kFlowMinSpeed || speed > 4000.0f)
 			return;
 		const float radius = std::clamp(0.3f * a_actor->GetHeight(), 30.0f, 250.0f);
-		const float clear = std::min(speed / 400.0f, 1.5f) * 0.9f * a_deltaTime;
+		// A walker stirs away about half of the fog in its path each second, a runner nearly all of it.
+		const float clear = std::min(speed / 400.0f, 1.5f) * 2.2f * a_deltaTime;
 		const float dx = position.x - eye.x;
 		const float dy = position.y - eye.y;
 		// Whatever walks stands on the floor the fog lies on, whatever the land map says is under it. What flies
 		// (a dragon overhead) is over it.
 		const float weight = a_actor->IsInMidair() ? -1.0f : 1.0f;
-		add(position, velocity, radius * 1.5f, 0.0f, clear, 2.0f + (dx * dx + dy * dy) * 1.0e-8f, weight);
+		add(position, velocity, radius * 2.0f, 0.0f, clear, 2.0f + (dx * dx + dy * dy) * 1.0e-8f, weight);
 	};
 	if (auto player = RE::PlayerCharacter::GetSingleton())
 		visitActor(player, player->GetHandle().native_handle());
@@ -537,6 +540,7 @@ float4 GroundFog::PrepareSim(bool a_pool)
 	simData->Spread = kSimWaveSpeed * kSimWaveSpeed;
 	simData->Corner = { cornerX, cornerY };
 	simData->Swirl = settings.Swirl;
+	simData->Pooling = std::clamp(settings.Pooling, 0.0f, 1.0f);
 	simData->SwirlTime = static_cast<float>(swirlTime);
 	// Without terrain data the fog rests evenly. Interiors would set this from the cell (and a floor level).
 	simData->RestUniform = 1.0f;
@@ -724,6 +728,7 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 	a_data.SunScale = settings.SunScale;
 	a_data.SkyAmbientScale = settings.SkyAmbientScale;
 	a_data.SelfShadow = settings.SelfShadow;
+	a_data.SunWrap = settings.SunDiffusion;
 	a_data.Flags = 1u | (settings.HalfResolution ? 2u : 0u);
 	a_data.DebugMode = static_cast<uint32_t>(debugMode);
 	a_data.SurfaceBlend = slab ? 0.0f : settings.SurfaceBlendDistance * unitsPerMeter;
@@ -1108,6 +1113,9 @@ void GroundFog::DrawSettings()
 		ImGui::SliderFloat(T(TKEY("settle_time"), "Settle Time"), &settings.SettleTime, kMinSettleTime, kMaxSettleTime, "%.1f s", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
 		Util::HoverTip(T(TKEY("settle_time_tooltip"), "How long the pool takes to come back to its resting amount after it has been disturbed, and to follow the time of day, shade and water as you move. Short heals wakes quickly; long leaves trails."));
 
+		ImGui::SliderFloat(T(TKEY("pooling"), "Pooling"), &settings.Pooling, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("pooling_tooltip"), "How much the pool keeps to the low places of the ground you see. At 1 it gathers in dips, gutters and at the foot of slopes and over water, leaves a thin veil on level open ground and none on rises. At 0 it lies evenly everywhere."));
+
 		ImGui::SliderFloat(T(TKEY("downhill_flow"), "Downhill Flow"), &settings.DownhillFlow, 0.0f, kMaxDownhillFlow, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("downhill_flow_tooltip"), "How strongly the pool runs down slopes, off steps and rocks and into the low places of the ground you see. 0 leaves it where it rests."));
 
@@ -1206,6 +1214,9 @@ void GroundFog::DrawSettings()
 
 		ImGui::SliderFloat(T(TKEY("sun_scale"), "Sun and Moon Light"), &settings.SunScale, 0.0f, kMaxLightScale, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("sun_scale_tooltip"), "Scales the light the fog takes from the sun and moons. 1 matches the haze."));
+
+		ImGui::SliderFloat(T(TKEY("sun_diffusion"), "Sun Diffusion"), &settings.SunDiffusion, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("sun_diffusion_tooltip"), "Share of the sun and moon light that lit fog sends out evenly to all sides, as dense fog does, on top of the glow toward the light. It gives lit fog the colour of the low sun from any direction. 0 leaves only the glow toward the light and the sky light."));
 
 		ImGui::SliderFloat(T(TKEY("sky_ambient_scale"), "Sky Light"), &settings.SkyAmbientScale, 0.0f, kMaxLightScale, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("sky_ambient_scale_tooltip"), "Scales the light the fog takes from the whole sky, which is what lights it in shadow."));
@@ -1348,6 +1359,7 @@ void GroundFog::LoadSettings(json& o_json)
 	sanitize(settings.SunScale, defaults.SunScale, 0.0f, kMaxLightScale);
 	sanitize(settings.SkyAmbientScale, defaults.SkyAmbientScale, 0.0f, kMaxLightScale);
 	sanitize(settings.SelfShadow, defaults.SelfShadow, 0.0f, kMaxLightScale);
+	sanitize(settings.SunDiffusion, defaults.SunDiffusion, 0.0f, 1.0f);
 	sanitize(settings.GroundFill, defaults.GroundFill, 0.0f, kMaxGroundFill);
 	sanitize(settings.SurfaceBlendDistance, defaults.SurfaceBlendDistance, 0.0f, kMaxSurfaceBlend);
 	sanitize(settings.SurfaceMaxHeight, defaults.SurfaceMaxHeight, 0.0f, kMaxSurfaceHeight);
@@ -1369,6 +1381,7 @@ void GroundFog::LoadSettings(json& o_json)
 	sanitize(settings.SettleTime, defaults.SettleTime, kMinSettleTime, kMaxSettleTime);
 	sanitize(settings.DownhillFlow, defaults.DownhillFlow, 0.0f, kMaxDownhillFlow);
 	sanitize(settings.Swirl, defaults.Swirl, 0.0f, kMaxSwirl);
+	sanitize(settings.Pooling, defaults.Pooling, 0.0f, 1.0f);
 	sanitize(settings.StepGrowth, defaults.StepGrowth, kMinStepGrowth, kMaxStepGrowth);
 	sanitize(settings.FarAmount, defaults.FarAmount, 0.0f, kMaxAmount);
 	sanitize(settings.FarDensity, defaults.FarDensity, kMinFarDensity, kMaxFarDensity);

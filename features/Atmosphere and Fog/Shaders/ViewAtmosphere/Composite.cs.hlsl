@@ -18,7 +18,8 @@ RWTexture2D<float4> MainRW : register(u0);
 // Ground Fog's own pass, at full or half resolution. Unbound when there is none this frame.
 // TexGroundFog     rgb: light scattered toward the camera per unit of opacity, a: transmittance to the far depth
 // TexGroundFogAux  x, y: nearest and farthest view depth of the scene pixels the texel stands for (/ 64),
-//                  z: transmittance to the nearest depth
+//                  z: transmittance to the nearest depth, w: the share of that fog that lies at the end of the ray
+//                  (the pool) and not along it
 Texture2D<float4> TexGroundFog : register(t42);
 Texture2D<float4> TexGroundFogAux : register(t43);
 
@@ -62,8 +63,13 @@ float4 SampleGroundFog(uint2 pixel, uint2 size, uint2 activeSize, float depth)
 		const float tauNear = -log(max(aux.z, 1e-4));
 		const float tauFar = -log(max(fog.a, 1e-4));
 		float tau;
-		if (viewDepth <= aux.x)
-			tau = tauNear * viewDepth / max(aux.x, 1e-3);
+		if (viewDepth <= aux.x) {
+			// In front of everything the texel saw. The fog along the ray thins evenly toward the camera; the pool
+			// lies on the ground at the end of the ray, so something well in front of that is in front of it.
+			const float along = viewDepth / max(aux.x, 1e-3);
+			const float atEnd = saturate((along - 0.75) * 4.0);
+			tau = tauNear * lerp(along, atEnd * atEnd, saturate(aux.w));
+		}
 		else if (viewDepth >= aux.y)
 			tau = tauFar;
 		else

@@ -89,7 +89,7 @@ namespace GroundFog
 		float PoolExtinction;  // extinction at the ground, per game unit, amount included; 0 = none
 		float PoolThickness;   // height at which it has thinned to nothing, game units
 		float PoolEnd;         // game units from the camera; fades out over the second half
-		float PoolPad;
+		float SunWrap;         // share of an even (isotropic) phase added to the sun and moon light the fog scatters
 	};
 
 	Texture2D<float> HeightMap : register(t6);
@@ -404,7 +404,7 @@ namespace GroundFog
 		if (inside <= 0.0)
 			return 1.0;
 		const float4 state = FogSim.SampleLevel(LinearSampler, uv, 0);
-		return lerp(1.0, clamp(state.z / max(state.w, 0.05), 0.0, 2.5), inside);
+		return lerp(1.0, clamp(state.z / max(state.w, 0.05), 0.0, 1.5), inside);
 	}
 
 	// The density of the fog at rest relative to its mean, at an absolute xy: two octaves of value noise travelling
@@ -540,14 +540,16 @@ namespace GroundFog
 		return rest;
 	}
 
-	// The whole rule at a camera-relative xy, with its own reads (up to five).
-	float RestingAmountAt(float2 xy, float reach, float sunlit)
+	// The whole rule at a camera-relative xy, with its own reads (up to five). water: how much of the place is water.
+	float RestingAmountAt(float2 xy, float reach, float sunlit, out float water)
 	{
+		water = 0.0;
 		const float coverage = MapCoverage(MapUv(xy));
 		if (coverage <= 0.0)
 			return 0.0;
 		const float2 xyAbs = xy + FrameBuffer::CameraPosAdjust.xy;
 		const GroundSample ground = GroundAt(xy, reach);
+		water = ground.water;
 		uint taps = 0u;
 		float rest = RestingAmount(coverage, ground, TerrainShade(xyAbs, ground.z + 70.0, taps), sunlit, xyAbs, reach);
 		if (rest > 0.0 && BasinStrength > 0.0)

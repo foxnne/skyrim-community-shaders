@@ -94,6 +94,10 @@ namespace GroundFog
 		float Wispiness;       // 0: the resting fog is even patches; 1: separate wisps with clear air between them
 		float InvWispScale;    // per game unit
 		float CanopyShade;     // how much what stands over the fog (canopy, walls) dims the sky light it takes; 0 = open sky everywhere
+		float FogForward;      // Henyey-Greenstein g of the fog's scattering (see FogScatter)
+		float FogMultiple;     // strength of each octave of multiple scattering relative to the one before
+		float PoolDensityScale;  // the pool's extinction as a share of the near layer's (Pool Opacity)
+		float BridgePad;
 	};
 
 	Texture2D<float> HeightMap : register(t6);
@@ -109,6 +113,40 @@ namespace GroundFog
 	Texture2D<float4> WaterMap : register(t9);
 
 	static const float TopLimit = 0.3;  // banks raise the layer by at most this share per unit of BankStrength
+
+	// ---------------------------------------------------------------------------------------------------------
+	// Tuning of the bridged fog (pool, sheet and valley layer as one body). Shader constants, so they can be tried
+	// by hot reload; FogForward, FogMultiple and PoolDensityScale are settings (GroundFogCB).
+	//
+	// Lighting, the same for every layer: fog droplets scatter forward. A Henyey-Greenstein lobe of FogForward, with
+	// SunWrap of the light sent out evenly, plus two octaves of multiple scattering (Wrenninge's approximation):
+	// each octave is FogMultiple times as strong as the one before, sees the light through FogMultipleReach times
+	// as much of the fog above it, and is half as forward. So thick fog in shade glows softly instead of going grey.
+	static const float FogMultipleReach = 0.35;
+	//
+	// The valley layer. It thins out on land steeper than ValleySlope (rise over run, from x to y), and where the
+	// coarse ground under it may be off the land by more than ValleyDoubt times its depth (from x to y). When the
+	// time of day burns it off its depth falls with the square root of what is left, to no less than ValleyLowest.
+	static const float2 ValleySlope = float2(0.2, 0.5);
+	static const float2 ValleyDoubt = float2(0.9, 2.5);
+	static const float ValleyLowest = 0.4;
+	//
+	// The sheet between the pool and the valley layer (GroundFogPixel.cs.hlsl, SheetBridge and its placement). It
+	// rests like the pool: in what lies lower than the land around it (the basin read), over water and in terrain
+	// shade, SheetPooling of the way from the old basin rule; open level ground keeps SheetFlat, shade adds up to
+	// SheetShade. Its column of fog goes BridgeToValley of the way to the valley layer's as it fades into it.
+	// PoolRestMean: what the pool shows of its column where it hands over, relative to its mean amount: what rests in
+	// a dip, times the levelling off of its optical depth seen at a grazing angle (PoolTauKnee), about half.
+	static const float SheetPooling = 0.85;
+	static const float SheetFlat = 0.06;
+	static const float SheetShade = 0.4;
+	static const float BridgeToValley = 0.6;
+	static const float PoolRestMean = 0.5;
+	//
+	// An up-facing surface this far above the terrain height map (from x to y, game units: 0.1 m to 1 m) may be the
+	// top of grass or plants; it goes into the pool's floor map only if it is not thin and is a plane around the
+	// pixel (GroundFogPixel.cs.hlsl).
+	static const float2 PlantFloor = float2(7.0, 70.0);
 
 	struct Cell
 	{
@@ -437,10 +475,12 @@ namespace GroundFog
 	// The noise the wisps of the pool are cut from: the two-octave value noise of the resting fog in Iwillbewarlock's
 	// GroundFog (EqFog in its WindShaders.h, GPL-3.0: weights 2/3 and 1/3, riding the wind), here bent by a broader
 	// noise so the shapes are drawn out and curl. About 0.5, standard deviation 0.16.
-	float WispNoise(float2 xyAbs)
+	// time, seconds: the bend changes over about half a minute, so the shapes curl, merge and break up in still
+	// air too instead of only travelling with the wind.
+	float WispNoise(float2 xyAbs, float time)
 	{
 		const float2 p = (xyAbs - WindTravel) * InvWispScale;
-		const float2 bend = float2(ValueNoise(p * 0.45 + 3.1), ValueNoise(p * 0.45 + 9.7)) - 0.5;
+		const float2 bend = float2(ValueNoise(p * 0.45 + 3.1 + time * float2(0.031, -0.023)), ValueNoise(p * 0.45 + 9.7 + time * float2(-0.027, 0.029))) - 0.5;
 		const float2 q = p + 1.8 * bend;
 		return (2.0 * ValueNoise(q) + ValueNoise(q * 2.3 + 17.0)) / 3.0;
 	}
@@ -457,13 +497,13 @@ namespace GroundFog
 	// travel. The finest structure is added where the pool is drawn (Pool.hlsli), below the simulation's texels.
 	static const float WispPeak = 2.2;
 	static const float WispFeather = 0.34;
-	float RestPattern(float2 xyAbs, float reach, float budget)
+	float RestPattern(float2 xyAbs, float reach, float budget, float time)
 	{
 		const float even = DensityModifier(xyAbs, reach) * budget;
 		if (Wispiness <= 0.0)
 			return even;
 		const float threshold = lerp(0.70, 0.26, saturate(budget / 1.2));
-		const float inside = saturate((WispNoise(xyAbs) - threshold) / WispFeather);
+		const float inside = saturate((WispNoise(xyAbs, time) - threshold) / WispFeather);
 		const float wisp = WispPeak * sqrt(clamp(budget, 0.5, 1.6)) * inside * sqrt(inside) * smoothstep(0.0, 0.15, budget);
 		return lerp(even, wisp, Wispiness);
 	}
@@ -748,6 +788,36 @@ namespace GroundFog
 	float SelfShadowing(float tauAbove, float lightZ)
 	{
 		return exp(-SelfShadow * tauAbove / max(lightZ, 0.15));
+	}
+
+	float PhaseHG(float cosine, float g)
+	{
+		const float g2 = g * g;
+		const float denom = max(1.0 + g2 - 2.0 * g * cosine, 1e-4);
+		return 0.0795775 * (1.0 - g2) / (denom * sqrt(denom));
+	}
+
+	// Light the fog scatters toward the camera per unit of incoming light and of extinction, for a light whose
+	// direction makes `cosine` with the view ray, through fog of optical depth tauAbove over the point (toward the
+	// light, along the vertical). Single scattering plus two octaves of multiple scattering; see FogForward.
+	// body: optical depth of the fog around the point, which is how much light there is to scatter more than once:
+	// a thin veil gets almost none of the octaves, a thick bank all of them.
+	float FogScatter(float cosine, float tauAbove, float lightZ, float body)
+	{
+		const float tauToLight = SelfShadow * tauAbove / max(lightZ, 0.15);
+		const float multiple = OneMinusExp(max(body, 0.0));
+		float sum = 0.0;
+		float strength = 1.0;
+		float reach = 1.0;
+		float g = FogForward;
+		[unroll] for (uint i = 0u; i < 3u; ++i)
+		{
+			sum += strength * lerp(PhaseHG(cosine, g), 0.0795775, SunWrap) * exp(-reach * tauToLight);
+			strength *= FogMultiple * multiple;
+			reach *= FogMultipleReach;
+			g *= 0.5;
+		}
+		return sum;
 	}
 
 	// Mean incident sky radiance, clouds included.

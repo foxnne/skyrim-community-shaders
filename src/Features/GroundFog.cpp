@@ -45,6 +45,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	SelfShadow,
 	SunDiffusion,
 	SunLimit,
+	ForwardScatter,
+	MultipleScatter,
 	CanopyShade,
 	GroundFill,
 	SurfaceBlendDistance,
@@ -72,6 +74,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	DownhillFlow,
 	Swirl,
 	Pooling,
+	PoolOpacity,
+	WakeTime,
 	HalfResolution,
 	StepGrowth,
 	MaxSteps,
@@ -153,6 +157,12 @@ namespace
 	constexpr float kMinWispScale = 1.0f;
 	constexpr float kMaxWispScale = 15.0f;
 	constexpr float kMaxSunLimit = 8.0f;
+	constexpr float kMaxForwardScatter = 0.9f;
+	constexpr float kMaxMultipleScatter = 0.9f;
+	constexpr float kMinPoolOpacity = 0.05f;
+	constexpr float kMaxPoolOpacity = 1.5f;
+	constexpr float kMinWakeTime = 1.0f;
+	constexpr float kMaxWakeTime = 20.0f;
 	// Speed of a ripple in the fog, game units per second: how fast a hole closes from its rim.
 	constexpr float kSimWaveSpeed = 50.0f;
 	// Acceleration down a slope of 1 at Downhill Flow 1, game units per second^2 (0.5 m/s on a 1 in 5 slope).
@@ -194,7 +204,9 @@ namespace
 	constexpr float kStepMin = 80.0f;
 
 	// The pattern keeps creeping in still air, so it never freezes.
-	constexpr float kMinDriftWind = 0.15f;
+	// The drift in a calm, as a share of a full wind's. Still fog at rest barely travels: at 0.15 the whole pool slid
+	// along at 0.2 m/s at all times and never looked settled.
+	constexpr float kMinDriftWind = 0.03f;
 	// Wind speeds between which Wind Response clears the fog.
 	constexpr float kCalmWind = 0.3f;
 	constexpr float kStrongWind = 0.8f;
@@ -631,6 +643,7 @@ float4 GroundFog::PrepareSim(bool a_pool)
 	simData->GustSpeed = kSimGustSpeed;
 	simData->GustSize = kSimGustSize;
 	simData->LiftKeep = std::exp(-deltaTime / kSimLiftTime);
+	simData->WakeKeep = kSimVelocityTime / std::clamp(settings.WakeTime, kMinWakeTime, kMaxWakeTime);
 	simData->SwirlTime = static_cast<float>(swirlTime);
 	// Without terrain data the fog rests evenly. Interiors would set this from the cell (and a floor level).
 	simData->RestUniform = 1.0f;
@@ -826,6 +839,9 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 	a_data.SunWrap = settings.SunDiffusion;
 	a_data.SunLimit = settings.SunLimit;
 	a_data.CanopyShade = settings.CanopyShade;
+	a_data.FogForward = std::clamp(settings.ForwardScatter, 0.0f, kMaxForwardScatter);
+	a_data.FogMultiple = std::clamp(settings.MultipleScatter, 0.0f, kMaxMultipleScatter);
+	a_data.PoolDensityScale = std::clamp(settings.PoolOpacity, kMinPoolOpacity, kMaxPoolOpacity);
 	a_data.Wispiness = slab ? 0.0f : settings.Wispiness;
 	a_data.InvWispScale = 1.0f / (std::clamp(settings.WispScale, kMinWispScale, kMaxWispScale) * unitsPerMeter);
 	a_data.Flags = 1u | (settings.HalfResolution ? 2u : 0u);
@@ -929,6 +945,7 @@ void GroundFog::ClearShaderCache()
 	pyramidCS = nullptr;
 	pyramidFirstCS = nullptr;
 	flowCS = nullptr;
+	volumeCS = nullptr;
 	shadersRequested = false;
 }
 
@@ -953,6 +970,8 @@ bool GroundFog::EnsureShaders()
 		// Optional: without it nothing moves, and a near layer thin enough to be the pool is marched like the tall
 		// volume. It places the fog by the same rule as the pixel pass, so it takes the same defines.
 		flowCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\GroundFog\\FlowSim.cs.hlsl", defines, "cs_5_0")));
+		// Optional: without it the pool is drawn on the visible surface.
+		volumeCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\GroundFog\\PoolVolume.cs.hlsl", defines, "cs_5_0")));
 	}
 	return pixelCS && pyramidCS && pyramidFirstCS;
 }
@@ -1125,6 +1144,10 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 		data.PoolEnd = std::min(data.NearEnd, 0.46f * static_cast<float>(kSimSize * simTexel));
 		data.NearExtinction = 0.0f;
 	}
+	// Near Volume: the pool is a volume the pixel pass marches through.
+	const bool volume = poolActive && simulated && settings.NearVolume && volumeCS;
+	if (volume)
+		data.Flags |= 4u;
 	volumeConstants->Update(data);
 
 	winrt::com_ptr<ID3D11Buffer> oldConstants;
@@ -1157,6 +1180,14 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 		ID3D11ShaderResourceView* lift = simLift[flowCurrent]->srv.get();
 		a_context->CSSetShaderResources(kLiftSlot, 1, &lift);
 	}
+	static_assert(kPoolVolumeFloorSlot == kPoolVolumeSlot + 1);
+	winrt::com_ptr<ID3D11ShaderResourceView> oldVolume[2];
+	a_context->CSGetShaderResources(kPoolVolumeSlot, 1, oldVolume[0].put());
+	a_context->CSGetShaderResources(kPoolVolumeFloorSlot, 1, oldVolume[1].put());
+	if (volume && FillVolume(a_context)) {
+		ID3D11ShaderResourceView* volumeInputs[] = { poolVolume->srv.get(), poolVolumeFloor->srv.get() };
+		a_context->CSSetShaderResources(kPoolVolumeSlot, 2, volumeInputs);
+	}
 	ID3D11UnorderedAccessView* outputs[] = { fogTexture->uav.get(), fogAuxTexture->uav.get(), simulated && data.PoolExtinction > 0.0f ? floorSeen->uav.get() : nullptr };
 	a_context->CSSetUnorderedAccessViews(0, 3, outputs, nullptr);
 	a_context->CSSetShader(pixelCS.get(), nullptr, 0);
@@ -1177,6 +1208,8 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 	a_context->CSSetShaderResources(kHeightMapSlot, 6, nullGround);
 	ID3D11ShaderResourceView* restoredLift = oldLift.get();
 	a_context->CSSetShaderResources(kLiftSlot, 1, &restoredLift);
+	ID3D11ShaderResourceView* restoredVolume[] = { oldVolume[0].get(), oldVolume[1].get() };
+	a_context->CSSetShaderResources(kPoolVolumeSlot, 2, restoredVolume);
 	ID3D11ShaderResourceView* restoredSkylighting = oldSkylighting.get();
 	a_context->CSSetShaderResources(kSkylightingSlot, 1, &restoredSkylighting);
 	auto* previous = oldConstants.get();
@@ -1184,6 +1217,66 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 	compositeInputs[0] = fogTexture->srv.get();
 	compositeInputs[1] = fogAuxTexture->srv.get();
 	a_context->CSSetShaderResources(kCompositeFogSlot, 2, compositeInputs);
+	return true;
+}
+
+bool GroundFog::FillVolume(ID3D11DeviceContext* a_context)
+{
+	if (!volumeCS || !flowConstants || !simState[0])
+		return false;
+	if (!poolVolume) {
+		D3D11_TEXTURE3D_DESC desc{};
+		desc.Width = desc.Height = kSimSize;
+		desc.Depth = kPoolVolumeLevels;
+		desc.MipLevels = 1;
+		desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		poolVolume = eastl::make_unique<Texture3D>(desc, "GroundFog::PoolVolume");
+		D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
+		srv.Format = desc.Format;
+		srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
+		srv.Texture3D.MipLevels = 1;
+		poolVolume->CreateSRV(srv);
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uav{};
+		uav.Format = desc.Format;
+		uav.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE3D;
+		uav.Texture3D.WSize = kPoolVolumeLevels;
+		poolVolume->CreateUAV(uav);
+	}
+	if (!poolVolumeFloor) {
+		D3D11_TEXTURE2D_DESC desc{};
+		desc.Width = desc.Height = kSimSize;
+		desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+		desc.Format = DXGI_FORMAT_R32_FLOAT;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		poolVolumeFloor = eastl::make_unique<Texture2D>(desc, "GroundFog::PoolVolumeFloor");
+		D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
+		srv.Format = desc.Format;
+		srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+		srv.Texture2D.MipLevels = 1;
+		poolVolumeFloor->CreateSRV(srv);
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uav{};
+		uav.Format = desc.Format;
+		uav.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+		poolVolumeFloor->CreateUAV(uav);
+	}
+	// The simulation's constants for the wind's drift (the start of SimCB).
+	winrt::com_ptr<ID3D11Buffer> oldSimConstants;
+	a_context->CSGetConstantBuffers(kFlowConstantSlot, 1, oldSimConstants.put());
+	auto* simConstants = flowConstants->CB();
+	a_context->CSSetConstantBuffers(kFlowConstantSlot, 1, &simConstants);
+	ID3D11UnorderedAccessView* outputs[] = { poolVolume->uav.get(), poolVolumeFloor->uav.get() };
+	a_context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
+	a_context->CSSetShader(volumeCS.get(), nullptr, 0);
+	globals::profiler->BeginPass("GroundFog::Volume");
+	a_context->Dispatch((kSimSize + 7u) / 8u, (kSimSize + 7u) / 8u, 1);
+	globals::profiler->EndPass();
+	ID3D11UnorderedAccessView* nullOutputs[2]{};
+	a_context->CSSetUnorderedAccessViews(0, 2, nullOutputs, nullptr);
+	auto* previousSim = oldSimConstants.get();
+	a_context->CSSetConstantBuffers(kFlowConstantSlot, 1, &previousSim);
 	return true;
 }
 
@@ -1240,7 +1333,16 @@ void GroundFog::DrawSettings()
 		Util::HoverTip(T(TKEY("wisp_scale_tooltip"), "Size of the wisps and of the gaps between them."));
 
 		ImGui::SliderFloat(T(TKEY("pooling"), "Pooling"), &settings.Pooling, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-		Util::HoverTip(T(TKEY("pooling_tooltip"), "How much the pool keeps to the low places of the ground you see. At 1 it gathers in dips, gutters and at the foot of slopes and over water, leaves a thin veil on level open ground and none on rises. At 0 it lies evenly everywhere."));
+		Util::HoverTip(T(TKEY("pooling_tooltip"), "How much the pool keeps to the low places of the ground you see. At 1 it gathers in dips, gutters and at the foot of slopes, over water and in shade, and leaves level open ground and rises clear. Below 0.85 it is held at 0.85: the fog does not lie everywhere."));
+
+		ImGui::Checkbox(T(TKEY("near_volume"), "Near Volume"), &settings.NearVolume);
+		Util::HoverTip(T(TKEY("near_volume_tooltip"), "Draws the pool as a true volume of fog around you, knee high: every pixel sees the fog between you and it, so grass, legs and trunks stand in it, it shows against the skyline and moves with parallax, and wakes churn in height. Off draws the pool as a layer on the surfaces you see, as before (for comparison)."));
+
+		ImGui::SliderFloat(T(TKEY("pool_opacity"), "Pool Opacity"), &settings.PoolOpacity, kMinPoolOpacity, kMaxPoolOpacity, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("pool_opacity_tooltip"), "Density of the pool as a share of Near Density. Low: a veil the ground shows through, which thickens where the fog is pushed together. High: dense banks."));
+
+		ImGui::SliderFloat(T(TKEY("wake_time"), "Wake Time"), &settings.WakeTime, kMinWakeTime, kMaxWakeTime, "%.1f s", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
+		Util::HoverTip(T(TKEY("wake_time_tooltip"), "How long the fog keeps moving by itself after something has passed: a wake rolls on, curls into eddies and piles up at its rim, then settles. Short: it stops with the mover."));
 
 		ImGui::SliderFloat(T(TKEY("downhill_flow"), "Downhill Flow"), &settings.DownhillFlow, 0.0f, kMaxDownhillFlow, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("downhill_flow_tooltip"), "How strongly the pool runs down slopes, off steps and rocks and into the low places of the ground you see. 0 leaves it where it rests."));
@@ -1345,7 +1447,13 @@ void GroundFog::DrawSettings()
 		Util::HoverTip(T(TKEY("sun_diffusion_tooltip"), "Share of the sun and moon light that lit fog sends out evenly to all sides, as dense fog does, on top of the glow toward the light. It gives lit fog the colour of the low sun from any direction. 0 leaves only the glow toward the light and the sky light."));
 
 		ImGui::SliderFloat(T(TKEY("sun_limit"), "Sun Limit"), &settings.SunLimit, 0.0f, kMaxSunLimit, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-		Util::HoverTip(T(TKEY("sun_limit_tooltip"), "How much brighter fog in the sun can get than fog in the shade: the sun and moon light it scatters levels off at this many times its sky light. At 1 sunlit fog is at most twice as bright as shaded fog. 0 removes the limit."));
+		Util::HoverTip(T(TKEY("sun_limit_tooltip"), "How much brighter the sheet in the sun can get than in the shade: the sun and moon light it scatters levels off at this many times its sky light. At 1 sunlit fog is at most twice as bright as shaded fog. The pool and the far valley fog are not limited. 0 removes the limit."));
+
+		ImGui::SliderFloat(T(TKEY("forward_scatter"), "Forward Scatter"), &settings.ForwardScatter, 0.0f, kMaxForwardScatter, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("forward_scatter_tooltip"), "How much brighter fog is looking toward the sun or a moon than away from it, as fog droplets scatter forward. 0 scatters evenly to all sides."));
+
+		ImGui::SliderFloat(T(TKEY("multiple_scatter"), "Multiple Scatter"), &settings.MultipleScatter, 0.0f, kMaxMultipleScatter, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("multiple_scatter_tooltip"), "How much light thick fog scatters more than once: a dense bank glows softly in its own shade and away from the sun instead of going grey. Thin veils are hardly changed."));
 
 		ImGui::SliderFloat(T(TKEY("canopy_shade"), "Shade under Cover"), &settings.CanopyShade, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("canopy_shade_tooltip"), "How much trees, walls and roofs over the fog dim the sky light it takes, so fog under a forest canopy is a dim grey like the ground there and not a white sheet. From the Skylighting probes where that feature runs, and from how much of the ground around is in the sun's shadow. 0 lights all fog by the open sky."));
@@ -1470,6 +1578,8 @@ void GroundFog::LoadSettings(json& o_json)
 {
 	settings = o_json;
 	const Settings defaults{};
+	// Past the 64 members NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT takes: read and written by hand.
+	settings.NearVolume = o_json.is_object() && o_json.contains("NearVolume") && o_json["NearVolume"].is_boolean() ? o_json["NearVolume"].get<bool>() : defaults.NearVolume;
 	auto sanitize = [](float& a_value, float a_default, float a_min, float a_max) {
 		a_value = std::clamp(std::isfinite(a_value) ? a_value : a_default, a_min, a_max);
 	};
@@ -1495,6 +1605,8 @@ void GroundFog::LoadSettings(json& o_json)
 	sanitize(settings.SelfShadow, defaults.SelfShadow, 0.0f, kMaxLightScale);
 	sanitize(settings.SunDiffusion, defaults.SunDiffusion, 0.0f, 1.0f);
 	sanitize(settings.SunLimit, defaults.SunLimit, 0.0f, kMaxSunLimit);
+	sanitize(settings.ForwardScatter, defaults.ForwardScatter, 0.0f, kMaxForwardScatter);
+	sanitize(settings.MultipleScatter, defaults.MultipleScatter, 0.0f, kMaxMultipleScatter);
 	sanitize(settings.CanopyShade, defaults.CanopyShade, 0.0f, 1.0f);
 	sanitize(settings.Wispiness, defaults.Wispiness, 0.0f, 1.0f);
 	sanitize(settings.WispScale, defaults.WispScale, kMinWispScale, kMaxWispScale);
@@ -1521,6 +1633,8 @@ void GroundFog::LoadSettings(json& o_json)
 	sanitize(settings.DownhillFlow, defaults.DownhillFlow, 0.0f, kMaxDownhillFlow);
 	sanitize(settings.Swirl, defaults.Swirl, 0.0f, kMaxSwirl);
 	sanitize(settings.Pooling, defaults.Pooling, 0.0f, 1.0f);
+	sanitize(settings.PoolOpacity, defaults.PoolOpacity, kMinPoolOpacity, kMaxPoolOpacity);
+	sanitize(settings.WakeTime, defaults.WakeTime, kMinWakeTime, kMaxWakeTime);
 	sanitize(settings.StepGrowth, defaults.StepGrowth, kMinStepGrowth, kMaxStepGrowth);
 	sanitize(settings.FarAmount, defaults.FarAmount, 0.0f, kMaxAmount);
 	sanitize(settings.FarDensity, defaults.FarDensity, kMinFarDensity, kMaxFarDensity);
@@ -1533,6 +1647,7 @@ void GroundFog::LoadSettings(json& o_json)
 void GroundFog::SaveSettings(json& o_json)
 {
 	o_json = settings;
+	o_json["NearVolume"] = settings.NearVolume;
 }
 
 void GroundFog::RestoreDefaultSettings()

@@ -58,6 +58,7 @@
 #define GROUND_FOG_SHADE
 #include "GroundFog/GroundFog.hlsli"
 #include "GroundFog/Pool.hlsli"
+#include "GroundFog/PoolVolume.hlsli"
 
 Texture2D<float> SceneDepth : register(t40);
 RWTexture2D<float4> FogOut : register(u0);
@@ -181,6 +182,52 @@ namespace GroundFog
 	float NearFill()
 	{
 		return GroundFill;
+	}
+
+	// The fog over a unit of ground, as optical depth straight up, of each layer where it rests at its mean amount.
+	float PoolColumn()
+	{
+		// The pool's soft profile up to the lower of its thickness and its cut holds about 0.45 of it at full
+		// density; what rests in a dip is about PoolRestMean of the mean amount.
+		return PoolExtinction * PoolDensityScale * 0.45 * min(PoolThickness, PoolHardTop) * PoolRestMean;
+	}
+
+	float SheetColumn(float top)
+	{
+		return GroundExtinction * MakeProfile(top, 0.0).total;
+	}
+
+	float ValleyColumn()
+	{
+		return FarExtinction * MakeProfile(0.7 * FarThickness, 0.0).total;
+	}
+
+	// The sheet as the bridge between the pool and the valley layer, so the three are one body of fog with no ring
+	// where one hands over to the next. Near the pool the sheet takes the pool's height and its column of fog; by
+	// FadeStart (or twice the pool's reach) it is the sheet the settings make; and as it fades out into the valley
+	// layer its column goes BridgeToValley of the way (in log) toward the valley layer's. Between, the column
+	// changes geometrically with distance. x: factor on the sheet's density, y: on its top.
+	float2 SheetBridge(float t)
+	{
+		if (DebugMode == 1u || DebugMode == 2u)
+			return 1.0;
+		const float meanTop = 0.42 * Thickness;
+		const float own = SheetColumn(meanTop);
+		if (own <= 0.0)
+			return 1.0;
+		float logColumn = log(own);
+		float topScale = 1.0;
+		const float poolColumn = PoolColumn();
+		if (PoolExtinction > 0.0 && poolColumn > 0.0) {
+			const float w = smoothstep(0.5 * PoolEnd, max(FadeStart, 2.0 * PoolEnd), t);
+			logColumn = lerp(log(poolColumn), logColumn, w);
+			topScale = lerp(min(min(PoolThickness, PoolHardTop) / meanTop, 1.0), 1.0, w);
+		}
+		const float valleyColumn = ValleyColumn();
+		if (FarExtinction > 0.0 && valleyColumn > 0.0)
+			logColumn = lerp(logColumn, log(valleyColumn), BridgeToValley * smoothstep(FadeStart, FadeEnd, t));
+		// The profile's column is proportional to its top.
+		return float2(clamp(exp(logColumn) / (own * topScale), 0.01, 100.0), topScale);
 	}
 
 	// How much a visible surface counts as the ground, by its height above the mapped ground. Rocks, roads, steps
@@ -308,13 +355,19 @@ namespace GroundFog
 			// Shared by the sheet and the near volume: they are one body of fog, thin far away and tall close by,
 			// placed by the resting amount (the same pieces as RestingAmountAt, with the slow reads held).
 			float place = RestingAmount(coverage, ground, joint.shade, BurnSunlitNear, xyAbs, reach);
-			if (place > 0.0 && BasinStrength > 0.0) {
+			if (place > 0.0 && (BasinStrength > 0.0 || SheetPooling > 0.0)) {
 				if (Stale(slow.tAround, joint.t)) {
 					slow.around = GroundAround(xy, BasinRadius);
 					slow.tAround = joint.t;
 					++taps;
 				}
-				place *= Basin(slow.around, ground.terrain);
+				// Like the pool: in what lies lower than the land around it, over water and in shade; open level
+				// ground and rises keep only SheetFlat. (By the basin rule alone level ground kept two thirds of
+				// the most there is, and the fog was everywhere.)
+				const float hollow = clamp((slow.around - ground.terrain) * InvBasinDepth, -1.0, 1.0);
+				const float low = max(smoothstep(-0.05, 0.5, hollow), ground.water);
+				const float pooled = (1.0 + BasinStrength) * low + SheetFlat + SheetShade * joint.shade * smoothstep(-0.2, 0.0, hollow);
+				place *= lerp(BasinStrength > 0.0 ? Basin(slow.around, ground.terrain) : 1.0, pooled, SheetPooling);
 			}
 			place *= DensityModifier(xyAbs, reach);
 			// Inside the simulation's window: by how far the fog there is from rest (a wake, a pile-up).
@@ -322,10 +375,12 @@ namespace GroundFog
 				place *= SimDisturbance(xy);
 				++taps;
 			}
-			joint.sheet.place = place * sheetFade;
+			// One body with the pool and the valley layer: its column of fog continues theirs (SheetBridge).
+			const float2 bridge = SheetBridge(joint.t);
+			joint.sheet.place = place * sheetFade * bridge.x;
 			joint.near.place = place * nearFade;
 			if (joint.sheet.inside)
-				joint.sheet.top = LayerTop(xyAbs, reach);
+				joint.sheet.top = max(LayerTop(xyAbs, reach) * bridge.y, 1.0);
 			if (joint.near.inside)
 				joint.near.top = max(NearThickness * Breathing(xyAbs), 1.0);
 		}
@@ -337,18 +392,25 @@ namespace GroundFog
 			const float pool = smoothstep(0.0, 1.0, max(hollow, ground.water));
 			// Broad banks, travelling with the wind like the sheet's.
 			const float bank = lerp(0.7, 1.25, ValueNoise((xyAbs - WindTravel) * InvBankScale * 0.25 + 7.3));
-			joint.valley.top = max(FarThickness * (0.35 + 0.65 * pool) * bank, 1.0);
-			float place = coverage * ground.amount * valleyFade * pool * BurnOff(BurnSunlitFar, joint.shade);
+			// How much fog the time of day and the sun leave it. Burning off lowers the layer as well as thinning
+			// it: a valley bank at dawn stands its full depth, by midday what is left is a shallow haze on the
+			// floor. (Its top over the ground falls as the hollow gets shallower, so the bank's surface is close
+			// to level across a valley: the land rises out of it instead of carrying it up a slope.)
+			const float burn = BurnOff(BurnSunlitFar, joint.shade);
+			joint.valley.top = max(FarThickness * (0.35 + 0.65 * pool) * bank * clamp(sqrt(burn), ValleyLowest, 1.2), 1.0);
+			float place = coverage * ground.amount * valleyFade * pool * burn;
 			if (place > 0.0) {
 				// It pools on level low ground and does not climb hillsides. And the ground it is laid on is
 				// read coarsely this far out: where that ground may be off the land by more than the layer is
 				// thick, the layer would hang over the land or sink into it in bands, so it thins out there,
 				// except near the end of a ray, where its ground is the surface the pixel shows. Water is
-				// level and exactly known.
+				// level and exactly known. Both rules only take away what is clearly wrong: at 25ccbccb2 there
+				// were none and the bank lay soft and whole over the low country; their first versions (slopes
+				// from 0.12, doubt from half the layer's depth) cut most of it away.
 				if (ground.water < 1.0) {
 					const float2 lie = LandLieAt(ray, joint.t, slow, taps);
-					const float level = 1.0 - smoothstep(0.12, 0.35, lie.x);
-					const float sure = 1.0 - smoothstep(0.5, 1.5, lie.y / joint.valley.top);
+					const float level = 1.0 - smoothstep(ValleySlope.x, ValleySlope.y, lie.x);
+					const float sure = 1.0 - smoothstep(ValleyDoubt.x, ValleyDoubt.y, lie.y / joint.valley.top);
 					place *= lerp(level * lerp(sure, 1.0, ValleyAnchorAt(ray, joint.t)), 1.0, ground.water);
 				}
 				if (ground.water > 0.0)
@@ -506,6 +568,20 @@ namespace GroundFog
 		return support;
 	}
 
+	// How much the pixel shows a thin thing standing up: a blade of grass, a stem, a leaf, a twig, a pole. Its
+	// neighbours a few pixels to both sides lie well behind it (the gap between blades, the ground beyond a stem);
+	// beside a wall, a trunk or the ground they do not. Two loads.
+	float ThinThing(uint2 scenePixel, float viewDepth, uint2 activeMain)
+	{
+		static const int Reach = 3;
+		const int2 p = int2(scenePixel);
+		const int2 last = int2(activeMain) - 1;
+		const float left = SharedData::GetScreenDepth(SceneDepth[clamp(p - int2(Reach, 0), 0, last)]);
+		const float right = SharedData::GetScreenDepth(SceneDepth[clamp(p + int2(Reach, 0), 0, last)]);
+		const float gap = max(28.0, 0.04 * viewDepth);
+		return smoothstep(gap, 2.0 * gap, min(left, right) - viewDepth);
+	}
+
 	float3 TapColor(uint taps)
 	{
 		// Blue: up to 4 reads, green: 34, yellow: 64, red: 94 and more.
@@ -584,14 +660,39 @@ namespace GroundFog
 	pool.speed = 0.0;
 	pool.floorZ = GroundFog::FloorEmpty;
 	pool.range = pool.known = pool.ground = pool.over = pool.within = 0.0;
-	pool.crest = pool.sunSide = 0.5;
+	pool.crest = pool.sunSide = pool.level = 0.5;
 	// How much of the fog this pixel sees is the pool, for what only the pool's shading takes.
 	float poolShare = 0.0;
+	// From the pool's volume: the sun its fog sees (and how much that stands for the sun map lookup), its sky light.
+	float poolSun = 1.0, poolSunWeight = 0.0, poolSky = 1.0;
+	// Near Volume: the pool is a volume the ray goes through (GroundFog/PoolVolume.hlsli), not a layer on what the
+	// pixel shows.
+	const bool volume = GroundFog::VolumeOn() && GroundFog::PoolExtinction > 0.0;
 	if (GroundFog::PoolExtinction > 0.0 && surface && tEnd < GroundFog::PoolEnd) {
 		normal = GroundFog::SurfaceNormal(scenePixel, depth, position, mainSize, activeMain);
 		hasNormal = true;
 		taps += 4u;
-		pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, SharedData::DirLightDirection.xyz, taps);
+		const float thin = GroundFog::ThinThing(scenePixel, viewFar, activeMain);
+		taps += 2u;
+		if (volume) {
+			// The volume is marched below, for every ray; here only what this pixel tells the floor map.
+			const float2 sightUv = GroundFog::SimUv(position.xy);
+			if (normal.z > 0.8 && GroundFog::SimInside(sightUv) > 0.0 && tEnd >= GroundFog::PoolNearStart)
+				pool.floorZ = position.z + camZ;
+		} else
+			pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, thin, SharedData::DirLightDirection.xyz, taps, poolSun, poolSunWeight, poolSky);
+		// The tops of grass and plants are not the floor (see Pool.hlsli): an up-facing surface a hand to a meter
+		// above the terrain height map is taken for one only if it is not thin and goes on around the pixel as a
+		// plane (a rock slab, a step, a boardwalk). Dense grass seen from above makes a ragged surface that fails
+		// that, so the floor stays on the ground between the blades or, where none is seen, on the height map.
+		if (pool.floorZ < GroundFog::FloorUnknown && GroundFog::MapCoverage(GroundFog::MapUv(position.xy)) > 0.5) {
+			const GroundFog::GroundSample mapped = GroundFog::GroundAt(position.xy, GroundFog::StepMin);
+			taps += mapped.reads;
+			const float aboveMap = pool.floorZ - mapped.z;
+			if (aboveMap > GroundFog::PlantFloor.x && aboveMap < GroundFog::PlantFloor.y &&
+				(thin > 0.5 || GroundFog::FloorSupport(position, normal, mainSize, activeMain, taps) < 0.5))
+				pool.floorZ = GroundFog::FloorEmpty;
+		}
 		if (pool.floorZ < GroundFog::FloorUnknown) {
 			uint2 splatSize;
 			FloorSplat.GetDimensions(splatSize.x, splatSize.y);
@@ -605,6 +706,15 @@ namespace GroundFog
 					FloorSplat[texel] = pool.floorZ;
 			}
 		}
+	}
+
+	if (volume) {
+		// Every ray, the sky's too: fog at knee height shows against the skyline.
+		const float sighting = pool.floorZ;
+		const float jitter = Random::InterleavedGradientNoise(float2(pixel), SharedData::FrameCount);
+		pool = GroundFog::MarchVolume(dir, tEnd, camZ, tNear, jitter, taps, poolSun, poolSky);
+		poolSunWeight = pool.tau > 0.0 ? 1.0 : 0.0;
+		pool.floorZ = sighting;
 	}
 
 	// Debug views of the pool alone, laid over the scene at half strength.
@@ -905,6 +1015,9 @@ namespace GroundFog
 		}
 		if (mapped < 1.0)
 			sun = lerp(MediumCascadeShadow(lightPos), sun, mapped);
+		// Near the camera the pool's volume has taken the sun at each place of its own fog (and through the fog
+		// above each toward the sun): that stands for it, for the pool's share.
+		sun = lerp(sun, poolSun, poolShare * poolSunWeight);
 		visibility *= sun;
 		atmosphereVisibility *= sun;
 		diffuseVisibility *= sun;
@@ -921,36 +1034,36 @@ namespace GroundFog
 	const float skyDimming = lerp(1.0, sqrt(saturate(cloud)), GroundFog::CloudDarkening);
 	diffuseVisibility *= skyDimming;
 
-	float3 light = AtmosphereLight(0u, lightPos, dir, physSky.sunDir, physSky.sunlightColor, 0.0, albedo,
-		visibility * GroundFog::SelfShadowing(tauAbove, physSky.sunDir.z), diffuseVisibility);
-	light += AtmosphereLight(1u, lightPos, dir, physSky.masserDir, physSky.masserColor, 0.0, albedo,
-		visibility * GroundFog::SelfShadowing(tauAbove, physSky.masserDir.z), diffuseVisibility);
-	light += AtmosphereLight(2u, lightPos, dir, physSky.secundaDir, physSky.secundaColor, 0.0, albedo,
-		visibility * GroundFog::SelfShadowing(tauAbove, physSky.secundaDir.z), diffuseVisibility);
-	// What a white surface lying where the pool lies would send back of the sun and moons: that is what the pool is
-	// lit like, a white diffuse body in the scene's light (the same colour after the atmosphere, the same shadow
-	// from the sun map, its own depth over the point), and never more. Its lumpy top catches a low light better
-	// than level ground does, hence the least angle. The thin layers further out keep the scattering of a haze
-	// (the forward-peaked phase above) with a share of it sent out evenly.
+	// One way of lighting for every layer, so the pool, the sheet and the valley layer meet without a seam in colour
+	// or brightness: a scattering medium (GroundFog::FogScatter), forward peaked like fog droplets, with multiple
+	// scattering that brightens a thick body, lit by the sun and moons in the colour the atmosphere gives them at
+	// the fog. The atmosphere's own multiple scattering (the medium volume's term) comes on top, as for the shared
+	// volume. The pool was lit like a white diffuse surface: that read as a grey film whatever the light did.
+	const float valleyShare = seen.valley / seen.share;
+	float3 light = AtmosphereLight(0u, lightPos, dir, physSky.sunDir, physSky.sunlightColor, 0.0, albedo, 0.0, diffuseVisibility);
+	light += AtmosphereLight(1u, lightPos, dir, physSky.masserDir, physSky.masserColor, 0.0, albedo, 0.0, diffuseVisibility);
+	light += AtmosphereLight(2u, lightPos, dir, physSky.secundaDir, physSky.secundaColor, 0.0, albedo, 0.0, diffuseVisibility);
 	{
 		const float3 planet = PhysSky::GetMediumPlanetPosition(lightPos);
 		const float3 lightDirs[3] = { physSky.sunDir, physSky.masserDir, physSky.secundaDir };
 		const float3 lightColors[3] = { physSky.sunlightColor, physSky.masserColor, physSky.secundaColor };
-		float3 white = 0.0;
+		// How much fog there is around the point to scatter light more than once: the fog over it and a share of
+		// what the ray went through (a bank seen edge-on is thick around every point of it).
+		const float body = 2.0 * tauAbove + 0.35 * min(seen.tau, 6.0) + poolShare;
 		[unroll] for (uint l = 0u; l < 3u; ++l)
 		{
 			if (any(lightColors[l] > 0.0) && dot(lightDirs[l], lightDirs[l]) >= 0.5) {
-				const float3 arriving = lightColors[l] * PhysSky::SampleAtmosphereLightTr(PhysSky::TexTrLut, LinearSampler, planet, lightDirs[l], physSky.diskAngularRadius[l]) *
-				                        (visibility * GroundFog::SelfShadowing(tauAbove, lightDirs[l].z));
-				light += arriving * (albedo * GroundFog::SunWrap * 0.0795775);
-				white += arriving * (albedo * 0.3183099 * max(lightDirs[l].z, 0.2));
+				const float3 arriving = lightColors[l] * PhysSky::SampleAtmosphereLightTr(PhysSky::TexTrLut, LinearSampler, planet, lightDirs[l], physSky.diskAngularRadius[l]) * visibility;
+				light += arriving * albedo * GroundFog::FogScatter(dot(dir, lightDirs[l]), tauAbove, lightDirs[l].z, body);
 			}
 		}
-		light = lerp(light, white, poolShare);
 	}
-	// The pool's lumpy top: the side of a billow toward the light is brighter, the side away from it darker.
-	// (Both are about 0.5 on average, and these average 1: shading only, no light is lost.)
-	light *= lerp(1.0, lerp(0.7, 1.3, pool.sunSide), poolShare);
+	// The pool's lumpy top: the side of a billow toward the light is a little brighter, the side away from it a
+	// little darker. (Both are about 0.5 on average: shading only, no light is lost.)
+	light *= lerp(1.0, lerp(0.8, 1.2, pool.sunSide), poolShare);
+	// Darker low in the layer, among the stems, brighter at its top (see Pool.hlsli).
+	const float poolRamp = lerp(1.0, lerp(GroundFog::PoolLightRamp.x, GroundFog::PoolLightRamp.y, pool.level), poolShare);
+	light *= poolRamp;
 	light *= GroundFog::SunScale;
 	// Sky light reaches fog in the shadow of terrain and objects too, so it takes no direct visibility.
 	// The sky's light on the fog is what the open sky gives, less what stands over the fog: under a canopy or
@@ -987,15 +1100,16 @@ namespace GroundFog
 	}
 	// And the folds between its billows see less of the sky than their tops.
 	const float folds = lerp(1.0, lerp(0.8, 1.2, pool.crest), poolShare);
-	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming * skyOpen * folds;
+	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming * skyOpen * folds * lerp(1.0, poolSky, poolShare) * poolRamp;
 	// Fog in the sun is brighter than fog in the shade, but not without end: what it scatters of the sun and moons
 	// levels off at SunLimit times its sky light (at the limit's own value it has reached half of that), keeping
 	// its colour. So sunlit fog reads as lit fog, not as paint.
 	if (GroundFog::SunLimit > 0.0) {
 		static const float3 luma = float3(0.2126, 0.7152, 0.0722);
 		const float cap = GroundFog::SunLimit * dot(skyLight, luma);
-		// The pool needs no such limit: it is lit like a white surface, which is the most it can be.
-		light *= lerp(cap / max(cap + dot(light, luma), 1e-6), 1.0, poolShare);
+		// Only the sheet: the valley layer far away keeps its glow toward the sun (that is what makes a distant
+		// bank read as lit mist), and the pool is lit as a thick body whose brightness its own scattering bounds.
+		light *= lerp(cap / max(cap + dot(light, luma), 1e-6), 1.0, saturate(poolShare + valleyShare));
 	}
 	light += skyLight;
 
@@ -1016,5 +1130,5 @@ namespace GroundFog
 	FogOut[pixel] = float4(min(max(light, 0.0), 65504.0), exp(-seen.tau));
 	// w: the share of the fog in front of the nearest depth that is the pool, which lies at the end of the ray and
 	// not along it.
-	FogAuxOut[pixel] = float4(auxDepths, exp(-tauNear), tauNear > 1e-5 ? saturate(pool.tauNear / tauNear) : 0.0);
+	FogAuxOut[pixel] = float4(auxDepths, exp(-tauNear), tauNear > 1e-5 && !volume ? saturate(pool.tauNear / tauNear) : 0.0);
 }

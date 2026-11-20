@@ -53,7 +53,9 @@ struct GroundFog : Feature
 		float SkyAmbientScale = 1.0f;
 		float SelfShadow = 1.0f;
 		float SunDiffusion = 0.3f;  // share of the sun and moon light the fog sends out evenly to all sides
-		float SunLimit = 1.0f;      // sun and moon light in the fog levels off at this many times its sky light; 0 = no limit
+		float SunLimit = 1.0f;      // sun and moon light in the sheet levels off at this many times its sky light; 0 = no limit
+		float ForwardScatter = 0.6f;   // how strongly the fog scatters toward the light (Henyey-Greenstein g)
+		float MultipleScatter = 0.6f;  // how much light thick fog scatters more than once (the glow of a bank in shade)
 		float CanopyShade = 1.0f;   // how much canopy and walls over the fog dim the sky light it takes
 		float GroundFill = 0.25f;  // share of Thickness
 		// Pixel pass.
@@ -82,19 +84,22 @@ struct GroundFog : Feature
 		float ReactiveStrength = 1.0f;  // how much of the fog a mover clears; 0 leaves only the displacement
 		float ImpulseStrength = 1.0f;   // how hard jumps, landings, swings, casts, shouts and impacts strike the fog; 0 = they do not
 		// The simulation the pool is drawn from.
-		float SettleTime = 12.0f;   // seconds over which disturbed fog returns to its resting amount
+		float SettleTime = 25.0f;   // seconds over which disturbed fog returns to its resting amount (slow recovery, user 2026-11-20)
 		float Wispiness = 1.0f;     // 0: even patches; 1: separate wisps with clear air between them
 		float WispScale = 4.0f;     // size of the wisps, meters
 		float DownhillFlow = 1.0f;  // how strongly the fog runs down slopes and steps into the low places
 		float Swirl = 1.0f;         // eddies in still fog and, more, in fog that is moving
-		float Pooling = 1.0f;       // 0: the pool rests evenly; 1: in dips and at the foot of slopes, little on level ground
+		float Pooling = 1.0f;       // how much the pool keeps to dips, low spots, water and shade; the shader takes at least 0.85
+		float PoolOpacity = 0.55f;  // the pool's density as a share of Near Density
+		float WakeTime = 6.0f;      // seconds over which the fog's own motion (a wake, an eddy) dies down
+		bool NearVolume = true;     // the pool as a 3D volume marched per pixel (GroundFog/PoolVolume.cs.hlsl); off: on the visible surface
 		bool HalfResolution = true;
 		float StepGrowth = 0.3f;  // size of terrain detail the march follows, as a share of the distance from the camera
 		int MaxSteps = 72;
 		// The valley layer: deeper fog in hollows and over water, beyond the sheet.
 		float FarAmount = 1.0f;
-		float FarDensity = 0.012f;     // extinction at the ground per meter, at FarAmount 1
-		float FarThickness = 6.0f;     // meters
+		float FarDensity = 0.003f;     // extinction at the ground per meter, at FarAmount 1
+		float FarThickness = 25.0f;    // meters
 		float FarEnd = 6000.0f;        // meters
 		float CloudDarkening = 0.75f;  // how much cloud overhead dims the sky light the fog takes
 		bool VolumeInjection = false;  // draw through the shared atmosphere volume instead of per pixel
@@ -171,8 +176,12 @@ struct GroundFog : Feature
 		float Wispiness;
 		float InvWispScale;
 		float CanopyShade;
+		float FogForward;
+		float FogMultiple;
+		float PoolDensityScale;
+		float BridgePad;
 	};
-	static_assert(sizeof(VolumeData) == 320);
+	static_assert(sizeof(VolumeData) == 336);
 	static_assert(offsetof(VolumeData, MapZ) == 16);
 	static_assert(offsetof(VolumeData, Thickness) == 32);
 	static_assert(offsetof(VolumeData, FadeStart) == 48);
@@ -196,6 +205,7 @@ struct GroundFog : Feature
 	static_assert(offsetof(VolumeData, InvShoreDepth) == 260);
 	static_assert(offsetof(VolumeData, FlowWindow) == 272);
 	static_assert(offsetof(VolumeData, PoolExtinction) == 288);
+	static_assert(offsetof(VolumeData, FogForward) == 320);
 
 	/** One thing that moves the fog this frame. Mirrors Emitter in GroundFog/FlowSim.cs.hlsl. */
 	struct FlowEmitter
@@ -237,7 +247,8 @@ struct GroundFog : Feature
 		float GustSpeed;
 		float GustSize;
 		float LiftKeep;
-		float SimPad[3];
+		float WakeKeep;  // VelocityKeep is raised to this power: the fog's own motion lasts 1 / WakeKeep times as long
+		float SimPad[2];
 		FlowEmitter Emitters[kMaxFlowEmitters];
 	};
 	static_assert(sizeof(FlowEmitter) == 48);
@@ -313,6 +324,11 @@ struct GroundFog : Feature
 	static constexpr uint32_t kFloorSlopeSlot = 11;
 	static constexpr uint32_t kFloorSeenSlot = 12;
 	static constexpr uint32_t kLiftSlot = 13;
+	/** The pool's volume and the floor it stands on, for GroundFog/GroundFogPixel.cs.hlsl (GroundFog/PoolVolume.hlsli). */
+	static constexpr uint32_t kPoolVolumeSlot = 14;
+	static constexpr uint32_t kPoolVolumeFloorSlot = 15;
+	/** Levels of the pool's volume over its 1.43 m (GroundFog::VolumeHeight); its xy texels are the simulation's. */
+	static constexpr uint32_t kPoolVolumeLevels = 16;
 	/** The Skylighting probes in GroundFog/GroundFogPixel.cs.hlsl, as in the atmosphere volume. */
 	static constexpr uint32_t kSkylightingSlot = 50;
 	static constexpr uint32_t kFlowConstantSlot = 3;
@@ -357,6 +373,7 @@ private:
 	winrt::com_ptr<ID3D11ComputeShader> pyramidCS;
 	winrt::com_ptr<ID3D11ComputeShader> pyramidFirstCS;
 	winrt::com_ptr<ID3D11ComputeShader> flowCS;
+	winrt::com_ptr<ID3D11ComputeShader> volumeCS;
 	bool shadersRequested = false;
 	// The simulation: two states, swapped every frame. simState: velocity, amount, resting amount. simFloor: the
 	// floor level per texel. floorSeen: what the pixel pass saw of the floor this frame, folded in on the next step.
@@ -366,6 +383,11 @@ private:
 	eastl::unique_ptr<Texture2D> floorSlope[2];  // slope of simFloor over about a meter, validity, and the sun map
 	eastl::unique_ptr<Texture2D> floorSeen;
 	eastl::unique_ptr<Texture2D> simLift[2];  // how far the top of the pool is thrown up or pressed down
+	// The pool as a volume: extinction, sun and sky reach per voxel over the simulation's window, following the floor.
+	eastl::unique_ptr<Texture3D> poolVolume;
+	eastl::unique_ptr<Texture2D> poolVolumeFloor;
+	/** Fills poolVolume from the simulation's present state. Call with the fog's constants and ground and simulation textures bound. */
+	bool FillVolume(ID3D11DeviceContext* a_context);
 	uint32_t flowCurrent = 0;
 	bool flowValid = false;
 	bool simPending = false;   // PrepareSim set up a step that StepSim has not run yet

@@ -368,8 +368,9 @@ namespace GroundFog
 	//             is drawn with). w: the resting amount there, which z settles to.
 	//   FogFloor  the level of the floor at each texel, absolute z, gathered from the up-facing surfaces the screen
 	//             has shown there; FloorUnknown or more where nothing has been seen yet.
-	//   FogSlope  the slope of that floor over about a meter. z: 1 where it is known, xy: rise over run times z (so a
-	//             filtered read divides xy by z). w: how much of the sun reaches the fog there (the shadow cascades,
+	//   FogSlope  the slope of that floor over about a meter. z: how much the texel is a floor the fog lies on (1
+	//             where the floor is known and is not the top of a raised thing: a cart, a table, a wall, a rock),
+	//             xy: rise over run times z (so a filtered read divides xy by z). w: how much of the sun reaches the fog there (the shadow cascades,
 	//             taken over the area of a texel and the height of the pool, and smoothed over time).
 	// The pool reads z directly. The sheet and the tall near volume, which are placed by the same resting amount,
 	// take z / w: how far the fog there is from rest.

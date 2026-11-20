@@ -31,10 +31,12 @@
 //    around it (the top of a wall, a cart, a rock, a steep bank) holds none. That is the one rule that places all of
 //    the fog (GroundFog::RestingAmountAt: low ground, water, shade, time of day) times the drifting patches.
 //    Without terrain data (SimFlags bit 0 clear) the resting amount is RestUniform: the hook for interiors.
-// 5. Floor: the lowest up-facing surface the pixel pass saw in and around this texel last frame (FloorSeen) is
+// 5. Floor: the lowest up-facing surface the pixel pass saw in this texel last frame (FloorSeen) is
 //    folded into the floor map. It drops to a lower sighting at once and rises to a higher one slowly, so a table
 //    top or a shoulder passing over a texel does not become its floor; differences of a few units are left alone,
-//    so with the camera still the map does not change from frame to frame. The slope of the floor over about a meter
+//    so with the camera still the map does not change from frame to frame. Each texel takes its own sightings; the
+//    neighbours' only fill a texel nothing has been seen in. What is a raised thing (the floor stands well above the
+//    lowest floor around it) is marked for the pool in GroundFog::FogSlope.z. The slope of the floor over about a meter
 //    is written out beside it (GroundFog::FogSlope) for the drawing of the pool.
 
 #define COMPUTESHADER
@@ -229,6 +231,9 @@ float GustPsi(float2 p)
 			[unroll] for (uint k = 0u; k < 8u; ++k)
 				lowest = min(lowest, GroundFog::FogFloor.Load(int3(clamp(before + ring[k], 0, last), 0)));
 			raised = smoothstep(RaisedStart, RaisedEnd, level - lowest);
+			// For the drawing of the pool: z says how much this texel is a floor the fog lies on (known, and not
+			// the top of a raised thing), and the slope is weighted by it.
+			floorSlope.xyz = float3(floorSlope.xy, 1.0) * (1.0 - raised);
 
 			// How low this floor lies among the floor around it, a stride and two strides out: the mean of how
 			// far the floor there stands above it. What stands far above it is a wall or a thing, not ground,
@@ -309,13 +314,19 @@ float GustPsi(float2 p)
 	StateOut[pixel] = float4(velocity, amount, rest);
 	LiftOut[pixel] = clamp(lift, -0.6, 3.0) * (1.0 - raised);
 
-	// 5. Floor.
+	// 5. Floor. Each texel's own floor: the lowest up-facing surface the screen showed in it. Taking the lowest in
+	// the texels around as well (as this did before) put every texel's floor at the lowest thing within 0.6 m of it,
+	// so a road lying a hand's width above the dirt beside it, a paved street, a step or a root was "above its
+	// floor" and got little or no fog. The neighbours only fill a texel nothing has been seen in yet.
 	float seen = GroundFog::FloorEmpty;
 	if (had) {
-		[unroll] for (int dy = -1; dy <= 1; ++dy)
-		{
-			[unroll] for (int dx = -1; dx <= 1; ++dx)
-				seen = min(seen, FloorSeen.Load(int3(clamp(before + int2(dx, dy), 0, last), 0)));
+		seen = FloorSeen.Load(int3(before, 0));
+		if (seen >= GroundFog::FloorUnknown && level >= GroundFog::FloorUnknown) {
+			[unroll] for (int dy = -1; dy <= 1; ++dy)
+			{
+				[unroll] for (int dx = -1; dx <= 1; ++dx)
+					seen = min(seen, FloorSeen.Load(int3(clamp(before + int2(dx, dy), 0, last), 0)));
+			}
 		}
 	}
 	if (seen < GroundFog::FloorUnknown) {

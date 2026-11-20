@@ -198,6 +198,19 @@ namespace GroundFog
 		// texels read here and toward the camera, so the edge of a road or a step counts on both sides), give or
 		// take what the slope accounts for. With no known floor only what is very nearly level counts.
 		const float nearest = max(min(nearHere, nearToward) - allowance, 0.0);
+		// And how much the floor here is a floor the fog lies on, not the top of a raised thing (FogSlope.z), over
+		// the known texels: ground on a raised thing's top (a cart bed, a table, a wall top) is not the pool's floor.
+		float floorness = 1.0;
+		{
+			const float2 f = frac(uv * float2(width, height) - 0.5);
+			const float4 weights = float4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y), (1.0 - f.x) * (1.0 - f.y)) + 0.02;
+			const float4 known4 = FogFloor.GatherRed(LinearSampler, uv) < FloorUnknown ? 1.0 : 0.0;
+			const float4 open4 = saturate(FogSlope.GatherBlue(LinearSampler, uv));
+			const float sum = dot(weights, known4);
+			if (sum > 1e-4)
+				floorness = dot(weights * known4, open4) / sum;
+			taps += 2u;
+		}
 		const float ground = known ? smoothstep(PoolGroundFacing - 0.05, PoolGroundFacing + 0.1, normal.z) * (1.0 - smoothstep(PoolGroundBand, 2.0 * PoolGroundBand, nearest)) :
 		                             smoothstep(0.88, 0.96, normal.z);
 		pool.ground = ground;
@@ -293,7 +306,7 @@ namespace GroundFog
 		const float top = max(thick * Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) * lerp(0.4, 1.0, saturate(amount)) * shape, 1.0);
 		const SoftProfile profile = MakeSoftProfile(top, 0.0, NearFalloff);
 		// Fog thrown up is the same fog over more height: thinner, though not by all of it (it is stirred up too).
-		const float extinction = PoolExtinction * amount * range * share * certain * rsqrt(1.0 + max(lift, 0.0)) / shape;
+		const float extinction = PoolExtinction * amount * range * share * certain * lerp(1.0, floorness, ground) * rsqrt(1.0 + max(lift, 0.0)) / shape;
 		const float end = start + rise * stretch;
 		const float tau = extinction * ClippedLineMean(profile, start, end, limit) * stretch;
 		if (tau <= 0.0)

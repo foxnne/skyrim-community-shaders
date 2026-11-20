@@ -84,7 +84,12 @@ namespace GroundFog
 		float InvShoreDepth;    // 1 / the water depth over which fog over water comes in at a shore, per game unit
 		float WaterPatchiness;  // how uneven the fog over water is
 		float WaterTexel;       // game units per texel of WaterMap; 0 = no map
-		float4 FlowWindow;      // reactive flow map: uv = camera-relative xy * z + xy; w = strength, 0 = none
+		float4 FlowWindow;      // fog simulation window: uv = camera-relative xy * z + xy; w > 0 when there is one
+		// The pool: the knee-high fog around the camera, drawn on what the screen shows (GroundFog/Pool.hlsli).
+		float PoolExtinction;  // extinction at the ground, per game unit, amount included; 0 = none
+		float PoolThickness;   // height at which it has thinned to nothing, game units
+		float PoolEnd;         // game units from the camera; fades out over the second half
+		float PoolPad;
 	};
 
 	Texture2D<float> HeightMap : register(t6);
@@ -352,38 +357,61 @@ namespace GroundFog
 	}
 
 	// ---------------------------------------------------------------------------------------------------------
-	// Movement of the fog near the camera. Two parts, both functions of world position and time only:
-	// - Flow: where the reactive simulation (GroundFog/FlowSim.cs.hlsl) covers a point, how far things moving
-	//   through the fog have pushed it aside there. It shifts every pattern lookup and thins the fog.
-	// - DensityModifier: patches of thicker and thinner fog carried by the wind.
-	// The pixel pass calls both once per march joint inside the sheet or the near volume.
+	// The fog simulation near the camera (GroundFog/FlowSim.cs.hlsl): a square window of the world's xy plane,
+	// fixed to a world grid, in which the fog is carried about by wind, slopes and whatever moves through it, and
+	// settles back to its resting amount. Everything in it is a function of world position and time only.
+	//   FogSim    xy: velocity of the fog, game units per second. z: amount of fog (the density multiplier the pool
+	//             is drawn with). w: the resting amount there, which z settles to.
+	//   FogFloor  the level of the floor at each texel, absolute z, gathered from the up-facing surfaces the screen
+	//             has shown there; FloorUnknown or more where nothing has been seen yet.
+	//   FogSlope  the slope of that floor over about a meter. z: 1 where it is known, xy: rise over run times z (so a
+	//             filtered read divides xy by z).
+	// The pool reads z directly. The sheet and the tall near volume, which are placed by the same resting amount,
+	// take z / w: how far the fog there is from rest.
+	Texture2D<float4> FogSim : register(t8);
+	Texture2D<float> FogFloor : register(t10);
+	Texture2D<float4> FogSlope : register(t11);
 
-	// xy: displacement of the fog in game units, z: share of the fog cleared away.
-	Texture2D<float4> FlowMap : register(t8);
+	static const float FloorUnknown = 1.0e20;
+	static const float FloorEmpty = 1.0e30;
 
-	bool InFlowWindow(float2 xy)
+	float2 SimUv(float2 xy)
 	{
-		const float2 uv = xy * FlowWindow.z + FlowWindow.xy;
-		return FlowWindow.w > 0.0 && all(uv > 0.0) && all(uv < 1.0);
+		return xy * FlowWindow.z + FlowWindow.xy;
 	}
 
-	float3 Flow(float2 xy)
+	// 1 inside the window, falling to 0 over its outer eighth, where the simulation hands over to the resting amount.
+	float SimInside(float2 uv)
 	{
 		if (FlowWindow.w <= 0.0)
 			return 0.0;
-		const float2 uv = xy * FlowWindow.z + FlowWindow.xy;
 		const float2 edge = saturate(min(uv, 1.0 - uv) * 8.0);
-		const float inside = edge.x * edge.y;
-		if (inside <= 0.0)
-			return 0.0;
-		return FlowMap.SampleLevel(LinearSampler, uv, 0).xyz * float3(1.0, 1.0, FlowWindow.w) * inside;
+		return edge.x * edge.y;
 	}
 
-	// HOOK: the density of the fog relative to its mean, at an absolute xy (already shifted by Flow). Today a cheap
-	// procedural stand-in: two octaves of value noise travelling with the wind at different speeds, so patches
-	// drift past and change shape. A fluid simulation's density field replaces the body of this function; the
-	// reactive flow map above is the first piece of that. reach: the size of detail the caller can resolve; the
-	// patches fade to their mean (1) as it grows past them, so distant fog does not flicker.
+	bool InSimWindow(float2 xy)
+	{
+		const float2 uv = SimUv(xy);
+		return FlowWindow.w > 0.0 && all(uv > 0.0) && all(uv < 1.0);
+	}
+
+	// How much fog the simulation holds at a camera-relative xy, relative to what rests there: 1 where nothing has
+	// disturbed it and outside the window, less in a wake, more where it has been pushed together. One read.
+	float SimDisturbance(float2 xy)
+	{
+		const float2 uv = SimUv(xy);
+		const float inside = SimInside(uv);
+		if (inside <= 0.0)
+			return 1.0;
+		const float4 state = FogSim.SampleLevel(LinearSampler, uv, 0);
+		return lerp(1.0, clamp(state.z / max(state.w, 0.05), 0.0, 2.5), inside);
+	}
+
+	// The density of the fog at rest relative to its mean, at an absolute xy: two octaves of value noise travelling
+	// with the wind at different speeds, so patches drift past and change shape. It is part of what the simulation
+	// settles to, so inside the window the patches are carried and stirred like the rest of the fog. reach: the
+	// size of detail the caller can resolve; the patches fade to their mean (1) as it grows past them, so distant
+	// fog does not flicker.
 	float DensityModifier(float2 xyAbs, float reach)
 	{
 		if (DriftStrength <= 0.0)
@@ -451,6 +479,80 @@ namespace GroundFog
 		const float around = 0.25 * (TerrainZ(uv + du) + TerrainZ(uv - du) + TerrainZ(uv + dv) + TerrainZ(uv - dv));
 		const float hollow = clamp((around - terrain) * InvBasinDepth, -1.0, 1.0);
 		return clamp(1.0 + BasinStrength * hollow, 0.0, 1.0 + BasinStrength);
+	}
+
+	// ---------------------------------------------------------------------------------------------------------
+	// The resting amount: how much fog a place holds when nothing disturbs it, relative to Amount. One rule for the
+	// whole body of fog: the simulation settles to it (and the pool is drawn from the simulation), and the sheet
+	// and the tall near volume are placed by it directly. Its factors: whether the ground source has data there,
+	// water, the time of day and whether the sun has reached the place, and how the land lies (hollows hold more).
+	// The pieces are separate so the pixel march can hold its slow reads between joints; RestingAmountAt does all
+	// the reads itself.
+
+	// Hollows hold more, rises less: the terrain averaged around the point against the terrain at it.
+	float Basin(float around, float terrain)
+	{
+		const float hollow = clamp((around - terrain) * InvBasinDepth, -1.0, 1.0);
+		return clamp(1.0 + BasinStrength * hollow, 0.0, 1.0 + BasinStrength);
+	}
+
+	// Ground this far below the terrain shadow's surface has been out of the sun for long: it keeps all its fog.
+	static const float ShadeDepth = 1050.0;
+
+	// 1 where the terrain has kept the sun off a point for long, 0 where the sun reaches it. From the Terrain
+	// Shadows height field for the present sun: a point is in shadow when it lies below that field, and the deeper
+	// below, the longer ago the shadow's edge passed over it (in the morning the field sinks as the sun climbs).
+	// So depth below the field stands for time out of the sun, with no history stored, and the edge of the mask
+	// moves smoothly as the sun does. One read. Only in shaders that define GROUND_FOG_SHADE (the pixel pass and
+	// the simulation, which have the terrain shadow bound).
+	float TerrainShade(float2 xyAbs, float z, inout uint taps)
+	{
+#if defined(TERRAIN_SHADOWS) && defined(GROUND_FOG_SHADE)
+		if (BurnRetention <= 0.0 || !(ViewAtmosphere::Data[0].flags.z & 256u) || !SharedData::terraOccSettings.EnableTerrainShadow)
+			return 0.0;
+		const float2 uv = TerrainShadows::GetTerrainShadowUV(xyAbs);
+		if (any(uv < 0.0) || any(uv > 1.0))
+			return 0.0;
+		++taps;
+		const float2 heights = TerrainShadows::GetTerrainZ(TerrainShadows::ShadowHeightTexture.SampleLevel(LinearSampler, uv, 0));
+		// The field is stored lowered by SelfShadowBias; one meter of slack keeps lit slopes clear of the mask.
+		const float field = 0.5 * (heights.x + heights.y) + TerrainShadows::SelfShadowBias;
+		return smoothstep(70.0, 70.0 + ShadeDepth, field - z);
+#else
+		return 0.0;
+#endif
+	}
+
+	// Amount by time of day and sun: what sunlit ground holds now, raised toward the shaded amount in shadow.
+	float BurnOff(float sunlit, float shade)
+	{
+		return lerp(sunlit, max(sunlit, BurnShaded), BurnRetention * shade);
+	}
+
+	// The resting amount without the lie of the land (multiply by Basin). sunlit: BurnSunlitNear or BurnSunlitFar.
+	// Over water: WaterPreference times as much, through the water's own drifting patches. ground.water rises from
+	// 0 at the waterline over the shore depth, so the change has the shape of the shore.
+	float RestingAmount(float coverage, GroundSample ground, float shade, float sunlit, float2 xyAbs, float reach)
+	{
+		float rest = coverage * ground.amount * BurnOff(sunlit, shade);
+		if (ground.water > 0.0)
+			rest *= lerp(1.0, WaterPreference * WaterPatches(xyAbs, reach), ground.water);
+		return rest;
+	}
+
+	// The whole rule at a camera-relative xy, with its own reads (up to five).
+	float RestingAmountAt(float2 xy, float reach, float sunlit)
+	{
+		const float coverage = MapCoverage(MapUv(xy));
+		if (coverage <= 0.0)
+			return 0.0;
+		const float2 xyAbs = xy + FrameBuffer::CameraPosAdjust.xy;
+		const GroundSample ground = GroundAt(xy, reach);
+		uint taps = 0u;
+		float rest = RestingAmount(coverage, ground, TerrainShade(xyAbs, ground.z + 70.0, taps), sunlit, xyAbs, reach);
+		if (rest > 0.0 && BasinStrength > 0.0)
+			rest *= Basin(GroundAround(xy, BasinRadius), ground.terrain);
+		return rest;
 	}
 
 	// 1 - exp(-t), exact for small t.

@@ -148,6 +148,9 @@ cbuffer VolumetricCloudConstants : register(b1)
 	float4 MiddleCloudCells;      // frequency, Ac modulation, As modulation, warp
 	float4 MiddleCloudBands;      // world wave vector (cycles/game unit), bend (wavelengths), organization
 	float4 MiddleCloudBandShape;  // thickness contrast, displacement (game units), wavelength (game units), enabled
+	float4 HorizonCloudShape;     // coverage (0 = none), base altitude, top altitude (game units), type (0 towers .. 1 bank)
+	float4 HorizonCloudLayer;     // distance of the near shell (game units), density, drift (turns), brightness
+	float4 HorizonCloudExtra;     // shape seed, unused
 };
 Texture2D<float4> TexTransmittance : register(t1);
 Texture3D<float4> TexAerialPerspective : register(t2);
@@ -1652,6 +1655,7 @@ VolumetricCloudResult RenderVolumetricCloudRay(float3 direction, float3 eye, flo
 
 // clang-format off
 #include "PhysicalSky/UpperCloud.hlsli"
+#include "PhysicalSky/HorizonClouds.hlsli"
 #include "PhysicalSky/CloudBlur.hlsli"
 #include "PhysicalSky/CloudBounds.hlsli"
 #include "PhysicalSky/CloudTemporal.hlsli"

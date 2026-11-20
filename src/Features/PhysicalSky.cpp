@@ -144,10 +144,16 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	lowVelocity, highVelocity, development, disturbance)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+	HorizonCloudSettings,
+	enabled, coverage, baseAltitude, topAltitude, type, density, distance, brightness, seed,
+	pleasantAmount, cloudyAmount, rainyAmount, snowAmount)
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	CloudLayer,
 	low,
 	middle,
 	cirrus,
+	horizon,
 	lighting,
 	wind)
 
@@ -183,16 +189,16 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 
 	worldspaceWhitelist,
 	groundAlbedo,
+	oceanHorizon,
+	oceanColor,
+	oceanRoughness,
+	oceanGlitter,
 	planetRadius,
 	atmosphereRadius,
 	rayleighFalloff,
 	rayleighScatter,
 	rayleighScatterAP1,
 	aerosolType,
-	oceanHorizon,
-	oceanColor,
-	oceanRoughness,
-	oceanGlitter,
 	aerosolLoading,
 	aerosolHumidity,
 	aerosolFalloff,
@@ -953,12 +959,6 @@ void PhysicalSky::SettingsAtmosphere()
 
 	ImGui::SeparatorText(T(TKEY("planetary_parameters"), "Planetary Parameters"));
 	{
-		ImGui::InputFloat(T(TKEY("planet_radius"), "Planet Radius"), &settings.planetRadius, 1.f, 100000.f, "%.1f km");
-		ImGui::InputFloat(T(TKEY("atmosphere_radius"), "Atmosphere Radius"), &settings.atmosphereRadius, 1.f, 100000.f, "%.1f km");
-		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::Text("%s", T(TKEY("planet_radius_is_the_distance_from_the_planet"),
-								  "Planet radius is the distance from the planet center to sea level.\n"
-								  "Atmosphere radius is the distance from the planet center to the top of atmosphere.\n"
 		ImGui::Checkbox(T(TKEY("ocean_horizon"), "Sea Below the Horizon"), &settings.oceanHorizon);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::Text("%s", T(TKEY("ocean_horizon_desc"),
@@ -973,6 +973,12 @@ void PhysicalSky::SettingsAtmosphere()
 			ImGui::Text("%s", T(TKEY("ocean_roughness_desc"), "Steepness of the waves (slope variance, about 0.003 + 0.005 per m/s of wind). Rougher water mirrors less sky at the horizon, so the sea meets the sky as a darker line, and the sun's glitter spreads wider."));
 		ImGui::SliderFloat(T(TKEY("ocean_glitter"), "Sun Glitter"), &settings.oceanGlitter, 0.f, 2.f, "%.2f");
 		ImGui::EndDisabled();
+		ImGui::InputFloat(T(TKEY("planet_radius"), "Planet Radius"), &settings.planetRadius, 1.f, 100000.f, "%.1f km");
+		ImGui::InputFloat(T(TKEY("atmosphere_radius"), "Atmosphere Radius"), &settings.atmosphereRadius, 1.f, 100000.f, "%.1f km");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("planet_radius_is_the_distance_from_the_planet"),
+								  "Planet radius is the distance from the planet center to sea level.\n"
+								  "Atmosphere radius is the distance from the planet center to the top of atmosphere.\n"
 								  "On Earth, they are about 6360 km and 6420 km respectively."));
 	}
 }
@@ -1209,6 +1215,7 @@ void PhysicalSky::SettingsVolumetricClouds()
 	if (ImGui::CollapsingHeader(T(TKEY("middle_clouds"), "Middle Clouds (As / Ac)"), ImGuiTreeNodeFlags_SpanAvailWidth))
 		MidCloudMapManager::DrawSettings(settings.cloudLayer.middle, ndfTexManager);
 	DrawCirrusSection();
+	DrawHorizonCloudSection();
 	DrawCloudStormSection();
 	if (ImGui::CollapsingHeader(T(TKEY("voxel_section"), "Voxel Clouds"), ImGuiTreeNodeFlags_SpanAvailWidth)) {
 		const auto camera = globals::game::frameBufferCached.GetCameraPosAdjust();
@@ -1397,6 +1404,73 @@ void PhysicalSky::DrawCirrusSection()
 		Util::Text::WrappedSecondary("%s", T(TKEY("cloud_cirrus_desc"),
 											   "The high ice-cloud veil. It is a separate layer with its own weather map and lighting."));
 		CirrusMapManager::DrawSettings(cirrus, settings.cloudLayer.lighting, ndfTexManager);
+	}
+}
+
+float PhysicalSky::GetHorizonCloudCoverage() const
+{
+	const auto& horizon = settings.cloudLayer.horizon;
+	if (!horizon.enabled || !std::isfinite(horizon.coverage) || horizon.coverage <= 0.f)
+		return 0.f;
+	const auto amount = [&](const RE::TESWeather* weather) {
+		float value = horizon.pleasantAmount;
+		if (weather) {
+			using Flag = RE::TESWeather::WeatherDataFlag;
+			const auto& flags = weather->data.flags;
+			if (flags.any(Flag::kSnow))
+				value = horizon.snowAmount;
+			else if (flags.any(Flag::kRainy))
+				value = horizon.rainyAmount;
+			else if (flags.any(Flag::kCloudy))
+				value = horizon.cloudyAmount;
+		}
+		return std::isfinite(value) ? std::clamp(value, 0.f, 4.f) : 1.f;
+	};
+	float scale = amount(nullptr);
+	if (const auto* sky = globals::game::sky) {
+		scale = amount(sky->currentWeather);
+		if (sky->lastWeather && sky->currentWeatherPct < 1.f)
+			scale = std::lerp(amount(sky->lastWeather), scale, std::clamp(sky->currentWeatherPct, 0.f, 1.f));
+	}
+	return std::clamp(horizon.coverage * scale, 0.f, 1.f);
+}
+
+void PhysicalSky::DrawHorizonCloudSection()
+{
+	auto& horizon = settings.cloudLayer.horizon;
+
+	ImGui::SetNextItemOpen(false, ImGuiCond_FirstUseEver);
+	if (ImGui::CollapsingHeader(T(TKEY("horizon_clouds"), "Horizon Clouds"), ImGuiTreeNodeFlags_SpanAvailWidth)) {
+		Util::Text::WrappedSecondary("%s", T(TKEY("horizon_clouds_desc"),
+											   "A band of distant cloud on the horizon, far beyond the ray-marched clouds: towers and banks seen edge-on over the sea or behind the mountains. Lit by the same sun through the same air, and it costs almost nothing. All values can be set per weather and time of day; coverage 0 removes the band."));
+		ImGui::Checkbox(T(TKEY("horizon_enabled"), "Enable Horizon Clouds"), &horizon.enabled);
+		ImGui::BeginDisabled(!horizon.enabled);
+		ImGui::SliderFloat(T(TKEY("horizon_coverage"), "Coverage"), &horizon.coverage, 0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("horizon_coverage_desc"), "How much of the horizon has cloud groups. 0: none. 1: a continuous band. Multiplied by the weather class amount below."));
+		ImGui::SliderFloat(T(TKEY("horizon_type"), "Type (towers to bank)"), &horizon.type, 0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("horizon_type_desc"), "0: separate cumulus towers of different heights. 1: one low, even stratus bank with a soft top."));
+		ImGui::SliderFloat(T(TKEY("horizon_base"), "Base Altitude"), &horizon.baseAltitude, 0.f, 4000.f, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderFloat(T(TKEY("horizon_top"), "Top Altitude"), &horizon.topAltitude, 500.f, 12000.f, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("horizon_top_desc"), "Height of the tallest towers above sea level. At 60 km, 3 km of cloud stands about 3 degrees above the horizon."));
+		ImGui::SliderFloat(T(TKEY("horizon_distance"), "Distance"), &horizon.distance, 45.f, 150.f, "%.0f km", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("horizon_distance_desc"), "Distance to the nearer of the two bands; the second stands at 1.8 times this. Farther bands sit lower behind the curve of the sea and take more haze."));
+		ImGui::SliderFloat(T(TKEY("horizon_density"), "Density"), &horizon.density, 0.f, 4.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderFloat(T(TKEY("horizon_brightness"), "Brightness"), &horizon.brightness, 0.f, 3.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderFloat(T(TKEY("horizon_seed"), "Shape Seed"), &horizon.seed, 0.f, 64.f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
+
+		ImGui::SeparatorText(T(TKEY("horizon_weather_class"), "Amount by Weather Class"));
+		Util::Text::WrappedSecondary("%s", T(TKEY("horizon_weather_class_desc"),
+											   "Multiplies coverage by the class of the current game weather, blended across weather changes. Rain, snow and storms hide the horizon behind their own deck, so they default to none."));
+		ImGui::SliderFloat(T(TKEY("horizon_pleasant"), "Pleasant / Unclassified"), &horizon.pleasantAmount, 0.f, 2.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderFloat(T(TKEY("horizon_cloudy"), "Cloudy"), &horizon.cloudyAmount, 0.f, 2.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderFloat(T(TKEY("horizon_rainy"), "Rainy"), &horizon.rainyAmount, 0.f, 2.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderFloat(T(TKEY("horizon_snow"), "Snow"), &horizon.snowAmount, 0.f, 2.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::Text::Secondary("%s  %.2f", T(TKEY("horizon_coverage_now"), "Coverage now"), GetHorizonCloudCoverage());
+		ImGui::EndDisabled();
 	}
 }
 
@@ -2125,6 +2199,11 @@ void PhysicalSky::Reset()
 		0.f  // the directional light's, blended below
 	};
 	cbData.diskBillboardScale = float4(1.f);
+	const float3 oceanColor = sRGBToWorkingGamut(settings.oceanColor);
+	cbData.oceanColorAmount = { std::clamp(oceanColor.x, 0.f, 1.f), std::clamp(oceanColor.y, 0.f, 1.f), std::clamp(oceanColor.z, 0.f, 1.f),
+		settings.oceanHorizon ? 1.f : 0.f };
+	cbData.oceanParams = { std::isfinite(settings.oceanRoughness) ? std::clamp(settings.oceanRoughness, 0.002f, 0.2f) : 0.03f,
+		std::isfinite(settings.oceanGlitter) ? std::clamp(settings.oceanGlitter, 0.f, 4.f) : 1.f, 0.f, 0.f };
 	if (const auto* sky = globals::game::sky; sky && sky->root) {
 		const auto& viewer = sky->root->world.translate;
 		const auto sunTan = sky->sun ? Util::GetBillboardHalfTan(sky->sun->sunBase.get(), viewer, 0.f) : 0.f;
@@ -2199,11 +2278,6 @@ void PhysicalSky::ClearVolumetricToNeutral()
 		context->PSSetShaderResources(69, 1, &nullShadowMean);
 		context->CSSetShaderResources(69, 1, &nullShadowMean);
 		context->ClearUnorderedAccessViewFloat(texCloudShadowMean->uav.get(), kClearLuminance);
-	const float3 oceanColor = sRGBToWorkingGamut(settings.oceanColor);
-	cbData.oceanColorAmount = { std::clamp(oceanColor.x, 0.f, 1.f), std::clamp(oceanColor.y, 0.f, 1.f), std::clamp(oceanColor.z, 0.f, 1.f),
-		settings.oceanHorizon ? 1.f : 0.f };
-	cbData.oceanParams = { std::isfinite(settings.oceanRoughness) ? std::clamp(settings.oceanRoughness, 0.002f, 0.2f) : 0.03f,
-		std::isfinite(settings.oceanGlitter) ? std::clamp(settings.oceanGlitter, 0.f, 4.f) : 1.f, 0.f, 0.f };
 	}
 	volumetricNeutralCleared = true;
 }

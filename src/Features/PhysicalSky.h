@@ -72,6 +72,7 @@ struct PhysicalSky final : public Feature
 	void DrawCloudStormSection();
 	void DrawCloudLightingSection();
 	void DrawCirrusSection();
+	void DrawHorizonCloudSection();
 	void DrawCloudQualitySection();
 	void DrawVanillaCloudSection();
 
@@ -152,12 +153,12 @@ struct PhysicalSky final : public Feature
 		};
 		float fallbackZBottom = 0.f;
 		float3 groundAlbedo = { .2f, .2f, .2f };
-
 		// Below the horizon the sky ends on a sea instead of bare air (the planet sphere is at sea level).
 		bool oceanHorizon = true;
 		float3 oceanColor = { .010f, .035f, .050f };  // reflectance of the water body
 		float oceanRoughness = 0.03f;                  // slope variance of the waves
 		float oceanGlitter = 1.f;                      // strength of the sun's glitter path
+
 		float planetRadius = 6.36e3f;      // in km
 		float atmosphereRadius = 6.42e3f;  // in km
 
@@ -313,9 +314,9 @@ struct PhysicalSky final : public Feature
 		uint dirLightDiskIndex;              // body whose disc phase the clouds show
 		float4 dirLightDisc;                 // world direction to that body, and its glow weight fading out and back in across a swap
 		float4 diskBillboardScale;
-	} cbData;
 		float4 oceanColorAmount;  // water colour, amount (0 = no sea below the horizon)
 		float4 oceanParams;       // wave slope variance, sun glitter strength, unused, unused
+	} cbData;
 	STATIC_ASSERT_ALIGNAS_16(CbData);
 
 	eastl::unique_ptr<Texture2D> texTrLut = nullptr;  // transmittance
@@ -519,8 +520,11 @@ struct PhysicalSky final : public Feature
 		float4 middleCells;
 		float4 middleBands;
 		float4 middleBandShape;
+		float4 horizonShape;  // coverage (0 = none), base altitude, top altitude (game units), type
+		float4 horizonLayer;  // near shell distance (game units), density, drift (turns), brightness
+		float4 horizonExtra;  // shape seed, unused
 	};
-	static_assert(sizeof(VolumetricCloudCB) == 1344);
+	static_assert(sizeof(VolumetricCloudCB) == 1392);
 	static_assert(offsetof(VolumetricCloudCB, dirlightDir) == 48);
 	static_assert(offsetof(VolumetricCloudCB, previousCamera) == 64);
 	static_assert(offsetof(VolumetricCloudCB, lowNdfFrequency) == 128);
@@ -537,6 +541,7 @@ struct PhysicalSky final : public Feature
 	static_assert(offsetof(VolumetricCloudCB, middleCells) == 1296);
 	static_assert(offsetof(VolumetricCloudCB, middleBands) == 1312);
 	static_assert(offsetof(VolumetricCloudCB, middleBandShape) == 1328);
+	static_assert(offsetof(VolumetricCloudCB, horizonShape) == 1344);
 	eastl::unique_ptr<ConstantBuffer> volCloudCb = nullptr;
 	eastl::unique_ptr<ConstantBuffer> cloudDispatchCb;
 	eastl::unique_ptr<Texture2D> texVolStormMotion, texVolCubeStormMotion;
@@ -627,6 +632,10 @@ struct PhysicalSky final : public Feature
 	winrt::com_ptr<ID3D11ComputeShader> csVolMainSingleVolcanic;
 	winrt::com_ptr<ID3D11ComputeShader> csVoxelView, csVoxelViewSingle, csVolCubemapVoxel, csVolShadowVoxel, csCloudAmbientDensityVoxel, csVoxelLighting;
 	winrt::com_ptr<ID3D11ComputeShader> csVolFilter = nullptr, csVolFilterWide = nullptr;
+	winrt::com_ptr<ID3D11ComputeShader> csVolFilterNone = nullptr;  ///< Blur radius 0: only adds the horizon clouds.
+	double horizonCloudDrift = 0.0;                                 ///< Turns the horizon band has travelled round the camera.
+	/** @brief Horizon cloud coverage for the current weather: the setting times the weather class amount, 0 when off. */
+	float GetHorizonCloudCoverage() const;
 	winrt::com_ptr<ID3D11ComputeShader> csVolReproject = nullptr;
 	winrt::com_ptr<ID3D11ComputeShader> csVolCubeReproject = nullptr;
 	winrt::com_ptr<ID3D11ComputeShader> csVolShadowVolume = nullptr;

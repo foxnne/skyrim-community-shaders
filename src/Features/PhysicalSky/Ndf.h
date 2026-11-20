@@ -427,11 +427,33 @@ private:
 	bool valid = false;
 };
 
+/// Distant cloud band on the horizon, beyond the ray-marched range. Every value but `enabled` is a plain float so
+/// weather and time-of-day scenes blend it like the other cloud settings; coverage 0 means no band.
+struct HorizonCloudSettings
+{
+	bool enabled = true;
+	float coverage = 0.5f;         // share of the horizon with cloud groups, before the weather class amount
+	float baseAltitude = 700.f;    // metres above sea level
+	float topAltitude = 3200.f;    // metres; the tallest towers reach this
+	float type = 0.25f;            // 0: separate cumulus towers, 1: one flat stratus bank
+	float density = 1.f;
+	float distance = 60.f;         // km to the near shell; the far shell is at 1.8 times this
+	float brightness = 1.f;
+	float seed = 0.f;
+	// Multiplies coverage by the class of the game weather (blended across weather transitions). A scene that
+	// sets coverage for one weather is still multiplied by its class, so set that class to 1 to author freely.
+	float pleasantAmount = 0.6f;   // also weathers without a class
+	float cloudyAmount = 1.4f;
+	float rainyAmount = 0.f;
+	float snowAmount = 0.f;
+};
+
 struct CloudLayer
 {
 	LowCloudSettings low;
 	MidCloudSettings middle;
 	CirrusSettings cirrus;
+	HorizonCloudSettings horizon;
 	CloudLightingSettings lighting;
 	CloudWindSettings wind;
 };

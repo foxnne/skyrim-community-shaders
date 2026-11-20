@@ -814,6 +814,7 @@ void PhysicalSky::CompileVolumetricShaders()
 		ShaderInfo{ &csCloudAmbientDensityVoxel, "Volumetrics.cs.hlsl", { { "CLOUD_VOXELS", "" } }, "buildCloudAmbientDensity" },
 		ShaderInfo{ &csVolFilter, "Volumetrics.cs.hlsl", {}, "filterCloud" },
 		ShaderInfo{ &csVolFilterWide, "Volumetrics.cs.hlsl", { { "CLOUD_BLUR_RADIUS", "2" } }, "filterCloud" },
+		ShaderInfo{ &csVolFilterNone, "Volumetrics.cs.hlsl", { { "CLOUD_BLUR_RADIUS", "0" } }, "filterCloud" },
 		ShaderInfo{ &csVolReproject, "Volumetrics.cs.hlsl", {}, "reproject" },
 		ShaderInfo{ &csVolCubeReproject, "Volumetrics.cs.hlsl", {}, "reprojectCubemap" },
 		ShaderInfo{ &csVolShadowVolume, "Volumetrics.cs.hlsl", {}, "renderShadowVolume" },
@@ -984,6 +985,12 @@ void PhysicalSky::UpdateCloudWind()
 	volWind.highOffset[1] += highVelocity.y * elapsed;
 	volWind.phase += CloudUnitParameter(layer.wind.development) * 0.03 * elapsed;
 	volWind.stormTime += elapsed;
+	// The horizon band turns round the camera at the low wind's speed over its own (very long) circumference.
+	{
+		const double distance = std::clamp(static_cast<double>(std::isfinite(layer.horizon.distance) ? layer.horizon.distance : 60.f), 45.0, 150.0) * 1000.0;
+		const double speed = std::hypot(lowVelocity.x, lowVelocity.y) * (lowVelocity.x + lowVelocity.y < 0.f ? -1.0 : 1.0);
+		horizonCloudDrift = std::fmod(horizonCloudDrift + speed * elapsed / (6.283185307179586 * distance), 9.0);
+	}
 	const float2 altitude = layer.low.GetNdfAltitudeRangeKm();
 	const float span = altitude.y - altitude.x;
 	const float heightFraction = span / std::max(layer.cirrus.GetAltitudeKm() - (altitude.x + altitude.y) * 0.5f, span);
@@ -1102,6 +1109,10 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 	const float bandThickness = bandValue(middle.bands.thickness, 0.f, 1.f, 0.f);
 	const float bandLift = bandValue(middle.bands.displacement, 0.f, .5f, 0.f) * bandValue(middle.thickness, 100.f, 4000.f, 800.f) / Util::Units::GAME_UNIT_TO_M;
 	auto& lighting = settings.cloudLayer.lighting;
+	const auto& horizon = settings.cloudLayer.horizon;
+	const float horizonCoverage = GetHorizonCloudCoverage();
+	const float horizonBase = bandValue(horizon.baseAltitude, 0.f, 4000.f, 700.f);
+	const float horizonTop = std::max(bandValue(horizon.topAltitude, 500.f, 12000.f, 3200.f), horizonBase + 200.f);
 
 	low.ndfScale.x = std::clamp(low.ndfScale.x, 1.0f, 50.0f);
 	low.ndfScale.y = std::clamp(low.ndfScale.y, 1.0f, 50.0f);
@@ -1253,6 +1264,10 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 		.middleBands = { std::cos(bandAngle) / bandWavelength, std::sin(bandAngle) / bandWavelength,
 			bandValue(middle.bands.warp, 0.f, 1.f, .25f), bandCoverage },
 		.middleBandShape = { bandThickness, bandLift, bandWavelength, bandCoverage + bandThickness + bandLift > 0.f ? 1.f : 0.f },
+		.horizonShape = { horizonCoverage, horizonBase / Util::Units::GAME_UNIT_TO_M, horizonTop / Util::Units::GAME_UNIT_TO_M, bandValue(horizon.type, 0.f, 1.f, 0.25f) },
+		.horizonLayer = { KilometersToGameUnits(bandValue(horizon.distance, 45.f, 150.f, 60.f)), bandValue(horizon.density, 0.f, 4.f, 1.f),
+			static_cast<float>(horizonCloudDrift), bandValue(horizon.brightness, 0.f, 3.f, 1.f) },
+		.horizonExtra = { std::floor(bandValue(horizon.seed, 0.f, 64.f, 0.f)), 0.f, 0.f, 0.f },
 	};
 	cloudStormManager.UpdateLighting(lighting.dropletDiameter);
 	cloudStormManager.UpdateMotion(volWind.stormTime, previousWind.stormTime,
@@ -1826,7 +1841,8 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 			context->CSSetShaderResources(58, 1, nullTemporalSrvs);
 
 			const int blurRadius = std::clamp(settings.cloudBlurRadius, 0, 2);
-			if (blurRadius == 0) {
+			// The horizon clouds are added by the filter shader, so with them it runs at radius 0 too.
+			if (blurRadius == 0 && !(horizonCoverage > 0.f && csVolFilterNone)) {
 				// Forward draws already hold these output identities. Keep them and
 				// the unfiltered history separate without dispatching a blur shader.
 				context->CopyResource(texVolFilteredTr->resource.get(), texVolTr->resource.get());
@@ -1841,7 +1857,7 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 					texVolFilteredTr->uav.get(), texVolFilteredLum->uav.get(), texVolFilteredAux->uav.get()
 				};
 				context->CSSetUnorderedAccessViews(3, (uint)filteredUavs.size(), filteredUavs.data(), nullptr);
-				context->CSSetShader(blurRadius == 2 ? csVolFilterWide.get() : csVolFilter.get(), nullptr, 0);
+				context->CSSetShader(blurRadius == 2 ? csVolFilterWide.get() : (blurRadius == 0 ? csVolFilterNone.get() : csVolFilter.get()), nullptr, 0);
 				globals::profiler->BeginPass("PhysicalSky::VolumetricFilter");
 				context->Dispatch((renderW + 7u) >> 3, (renderH + 7u) >> 3, 1);
 				globals::profiler->EndPass();

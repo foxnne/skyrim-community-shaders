@@ -66,9 +66,13 @@ groupshared float4 CloudFilterAux[CloudFilterCount];
 		}
 	}
 	color = weightSum > 0.0 ? color / weightSum : CloudFilterLum[center];
-	RWTexFilteredTr[pixel] = weightSum > 0.0 ? clamp(transmittance / weightSum, transmittanceRange.x, transmittanceRange.y) : CloudFilterTr[center];
+	float filteredTr = weightSum > 0.0 ? clamp(transmittance / weightSum, transmittanceRange.x, transmittanceRange.y) : CloudFilterTr[center];
+	float4 filteredAux = metadata;
+	// After the blur and outside the temporal history: the band is exact per pixel and needs neither.
+	HorizonClouds::Composite(pixel, filteredTr, color, filteredAux);
+	RWTexFilteredTr[pixel] = filteredTr;
 	RWTexFilteredLum[pixel] = color;
-	RWTexFilteredAux[pixel] = metadata;
+	RWTexFilteredAux[pixel] = filteredAux;
 }
 
 #endif

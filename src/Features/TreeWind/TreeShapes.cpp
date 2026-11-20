@@ -192,7 +192,8 @@ namespace TreeShapes
 			return count;
 		}
 
-		void AddCard(BendWeights::Block& a_block, BendWeights::TrunkCard a_card, float a_worldScale)
+		// a_footX, a_footY: where the trunk meets the ground, in the shape's space; a_world places it in the world
+		void AddCard(BendWeights::Block& a_block, BendWeights::TrunkCard a_card, float a_worldScale, const RE::NiTransform& a_world, float a_footX, float a_footY)
 		{
 			// Crossed card pairs of one tree share its random and scale
 			const BendWeights::TrunkCard* twin = nullptr;
@@ -209,7 +210,11 @@ namespace TreeShapes
 				a_card.random = twin->random;
 				a_card.scale = twin->scale;
 				a_card.tree = twin->tree;
+				a_card.tint = twin->tint;
 			} else {
+				// The loaded tree gets its tint from the position of its reference, which is where its trunk stands
+				const auto footWS = a_world * RE::NiPoint3{ a_footX, a_footY, a_card.base };
+				a_card.tint = GetTintCode(footWS.x, footWS.y);
 				a_card.tree = static_cast<int>(a_block.cards.size());
 				a_card.random = Hash01(a_card.x, a_card.y);
 				a_card.scale = TreeScale(a_card.top - a_card.base, a_worldScale, Hash01(a_card.y * 1.37f + 11.0f, a_card.x * 0.71f - 5.0f));
@@ -291,6 +296,7 @@ namespace TreeShapes
 		struct QuadBounds
 		{
 			float base = FLT_MAX, top = -FLT_MAX, cx = 0.0f, cy = 0.0f;
+			float footX = 0.0f, footY = 0.0f;  // centre of the lower edge: a leaning card stands there, not at its centre
 		};
 
 		QuadBounds GetQuadBounds(const VertexView& a_vertices, uint32_t a_first)
@@ -303,6 +309,18 @@ namespace TreeShapes
 				q.cx += p.x * 0.25f;
 				q.cy += p.y * 0.25f;
 			}
+			const float middle = 0.5f * (q.base + q.top);
+			int low = 0;
+			for (uint32_t k = 0; k < 4; ++k) {
+				const auto p = a_vertices(a_first + k);
+				if (p.z <= middle) {
+					q.footX += p.x;
+					q.footY += p.y;
+					++low;
+				}
+			}
+			q.footX = low > 0 ? q.footX / static_cast<float>(low) : q.cx;
+			q.footY = low > 0 ? q.footY / static_cast<float>(low) : q.cy;
 			return q;
 		}
 
@@ -350,7 +368,7 @@ namespace TreeShapes
 				data[at + 0] = toSnorm((p.x - card.x) / radius);
 				data[at + 1] = toSnorm((p.y - card.y) / radius);
 				data[at + 2] = toSnorm((p.z - extent.zMin) / height);
-				data[at + 3] = static_cast<int8_t>(1 + std::lround(std::clamp(card.random, 0.0f, 1.0f) * 126.0f));
+				data[at + 3] = static_cast<int8_t>(1 + std::min<uint32_t>(card.tint, kTintLevels * kTintLevels - 1));
 			}
 
 			D3D11_BUFFER_DESC bufferDesc{};
@@ -1220,11 +1238,12 @@ namespace TreeShapes
 				// Order-independent, so a block that comes back with the same trunk shapes gets the same generation
 				block.generation ^= static_cast<uint32_t>(signature ^ (signature >> 32)) | 1u;
 				block.changedFrame = a_frame;
+				const auto& world = a_geometry->world;
 				for (const auto& trunk : trunks)
-					AddCard(block, trunk, worldScale);
+					AddCard(block, trunk, worldScale, world, trunk.x, trunk.y);
 				for (const auto c : cardStarts) {
 					const auto q = GetQuadBounds(vertices, c);
-					AddCard(block, { q.cx, q.cy, q.base, q.top }, worldScale);
+					AddCard(block, { q.cx, q.cy, q.base, q.top }, worldScale, world, q.footX, q.footY);
 				}
 			}
 			if (cardStarts.empty() && trunks.empty())

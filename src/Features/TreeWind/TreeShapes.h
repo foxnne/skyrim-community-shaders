@@ -223,7 +223,7 @@ namespace TreeShapes
 		 * Buffer layout (R8G8B8A8_SNORM, one element per vertex), mirrored by TreeWind.hlsli GetCrownData:
 		 *   x, y  horizontal offset from the tree's trunk, 1 = the widest point of that tree's crown
 		 *   z     height inside the tree's crown, 0 lowest crown vertex, 1 top
-		 *   w     0 = no data for this vertex, otherwise (1 + 126 * tree random) / 127
+		 *   w     0 = no data for this vertex, otherwise (1 + the tree's tint code) / 127 (GetTintCode)
 		 * @return nullptr for shapes without it: billboards, trunks, crowns with no trunk card to follow.
 		 */
 		ID3D11ShaderResourceView* GetCrownData(RE::BSGeometry* a_geometry) const;
@@ -242,6 +242,7 @@ namespace TreeShapes
 			float random = 0.0f;  // timing offset and flutter choice, shared by a tree's crossed cards
 			float scale = 1.0f;   // sway scale from the tree height
 			int tree = -1;        // index of the first card of this tree in its block: crossed cards share it
+			uint8_t tint = kNeutralTintCode;  // GetTintCode of the tree's foot in the world, shared by its crossed cards
 		};
 
 		struct Block

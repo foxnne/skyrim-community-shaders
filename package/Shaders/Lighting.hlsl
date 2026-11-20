@@ -154,7 +154,9 @@ struct VS_OUTPUT
 	float4 FurRoot: TEXCOORD14;
 #endif
 #if defined(LOD_TREE_CROWN_DATA)
-	float4 TreeCrown: TEXCOORD15;  // offset from the trunk in xy, height in the crown, validity and tree random
+	float4 TreeCrown: TEXCOORD15;  // offset from the trunk in xy, height in the crown, validity (1 with crown data)
+	// The tree's brightness and hue seeds, 0-1. Not interpolated: a triangle between two trees takes one tree's tint
+	nointerpolation float2 TreeTint: TEXCOORD16;
 #endif
 };
 #ifdef VSHADER
@@ -430,7 +432,7 @@ VS_OUTPUT main(VS_INPUT input)
 	vsout.ModelPosition = input.Position.xyz;
 
 #	if defined(LOD_TREE_CROWN_DATA)
-	vsout.TreeCrown = TreeWind::GetCrownData(vertexID);
+	vsout.TreeCrown = TreeWind::GetCrownData(vertexID, vsout.TreeTint);
 #	endif
 
 #	if defined(FUR_SHELLS)
@@ -1242,7 +1244,6 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	const bool lodTreeCrownData = lodTreeCrown && input.TreeCrown.w > 0.25 / 127.0;
 	const float lodTreeRadial = saturate(length(input.TreeCrown.xy));
 	const float lodTreeHeight = saturate(input.TreeCrown.z);
-	const float lodTreeRandom = saturate((input.TreeCrown.w * 127.0 - 1.0) / 126.0);
 	LODTreeWrapScale = 1.0;
 	// Self-shadow of the crown and of the forest around it, faked from the position in the crown: 1 at the
 	// trunk near the bottom, 0 at the top; the outer shell only gets a little of it toward its lower edge.
@@ -1881,12 +1882,10 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// The LOD atlas is built from the non-PBR leaf textures, about half as bright as the PBR ones on loaded trees
 	if (lodTreeCrown)
 		baseColor.xyz *= SharedData::lodTreeLightingSettings.Brightness;
-	// Neighbouring trees differ a little in brightness and lean toward yellow or blue-green
-	if (lodTreeCrownData) {
-		const float variation = SharedData::lodTreeLightingSettings.Variation;
-		const float hue = (frac(lodTreeRandom * 7.31) * 2.0 - 1.0) * variation;
-		baseColor.xyz *= (1.0 + (lodTreeRandom * 2.0 - 1.0) * variation) * float3(1.0 + hue, 1.0, 1.0 - hue);
-	}
+	// Neighbouring trees differ a little in brightness and lean toward yellow or blue-green: the tint of the tree
+	// where it stands, which its full model gets too (NEAR_TREE_LEAF_LIGHTING)
+	if (lodTreeCrownData)
+		baseColor.xyz *= GetTreeTint(input.TreeTint, SharedData::lodTreeLightingSettings.Variation);
 #	endif
 
 #	if defined(NEAR_TREE_LEAF_LIGHTING)

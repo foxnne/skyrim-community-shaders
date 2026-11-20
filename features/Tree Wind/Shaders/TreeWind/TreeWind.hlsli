@@ -22,7 +22,9 @@ namespace TreeWind
 	Buffer<float4> VertexData : register(t120);
 
 	// Tree LOD crowns, per vertex, for the pixel shader: xy = offset from the trunk (1 = widest point of that
-	// tree's crown), z = height inside the crown 0-1, w = 0 without data, else (1 + 126 * tree random) / 127.
+	// tree's crown), z = height inside the crown 0-1, w = 0 without data, else (1 + the tree's tint code) / 127.
+	// The tint code is brightness level * 11 + hue level, 11 levels each: the code a loaded tree's leaf draws carry
+	// in Permutation::ExtraFeatureFlags::NearTreeTint, so a tree keeps its tint between LOD and full model.
 	// Bound only while Gusts.w is set.
 	Buffer<float4> CrownData : register(t121);
 
@@ -43,11 +45,22 @@ namespace TreeWind
 		return Params.w > 1.5;
 	}
 
-	float4 GetCrownData(uint vertexID)
+	// Returns the crown data with w as 1 with data and 0 without, and the tree's tint seeds (brightness, hue; 0-1,
+	// 0.5 = no tint) in a_tint
+	float4 GetCrownData(uint vertexID, out float2 a_tint)
 	{
 		float4 data = 0.0;
+		a_tint = 0.5;
 		[branch] if (Gusts.w > 0.5)
+		{
 			data = CrownData.Load(vertexID);
+			const uint code = (uint)round(saturate(data.w) * 127.0);
+			if (code > 0) {
+				const uint tint = min(code - 1, 120u);
+				a_tint = float2(tint / 11u, tint % 11u) / 10.0;
+			}
+			data.w = code > 0 ? 1.0 : 0.0;
+		}
 		return data;
 	}
 

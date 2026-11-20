@@ -64,11 +64,11 @@ float4 SampleGroundFog(uint2 pixel, uint2 size, uint2 activeSize, float depth)
 		const float tauFar = -log(max(fog.a, 1e-4));
 		float tau;
 		if (viewDepth <= aux.x) {
-			// In front of everything the texel saw. The fog along the ray thins evenly toward the camera; the pool
-			// lies on the ground at the end of the ray, so something well in front of that is in front of it.
+			// In front of everything the texel saw. The fog along the ray thins evenly toward the camera. The pool
+			// lies on the ground at the end of the ray: ground a little nearer (the next row of pixels) has the
+			// same pool over it, something at half the distance stands in front of it.
 			const float along = viewDepth / max(aux.x, 1e-3);
-			const float atEnd = saturate((along - 0.75) * 4.0);
-			tau = tauNear * lerp(along, atEnd * atEnd, saturate(aux.w));
+			tau = tauNear * lerp(along, saturate((along - 0.5) * 2.5), saturate(aux.w));
 		}
 		else if (viewDepth >= aux.y)
 			tau = tauFar;

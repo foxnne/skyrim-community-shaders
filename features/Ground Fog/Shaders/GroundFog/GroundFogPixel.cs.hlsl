@@ -575,6 +575,7 @@ namespace GroundFog
 	pool.tau = pool.tauNear = pool.t = pool.z = pool.above = pool.amount = 0.0;
 	pool.speed = 0.0;
 	pool.floorZ = GroundFog::FloorEmpty;
+	pool.range = pool.known = pool.ground = pool.over = 0.0;
 	if (GroundFog::PoolExtinction > 0.0 && surface && tEnd < GroundFog::PoolEnd) {
 		normal = GroundFog::SurfaceNormal(scenePixel, depth, position, mainSize, activeMain);
 		hasNormal = true;
@@ -593,6 +594,28 @@ namespace GroundFog
 					FloorSplat[texel] = pool.floorZ;
 			}
 		}
+	}
+
+	// Debug views of the pool alone, laid over the scene at half strength.
+	if (GroundFog::DebugMode == 6u || GroundFog::DebugMode == 7u) {
+		float3 colour = 0.0;
+		float cover = 0.0;
+		if (pool.range > 0.0) {
+			cover = 0.5;
+			if (GroundFog::DebugMode == 6u) {
+				// Floor map. Blue: no floor known under the pixel. Green: ground (brighter the more it counts).
+				// Red: stands on a known floor, brightest at the floor and dark at and above the layer top.
+				// Yellow: ground that is partly counted as standing above the floor.
+				const float standing = 1.0 - saturate(pool.over / max(GroundFog::PoolThickness, 1.0));
+				colour = pool.known > 0.0 ? float3((1.0 - pool.ground) * (0.15 + 0.85 * standing), pool.ground, 0.0) : float3(0.0, 0.3 * pool.ground, 1.0);
+			} else {
+				// Pool optical depth along the ray: black none, then blue 0.05, green 0.5, yellow 1, red 2 (its cap).
+				colour = pool.tau > 0.0 ? GroundFog::Hue(0.66 * (1.0 - saturate(log2(pool.tau / 0.05) / log2(40.0)))) : 0.0;
+			}
+		}
+		FogOut[pixel] = float4(colour * GroundFog::SkyMean() * 4.0, 1.0 - cover);
+		FogAuxOut[pixel] = float4(auxDepths, 1.0 - cover, 0.0);
+		return;
 	}
 
 	// The whole ray against the highest ground under it: one read settles short rays that end well above the ground.

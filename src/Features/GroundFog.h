@@ -237,6 +237,8 @@ struct GroundFog : Feature
 		kLayerMask,
 		kTapCount,
 		kSimulation,
+		kFloorMap,
+		kPoolDepth,
 	};
 
 	enum class Status

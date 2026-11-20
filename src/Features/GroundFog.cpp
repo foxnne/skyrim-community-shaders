@@ -702,7 +702,7 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 
 	const float thickness = (slab ? kDebugThickness : std::max(settings.Thickness, 0.1f)) * unitsPerMeter;
 	// The simulation view shows the pool as it is, so the sheet over it is not made dense.
-	const float density = debug && debugMode != DebugMode::kSimulation ? std::max(effectiveAmount * settings.Density, kDebugDensity) : effectiveAmount * settings.Density;
+	const float density = debug && debugMode < DebugMode::kSimulation ? std::max(effectiveAmount * settings.Density, kDebugDensity) : effectiveAmount * settings.Density;
 	const float fadeStart = settings.FadeStart * unitsPerMeter;
 
 	a_data = {};
@@ -1275,12 +1275,14 @@ void GroundFog::DrawDebugSection()
 		T(TKEY("debug_mode_ground_height"), "Ground Height"),
 		T(TKEY("debug_mode_layer_mask"), "Layer Mask"),
 		T(TKEY("debug_mode_tap_count"), "Tap Count"),
-		T(TKEY("debug_mode_simulation"), "Simulation")
+		T(TKEY("debug_mode_simulation"), "Simulation"),
+		T(TKEY("debug_mode_floor_map"), "Floor Map"),
+		T(TKEY("debug_mode_pool_depth"), "Pool Depth")
 	};
 	int mode = static_cast<int>(debugMode);
 	if (ImGui::Combo(T(TKEY("debug_mode"), "Debug View"), &mode, modes, static_cast<int>(std::size(modes))))
 		debugMode = static_cast<DebugMode>(std::clamp(mode, 0, static_cast<int>(std::size(modes)) - 1));
-	Util::HoverTip(T(TKEY("debug_mode_tooltip"), "Slab: a dense, level-topped 1 m layer with no noise, to check the height map against the ground.\nGround Height: the slab colored by the sampled height, one stripe per 64 units.\nLayer Mask: the real fog, dense, green where it is the sheet or the fog around you, red where it is valley fog, blue where terrain shadow keeps it from burning off.\nTap Count: texture and depth reads per pixel of the per-pixel pass. Blue is 4 or fewer, green 34, yellow 64, red 94 or more.\nSimulation: the pool coloured by its simulation. Red is how fast the fog moves, green how much there is, blue marks what stands in the fog instead of being its floor."));
+	Util::HoverTip(T(TKEY("debug_mode_tooltip"), "Slab: a dense, level-topped 1 m layer with no noise, to check the height map against the ground.\nGround Height: the slab colored by the sampled height, one stripe per 64 units.\nLayer Mask: the real fog, dense, green where it is the sheet or the fog around you, red where it is valley fog, blue where terrain shadow keeps it from burning off.\nTap Count: texture and depth reads per pixel of the per-pixel pass. Blue is 4 or fewer, green 34, yellow 64, red 94 or more.\nSimulation: the pool coloured by its simulation. Red is how fast the fog moves, green how much there is, blue marks what stands in the fog instead of being its floor.\nFloor Map: what the pool takes each pixel for, within its reach. Green is ground, red stands on a known floor (bright at the floor, dark at and above the top of the fog), yellow is ground partly counted as standing, blue has no known floor yet.\nPool Depth: how much pool fog lies along each pixel's ray. Black none, blue 0.05, green 0.5, yellow 1, red 2 (86 % opaque, the most)."));
 
 	// Atmosphere and Fog asks for the layer every frame it composes (or, with volume injection, fills its volume).
 	const bool volumeRunning = lastBindFrame != UINT32_MAX && globals::state->frameCount - lastBindFrame <= 2u;

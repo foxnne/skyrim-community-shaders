@@ -101,6 +101,8 @@ RWTexture2D<float4> SlopeOut : register(u2);
 RWTexture2D<float> LiftOut : register(u3);
 
 static const float MaxAmount = 6.0;
+// Seconds over which fog that was thrown up or pressed down settles back.
+static const float LiftSettle = 3.0;
 // A wake (the clear a mover leaves) does not take the fog under this share of what rests there.
 static const float WakeFloor = 0.15;
 // The most a place holds relative to what rests there, and at least this much room for fog passing through.
@@ -198,7 +200,9 @@ float GustPsi(float2 p)
 		const float4 state = GroundFog::FogSim.SampleLevel(LinearSampler, from / float2(size), 0);
 		velocity = state.xy;
 		delta = state.z - state.w;
-		lift = GroundFog::FogLift.SampleLevel(LinearSampler, from / float2(size), 0) * LiftKeep;
+		// Fog thrown up or pressed down settles back over LiftSettle seconds, so a trough and its rim relax after
+		// the body has gone. (The constant buffer's LiftKeep, 1.4 s, is not used.)
+		lift = GroundFog::FogLift.SampleLevel(LinearSampler, from / float2(size), 0) * exp(-DeltaTime / LiftSettle);
 		delta -= dot(velocity - Wind, float2(r.w - l.w, u.w - d.w)) / (2.0 * TexelSize) * DeltaTime;
 
 		// 2. Flowing together or apart.
@@ -307,7 +311,20 @@ float GustPsi(float2 p)
 		const float nearness = min(radius2 / distance2, 1.0);
 		if (dot(emitter.velocity, emitter.velocity) > 1.0) {
 			const float2 around = nearness * (2.0 * dot(emitter.velocity, outward) * outward - emitter.velocity);
-			velocity = lerp(velocity, distance2 <= radius2 ? emitter.velocity : around, saturate(nearness * 12.0 * DeltaTime));
+			// The body sets the fog moving: within its radius toward its own velocity, around it in the flow
+			// around a moving cylinder. It only ever speeds the fog up or turns it, never slows it: when the body
+			// slows down or stops, the fog it set moving carries on, rolls past and settles over the velocity's
+			// own decay (VelocityKeep, about 2.5 s). Pulling the fog toward the body's velocity whatever it was
+			// (as before) braked it to a halt with the body within a tenth of a second.
+			const float2 target = distance2 <= radius2 ? emitter.velocity : around;
+			float2 change = (target - velocity) * saturate(nearness * 12.0 * DeltaTime);
+			const float2 moving = velocity - drift;
+			const float movingSpeed = length(moving);
+			if (movingSpeed > 1.0) {
+				const float2 along = moving / movingSpeed;
+				change -= along * min(dot(change, along), 0.0);
+			}
+			velocity += change;
 		}
 		const float bell = exp(-distance2 / radius2);
 		velocity += outward * emitter.burst * sqrt(bell) * saturate(distance2 / radius2 * 4.0);

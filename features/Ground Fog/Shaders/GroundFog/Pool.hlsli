@@ -55,7 +55,9 @@ namespace GroundFog
 	// The finest structure of the pool, below the simulation's texels: size of its cells in game units (0.6 m and
 	// a third of that), and how far the air's velocity bends it, in seconds of travel.
 	static const float PoolGrain = 42.0;
-	static const float PoolGrainDrag = 0.5;
+	// Kept short: it is a displacement by the present velocity, not one carried over time, so as the flow dies down
+	// the strands move back by as much (at 0.5 s they visibly sprang back after a runner had stopped).
+	static const float PoolGrainDrag = 0.15;
 	// THE HEIGHT RULE. The pool is a blanket a foot thick at its thickest. No surface more than PoolHardTop above
 	// its floor ever receives pool fog, whatever the settings, the simulation or the floor map say: EvaluatePool
 	// ends with that test (PoolHeightRule), after everything else. The fog itself is cut off at that height too:

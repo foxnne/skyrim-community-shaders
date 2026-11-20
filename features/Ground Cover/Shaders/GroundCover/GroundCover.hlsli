@@ -87,13 +87,34 @@ namespace GroundCover
 		static const uint Grey = 8u;
 		static const uint White = 9u;
 		static const uint Region = 10u;
-		static const uint Eligible = 11u;  // surfaces the layer runs on, magenta
+		static const uint Eligible = 11u;  // every draw that reaches the layer, coloured by draw path, see DebugDrawPath
 	}
 
 	// Surfaces the layer does not run on (no rock bit, object LOD or terrain switched off), in debug views 2 and up.
 	float3 DebugNotEligible(float3 baseColor)
 	{
 		return Color::RGBToLuminance(baseColor) * 0.35;
+	}
+
+	/**
+	 * Debug view 11. Colour = draw path: magenta placed mesh, orange object LOD, green terrain, blue terrain LOD;
+	 * full where the layer runs on it, a third where it does not (no rock bit, or the toggle for it is off).
+	 * Pattern = pass: solid deferred, horizontal stripes forward in the world, checker forward without the
+	 * in-world flag. What keeps its normal colour does not reach the layer at all.
+	 */
+	float3 DebugDrawPath(uint path, bool eligible, bool deferred, bool inWorld, float2 pixel)
+	{
+		float3 colour = path == 0 ? float3(1.0, 0.0, 1.0) : path == 1 ? float3(1.0, 0.5, 0.0) :
+		                                                path == 2     ? float3(0.0, 1.0, 0.0) :
+		                                                                float3(0.1, 0.3, 1.0);
+		if (!eligible)
+			colour *= 0.33;
+		const uint2 cell = uint2(pixel) / 8u;
+		if (!deferred && inWorld && (cell.y & 1u))
+			colour *= 0.15;
+		if (!deferred && !inWorld && ((cell.x ^ cell.y) & 1u))
+			colour *= 0.15;
+		return colour;
 	}
 
 	float3 HeightRamp(float t)

@@ -63,7 +63,7 @@ struct GroundFog : Feature
 		// The near volume: a taller, softer body of fog around the camera.
 		// Up to 1 m thick it is the pool: drawn on what the screen shows, from the simulation. Thicker, it is the
 		// tall volume of the first versions, marched over the height map.
-		float NearDensity = 0.8f;     // extinction at the ground per meter, at Amount 1; 0 = none
+		float NearDensity = 1.6f;     // extinction at the ground per meter, at Amount 1; 0 = none
 		float NearThickness = 0.45f;  // height at which it has thinned to nothing
 		float NearFalloff = 1.5f;    // how quickly it thins with height
 		float NearDistance = 40.0f;  // meters from the camera; fades out over the second half
@@ -74,11 +74,12 @@ struct GroundFog : Feature
 		float BurnOffStrength = 1.0f;   // 0 = the time of day and the sun change nothing
 		float ShadowRetention = 0.45f;  // share of the morning amount that ground in terrain shadow keeps by day
 		float MorningAmount = 1.4f;
-		float MiddayAmount = 0.1f;
+		float MiddayAmount = 0.2f;
 		float EveningAmount = 0.8f;
 		// Reactive fog: things moving through the fog around the camera push it aside.
 		bool Reactive = true;
 		float ReactiveStrength = 1.0f;  // how much of the fog a mover clears; 0 leaves only the displacement
+		float ImpulseStrength = 1.0f;   // how hard jumps, landings, swings, casts, shouts and impacts strike the fog; 0 = they do not
 		// The simulation the pool is drawn from.
 		float SettleTime = 12.0f;   // seconds over which disturbed fog returns to its resting amount
 		float Wispiness = 1.0f;     // 0: even patches; 1: separate wisps with clear air between them
@@ -204,6 +205,9 @@ struct GroundFog : Feature
 		float Burst;  // outward speed added once
 		float Clear;  // share cleared at its centre this step
 		float Push;   // rate at which it pushes the fog from its middle to its rim, per second
+		float2 Kick;  // velocity added once at its centre, game units per second
+		float Lift;   // how far it throws the top of the fog up at its centre, once, as a share of the pool's height
+		float Pad;
 	};
 	static constexpr uint32_t kMaxFlowEmitters = 24;
 
@@ -231,14 +235,16 @@ struct GroundFog : Feature
 		float LayerTop;
 		float GustSpeed;
 		float GustSize;
+		float LiftKeep;
+		float SimPad[3];
 		FlowEmitter Emitters[kMaxFlowEmitters];
 	};
-	static_assert(sizeof(FlowEmitter) == 32);
-	static_assert(sizeof(FlowData) == 96 + 32 * kMaxFlowEmitters);
+	static_assert(sizeof(FlowEmitter) == 48);
+	static_assert(sizeof(FlowData) == 112 + 48 * kMaxFlowEmitters);
 	static_assert(offsetof(FlowData, Wind) == 32);
 	static_assert(offsetof(FlowData, Corner) == 48);
 	static_assert(offsetof(FlowData, RestUniform) == 64);
-	static_assert(offsetof(FlowData, Emitters) == 96);
+	static_assert(offsetof(FlowData, Emitters) == 112);
 
 	enum class DebugMode : uint32_t
 	{
@@ -305,6 +311,7 @@ struct GroundFog : Feature
 	/** The floor's slope, written by the simulation; and the simulation's own input in GroundFog/FlowSim.cs.hlsl: what the pixel pass saw of the floor last frame. */
 	static constexpr uint32_t kFloorSlopeSlot = 11;
 	static constexpr uint32_t kFloorSeenSlot = 12;
+	static constexpr uint32_t kLiftSlot = 13;
 	static constexpr uint32_t kFlowConstantSlot = 3;
 	static constexpr uint32_t kCompositeFogSlot = 42;
 	static constexpr uint32_t kCompositeDepthSlot = 43;
@@ -355,6 +362,7 @@ private:
 	eastl::unique_ptr<Texture2D> simFloor[2];
 	eastl::unique_ptr<Texture2D> floorSlope[2];  // slope of simFloor over about a meter, validity, and the sun map
 	eastl::unique_ptr<Texture2D> floorSeen;
+	eastl::unique_ptr<Texture2D> simLift[2];  // how far the top of the pool is thrown up or pressed down
 	uint32_t flowCurrent = 0;
 	bool flowValid = false;
 	bool simPending = false;   // PrepareSim set up a step that StepSim has not run yet
@@ -375,7 +383,16 @@ private:
 		bool magic = false;
 		bool moving = false;
 	};
-	std::unordered_map<uint32_t, RE::NiPoint3> flowActors;  // by handle: where each was last frame
+	/** What an actor was doing last frame, to see what it starts doing this frame. */
+	struct FlowActor
+	{
+		RE::NiPoint3 position;
+		float velocityZ = 0.0f;
+		bool midair = false;
+		bool swinging = false;
+		bool casting[3]{};  // left hand, right hand, voice
+	};
+	std::unordered_map<uint32_t, FlowActor> flowActors;  // by handle
 	std::unordered_map<uint32_t, FlowProjectile> flowProjectiles;
 	float frameDeltaTime = 0.0f;
 	eastl::unique_ptr<Texture2D> fogTexture;     // rgb: light per unit of opacity, a: transmittance to the far depth

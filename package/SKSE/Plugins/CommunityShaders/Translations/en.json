@@ -1790,6 +1790,8 @@
     "feature.ground_fog.ground_fill_tooltip": "Depth under the mapped ground that still holds fog, as a share of Thickness. Covers places where the real ground lies a little below the height map.",
     "feature.ground_fog.half_resolution": "Half Resolution",
     "feature.ground_fog.half_resolution_tooltip": "Computes the fog for every second pixel in each direction and fills in the rest by depth. A quarter of the cost; turn off to compare.",
+    "feature.ground_fog.impulse_strength": "Impulse Strength",
+    "feature.ground_fog.impulse_strength_tooltip": "How hard single events strike the pool: a jump and a landing puff it up around the feet, a weapon swing throws it forward and up, a spell cast and a shout blow it outward, a projectile or a spell that lands scatters it in a ring. The fog that is thrown up settles back in a second or two. 0 leaves only the push and wake of moving bodies.",
     "feature.ground_fog.key_feature_1": "Hugs the terrain, gathers in hollows and over water, and drifts with the wind",
     "feature.ground_fog.key_feature_2": "Lit and shadowed with the atmosphere: sun, moons, sky, clouds and terrain",
     "feature.ground_fog.key_feature_3": "Every amount and shape control can follow weather, time of day and location",

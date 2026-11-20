@@ -63,6 +63,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	EveningAmount,
 	Reactive,
 	ReactiveStrength,
+	ImpulseStrength,
 	SettleTime,
 	Wispiness,
 	WispScale,
@@ -139,6 +140,9 @@ namespace
 	constexpr float kSimGustSize = 840.0f;
 	// Seconds over which the sun map follows the shadows (moving leaves, the cascades' own stepping).
 	constexpr float kSimSunTime = 0.5f;
+	// Seconds over which fog that was thrown up settles back.
+	constexpr float kSimLiftTime = 1.4f;
+	constexpr float kMaxImpulseStrength = 3.0f;
 	// Share of the fog on a body's path that it pushes to the rim of its track, whatever its speed (the original
 	// mod's ActorPush is 0.35), and the speeds between which that comes in (game units per second).
 	constexpr float kActorPush = 0.7f;
@@ -387,10 +391,10 @@ uint32_t GroundFog::GatherSimEmitters(FlowEmitter* a_emitters, double a_originX,
 		return 1.0f - Util::Smoothstep(heightStart, heightEnd, a_position.z - land - floorOffset);
 	};
 	// a_weight: how far the thing is in the fog, 0 to 1; negative to work it out from its height above the land.
-	auto add = [&](const RE::NiPoint3& a_position, RE::NiPoint3 a_velocity, float a_radius, float a_burst, float a_clear, float a_priority, float a_weight = -1.0f, float a_push = 0.0f) {
+	auto add = [&](const RE::NiPoint3& a_position, RE::NiPoint3 a_velocity, float a_radius, float a_burst, float a_clear, float a_priority, float a_weight = -1.0f, float a_push = 0.0f) -> FlowEmitter* {
 		const float weight = a_weight >= 0.0f ? a_weight : inFog(a_position);
 		if (weight <= 0.0f)
-			return;
+			return nullptr;
 		const float speed = std::sqrt(a_velocity.x * a_velocity.x + a_velocity.y * a_velocity.y);
 		if (speed > kFlowMaxSpeed)
 			a_velocity *= kFlowMaxSpeed / speed;
@@ -403,6 +407,18 @@ uint32_t GroundFog::GatherSimEmitters(FlowEmitter* a_emitters, double a_originX,
 		candidate.emitter.Push = a_push * weight;
 		candidate.priority = a_priority;
 		candidates.push_back(candidate);
+		return &candidates.back().emitter;
+	};
+	// Something that strikes the fog once: a kick in a direction, a ring outward and the fog thrown up.
+	const float impulse = std::clamp(settings.ImpulseStrength, 0.0f, kMaxImpulseStrength);
+	auto strike = [&](const RE::NiPoint3& a_position, float a_radius, float a_burst, float a_clear, const RE::NiPoint3& a_kick, float a_lift, float a_weight) {
+		if (impulse <= 0.0f)
+			return;
+		if (auto* emitter = add(a_position, RE::NiPoint3(0.0f, 0.0f, 0.0f), a_radius, a_burst * impulse, a_clear, 0.5f, a_weight)) {
+			const float weight = a_burst != 0.0f ? emitter->Burst / (a_burst * impulse) : 1.0f;
+			emitter->Kick = { a_kick.x * impulse * weight, a_kick.y * impulse * weight };
+			emitter->Lift = a_lift * impulse * weight;
+		}
 	};
 	auto inWindow = [&](const RE::NiPoint3& a_position) {
 		return std::abs(a_position.x - eye.x) < reach && std::abs(a_position.y - eye.y) < reach;
@@ -437,39 +453,83 @@ uint32_t GroundFog::GatherSimEmitters(FlowEmitter* a_emitters, double a_originX,
 	}
 	for (auto& [handle, last] : flowProjectiles) {
 		if (last.moving && !projectiles.contains(handle))
-			add(last.position, RE::NiPoint3(0.0f, 0.0f, 0.0f), last.magic ? 220.0f : 60.0f, last.magic ? 500.0f : 120.0f, last.magic ? 0.9f : 0.2f, 0.0f);
+			strike(last.position, last.magic ? 220.0f : 60.0f, last.magic ? 500.0f : 120.0f, last.magic ? 0.9f : 0.2f, RE::NiPoint3(0.0f, 0.0f, 0.0f), last.magic ? 1.8f : 0.5f, -1.0f);
 	}
 	flowProjectiles = std::move(projectiles);
 
 	// Actors.
-	std::unordered_map<uint32_t, RE::NiPoint3> actors;
+	std::unordered_map<uint32_t, FlowActor> actors;
 	auto visitActor = [&](RE::Actor* a_actor, uint32_t a_handle) {
 		if (!a_actor || !a_actor->Is3DLoaded() || actors.contains(a_handle))
 			return;
 		const auto position = a_actor->GetPosition();
 		if (!inWindow(position))
 			return;
-		actors[a_handle] = position;
+		// What it is doing, read from state the game keeps anyway (no event sinks, no hooks).
+		FlowActor now;
+		now.position = position;
+		now.midair = a_actor->IsInMidair();
+		const auto state = a_actor->AsActorState();
+		const auto attack = state ? state->GetAttackState() : RE::ATTACK_STATE_ENUM::kNone;
+		now.swinging = attack == RE::ATTACK_STATE_ENUM::kSwing || attack == RE::ATTACK_STATE_ENUM::kBash;
+		for (int source = 0; source < 3; ++source) {
+			const auto caster = a_actor->GetMagicCaster(static_cast<RE::MagicSystem::CastingSource>(source));
+			now.casting[source] = caster && caster->state.get() == RE::MagicCaster::State::kCasting;
+		}
 		const auto previous = flowActors.find(a_handle);
-		if (previous == flowActors.end() || invDelta <= 0.0f)
+		const bool known = previous != flowActors.end() && invDelta > 0.0f;
+		if (known)
+			now.velocityZ = (position.z - previous->second.position.z) * invDelta;
+		actors[a_handle] = now;
+		if (!known)
 			return;
-		const auto velocity = (position - previous->second) * invDelta;
+		const FlowActor& before = previous->second;
+		const float radius = std::clamp(0.3f * a_actor->GetHeight(), 30.0f, 250.0f);
+		const float angle = a_actor->GetAngleZ();
+		const RE::NiPoint3 heading{ std::sin(angle), std::cos(angle), 0.0f };
+		const RE::NiPoint3 none{ 0.0f, 0.0f, 0.0f };
+		// Whatever walks stands on the floor the fog lies on, whatever the land map says is under it. What is in
+		// the air is weighed by its height.
+		const float weight = now.midair ? -1.0f : 1.0f;
+
+		// What it starts doing this frame.
+		// Jump: a small puff as the feet leave. Landing: a ring outward and the fog thrown up, harder the faster it fell.
+		if (now.midair && !before.midair)
+			strike(position, radius * 1.6f, 70.0f, 0.05f, none, 0.7f, 1.0f);
+		if (!now.midair && before.midair) {
+			const float hard = std::clamp(-before.velocityZ / 600.0f, 0.4f, 2.0f);
+			strike(position, radius * 2.4f, 160.0f * hard, 0.15f, none, hard, 1.0f);
+		}
+		// A swing or a bash: the fog in front is thrown the way the actor faces, and up.
+		if (now.swinging && !before.swinging)
+			strike(position + heading * (radius * 2.2f), radius * 2.6f, 60.0f, 0.2f, heading * 320.0f, 1.1f, weight);
+		// A spell let go from a hand: a puff forward. The voice (a shout): a blast forward and outward.
+		for (int source = 0; source < 3; ++source) {
+			if (!now.casting[source] || before.casting[source])
+				continue;
+			if (source == 2)
+				strike(position + heading * 100.0f, radius * 4.0f, 420.0f, 0.3f, heading * 260.0f, 1.6f, weight);
+			else
+				strike(position + heading * 60.0f, radius * 2.0f, 140.0f, 0.1f, heading * 120.0f, 0.8f, weight);
+		}
+
+		// The body moving through the fog.
+		const auto velocity = (position - before.position) * invDelta;
 		const float speed = std::sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
 		// Faster than anything walks or rides: it was moved, not moving.
 		if (!std::isfinite(speed) || speed < kFlowMinSpeed || speed > 4000.0f)
 			return;
-		const float radius = std::clamp(0.3f * a_actor->GetHeight(), 30.0f, 250.0f);
+		// A sprinter drags a wider, longer wake.
+		const float sprint = state && state->IsSprinting() ? 1.4f : 1.0f;
 		// A walker stirs away about half of the fog in its path each second, a runner nearly all of it.
-		const float clear = std::min(speed / 400.0f, 1.5f) * 2.2f * a_deltaTime;
+		const float clear = std::min(speed / 400.0f, 1.5f) * 2.2f * sprint * a_deltaTime;
 		const float dx = position.x - eye.x;
 		const float dy = position.y - eye.y;
-		// Whatever walks stands on the floor the fog lies on, whatever the land map says is under it. What flies
-		// (a dragon overhead) is over it.
-		const float weight = a_actor->IsInMidair() ? -1.0f : 1.0f;
 		// A Ricker source of radius R loses z * sqrt(pi) * R / 2 on a straight path through its middle at rate
 		// z * speed, whatever the speed (Iwillbewarlock GroundFog, WindShaders.h Source): z for the share wanted.
-		const float push = kActorPush / (0.8862f * radius * 2.0f) * speed * Util::Smoothstep(kActorPushStart, kActorPushFull, speed);
-		add(position, velocity, radius * 2.0f, 0.0f, clear, 2.0f + (dx * dx + dy * dy) * 1.0e-8f, weight, push);
+		const float reachOut = radius * 2.0f * sprint;
+		const float push = kActorPush / (0.8862f * reachOut) * speed * Util::Smoothstep(kActorPushStart, kActorPushFull, speed);
+		add(position, velocity, reachOut, 0.0f, clear, 2.0f + (dx * dx + dy * dy) * 1.0e-8f, weight, push);
 	};
 	if (auto player = RE::PlayerCharacter::GetSingleton())
 		visitActor(player, player->GetHandle().native_handle());
@@ -535,6 +595,8 @@ float4 GroundFog::PrepareSim(bool a_pool)
 		floorSlope[0] = make(DXGI_FORMAT_R16G16B16A16_FLOAT, "GroundFog::FloorSlope0");
 		floorSlope[1] = make(DXGI_FORMAT_R16G16B16A16_FLOAT, "GroundFog::FloorSlope1");
 		floorSeen = make(DXGI_FORMAT_R32_FLOAT, "GroundFog::FloorSeen");
+		simLift[0] = make(DXGI_FORMAT_R16_FLOAT, "GroundFog::SimLift0");
+		simLift[1] = make(DXGI_FORMAT_R16_FLOAT, "GroundFog::SimLift1");
 		flowValid = false;
 	}
 
@@ -566,6 +628,7 @@ float4 GroundFog::PrepareSim(bool a_pool)
 	simData->LayerTop = std::max(settings.NearThickness, kMinNearThickness) * unitsPerMeter;
 	simData->GustSpeed = kSimGustSpeed;
 	simData->GustSize = kSimGustSize;
+	simData->LiftKeep = std::exp(-deltaTime / kSimLiftTime);
 	simData->SwirlTime = static_cast<float>(swirlTime);
 	// Without terrain data the fog rests evenly. Interiors would set this from the cell (and a floor level).
 	simData->RestUniform = 1.0f;
@@ -602,6 +665,10 @@ void GroundFog::StepSim(ID3D11DeviceContext* a_context, bool a_terrain)
 	a_context->CSSetConstantBuffers(kFlowConstantSlot, 1, &constants);
 	static_assert(kFloorSlopeSlot == kFloorMapSlot + 1 && kFloorSeenSlot == kFloorMapSlot + 2);
 	winrt::com_ptr<ID3D11ShaderResourceView> oldInputs[4];
+	winrt::com_ptr<ID3D11ShaderResourceView> oldLift;
+	a_context->CSGetShaderResources(kLiftSlot, 1, oldLift.put());
+	ID3D11ShaderResourceView* lift = simLift[flowCurrent]->srv.get();
+	a_context->CSSetShaderResources(kLiftSlot, 1, &lift);
 	a_context->CSGetShaderResources(kFlowMapSlot, 1, oldInputs[0].put());
 	a_context->CSGetShaderResources(kFloorMapSlot, 1, oldInputs[1].put());
 	a_context->CSGetShaderResources(kFloorSlopeSlot, 1, oldInputs[2].put());
@@ -610,14 +677,16 @@ void GroundFog::StepSim(ID3D11DeviceContext* a_context, bool a_terrain)
 	ID3D11ShaderResourceView* floors[] = { simFloor[flowCurrent]->srv.get(), floorSlope[flowCurrent]->srv.get(), floorSeen->srv.get() };
 	a_context->CSSetShaderResources(kFlowMapSlot, 1, &state);
 	a_context->CSSetShaderResources(kFloorMapSlot, 3, floors);
-	ID3D11UnorderedAccessView* outputs[] = { simState[next]->uav.get(), simFloor[next]->uav.get(), floorSlope[next]->uav.get() };
-	a_context->CSSetUnorderedAccessViews(0, 3, outputs, nullptr);
+	ID3D11UnorderedAccessView* outputs[] = { simState[next]->uav.get(), simFloor[next]->uav.get(), floorSlope[next]->uav.get(), simLift[next]->uav.get() };
+	a_context->CSSetUnorderedAccessViews(0, 4, outputs, nullptr);
 	a_context->CSSetShader(flowCS.get(), nullptr, 0);
 	globals::profiler->BeginPass("GroundFog::Simulation");
 	a_context->Dispatch((kSimSize + 7u) / 8u, (kSimSize + 7u) / 8u, 1);
 	globals::profiler->EndPass();
-	ID3D11UnorderedAccessView* nullOutputs[3]{};
-	a_context->CSSetUnorderedAccessViews(0, 3, nullOutputs, nullptr);
+	ID3D11UnorderedAccessView* nullOutputs[4]{};
+	a_context->CSSetUnorderedAccessViews(0, 4, nullOutputs, nullptr);
+	ID3D11ShaderResourceView* restoredLift = oldLift.get();
+	a_context->CSSetShaderResources(kLiftSlot, 1, &restoredLift);
 	ID3D11ShaderResourceView* restoredState = oldInputs[0].get();
 	ID3D11ShaderResourceView* restoredFloors[] = { oldInputs[1].get(), oldInputs[2].get(), oldInputs[3].get() };
 	a_context->CSSetShaderResources(kFlowMapSlot, 1, &restoredState);
@@ -1058,6 +1127,8 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 	a_context->CSSetConstantBuffers(kConstantSlot, 1, &constants);
 	static_assert(kFlowMapSlot == kHeightPyramidSlot + 1 && kWaterMapSlot == kFlowMapSlot + 1 && kFloorMapSlot == kWaterMapSlot + 1 && kFloorSlopeSlot == kFloorMapSlot + 1);
 	winrt::com_ptr<ID3D11ShaderResourceView> oldFloorMaps[2];
+	winrt::com_ptr<ID3D11ShaderResourceView> oldLift;
+	a_context->CSGetShaderResources(kLiftSlot, 1, oldLift.put());
 	a_context->CSGetShaderResources(kFloorMapSlot, 1, oldFloorMaps[0].put());
 	a_context->CSGetShaderResources(kFloorSlopeSlot, 1, oldFloorMaps[1].put());
 	ID3D11ShaderResourceView* ground[] = { heightMap, heightPyramid->srv.get(), nullptr, water, nullptr, nullptr };
@@ -1070,6 +1141,8 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 		ground[4] = simFloor[flowCurrent]->srv.get();
 		ground[5] = floorSlope[flowCurrent]->srv.get();
 		a_context->CSSetShaderResources(kHeightMapSlot, 6, ground);
+		ID3D11ShaderResourceView* lift = simLift[flowCurrent]->srv.get();
+		a_context->CSSetShaderResources(kLiftSlot, 1, &lift);
 	}
 	ID3D11UnorderedAccessView* outputs[] = { fogTexture->uav.get(), fogAuxTexture->uav.get(), simulated && data.PoolExtinction > 0.0f ? floorSeen->uav.get() : nullptr };
 	a_context->CSSetUnorderedAccessViews(0, 3, outputs, nullptr);
@@ -1089,6 +1162,8 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 	nullGround[4] = oldFloorMaps[0].get();
 	nullGround[5] = oldFloorMaps[1].get();
 	a_context->CSSetShaderResources(kHeightMapSlot, 6, nullGround);
+	ID3D11ShaderResourceView* restoredLift = oldLift.get();
+	a_context->CSSetShaderResources(kLiftSlot, 1, &restoredLift);
 	auto* previous = oldConstants.get();
 	a_context->CSSetConstantBuffers(kConstantSlot, 1, &previous);
 	compositeInputs[0] = fogTexture->srv.get();
@@ -1136,6 +1211,9 @@ void GroundFog::DrawSettings()
 
 		ImGui::SliderFloat(T(TKEY("reactive_strength"), "Reaction Strength"), &settings.ReactiveStrength, 0.0f, kMaxReactiveStrength, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("reactive_strength_tooltip"), "How much of the fog movers stir away. At 0 they still push it about but none is lost."));
+
+		ImGui::SliderFloat(T(TKEY("impulse_strength"), "Impulse Strength"), &settings.ImpulseStrength, 0.0f, kMaxImpulseStrength, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("impulse_strength_tooltip"), "How hard single events strike the pool: a jump and a landing puff it up around the feet, a weapon swing throws it forward and up, a spell cast and a shout blow it outward, a projectile or a spell that lands scatters it in a ring. The fog that is thrown up settles back in a second or two. 0 leaves only the push and wake of moving bodies."));
 
 		ImGui::SliderFloat(T(TKEY("settle_time"), "Settle Time"), &settings.SettleTime, kMinSettleTime, kMaxSettleTime, "%.1f s", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
 		Util::HoverTip(T(TKEY("settle_time_tooltip"), "How long the pool takes to come back to its resting amount after it has been disturbed, and to follow the time of day, shade and water as you move. Short heals wakes quickly; long leaves trails."));
@@ -1419,6 +1497,7 @@ void GroundFog::LoadSettings(json& o_json)
 	sanitize(settings.MiddayAmount, defaults.MiddayAmount, 0.0f, kMaxTimeAmount);
 	sanitize(settings.EveningAmount, defaults.EveningAmount, 0.0f, kMaxTimeAmount);
 	sanitize(settings.ReactiveStrength, defaults.ReactiveStrength, 0.0f, kMaxReactiveStrength);
+	sanitize(settings.ImpulseStrength, defaults.ImpulseStrength, 0.0f, kMaxImpulseStrength);
 	sanitize(settings.SettleTime, defaults.SettleTime, kMinSettleTime, kMaxSettleTime);
 	sanitize(settings.DownhillFlow, defaults.DownhillFlow, 0.0f, kMaxDownhillFlow);
 	sanitize(settings.Swirl, defaults.Swirl, 0.0f, kMaxSwirl);

@@ -55,6 +55,9 @@ struct Emitter
 	float burst;      // outward speed added once, game units per second
 	float clear;      // share stirred away at its centre this step
 	float push;       // rate at which it pushes the fog from its middle to its rim, per second
+	float2 kick;      // velocity added once at its centre, game units per second (a swing, a shout)
+	float lift;       // how far it throws the top of the fog up at its centre, once, as a share of the pool's height
+	float pad;
 };
 
 static const uint MaxEmitters = 24u;
@@ -82,6 +85,8 @@ cbuffer SimCB : register(b3)
 	float LayerTop;  // thickness of the pool, game units
 	float GustSpeed;  // speed of the gusts, game units per second
 	float GustSize;   // game units per cell of the gust noise
+	float LiftKeep;   // share of the lift kept over this step
+	float3 SimPad;
 	Emitter Emitters[MaxEmitters];
 };
 
@@ -90,12 +95,14 @@ Texture2D<float> FloorSeen : register(t12);
 RWTexture2D<float4> StateOut : register(u0);
 RWTexture2D<float> FloorOut : register(u1);
 RWTexture2D<float4> SlopeOut : register(u2);
+// GroundFog::FogLift (t13) is the previous lift.
+RWTexture2D<float> LiftOut : register(u3);
 
 static const float MaxAmount = 6.0;
 // A wake (the clear a mover leaves) does not take the fog under this share of what rests there.
 static const float WakeFloor = 0.15;
 // The most a place holds relative to what rests there, and at least this much room for fog passing through.
-static const float MaxPile = 2.5;
+static const float MaxPile = 3.0;
 static const float MinRoom = 0.2;
 // A floor this far above the lowest floor within a stride or so of it is a raised thing (the top of a wall, a cart,
 // a rock, a steep bank): the fog does not rest on it. Game units; between the two it thins.
@@ -138,7 +145,6 @@ float GustPsi(float2 p)
 	if (SimFlags & 1u)
 		rest = GroundFog::RestingAmountAt(xy, TexelSize, GroundFog::BurnSunlitNear, water, groundZ);
 	const float open = rest;
-	const float pattern = GroundFog::RestPattern(xyAbs, TexelSize);
 
 	// What the air does here with nothing in it: the wind's drift, and gusts. The gusts are the curl of a noise
 	// that travels with the wind (a stream function, as in Iwillbewarlock's GroundFog, GustPsi in its
@@ -158,6 +164,9 @@ float GustPsi(float2 p)
 	float delta = 0.0;
 	float gain = 1.0;
 	float wear = 1.0;
+	// The top of the fog: thrown up where it is struck, raised in the rim beside a track, pressed down in a wake.
+	// Carried with the fog, and it settles back.
+	float lift = 0.0;
 	float level = GroundFog::FloorEmpty;
 	float4 floorSlope = 0.0;
 	float raised = 0.0;
@@ -178,6 +187,7 @@ float GustPsi(float2 p)
 		const float4 state = GroundFog::FogSim.SampleLevel(LinearSampler, from / float2(size), 0);
 		velocity = state.xy;
 		delta = state.z - state.w;
+		lift = GroundFog::FogLift.SampleLevel(LinearSampler, from / float2(size), 0) * LiftKeep;
 		delta -= dot(velocity - Wind, float2(r.w - l.w, u.w - d.w)) / (2.0 * TexelSize) * DeltaTime;
 
 		// 2. Flowing together or apart.
@@ -270,25 +280,31 @@ float GustPsi(float2 p)
 		// WindShaders.h, GPL-3.0). Positive inside the radius, negative outside, and zero over the plane, so the
 		// fog a body parts stands as a rim beside its track instead of vanishing.
 		const float q = distance2 / radius2;
-		gain *= exp(clamp(-emitter.push * (1.0 - q) * exp(-q) * DeltaTime, -0.7, 0.7));
+		const float ricker = (1.0 - q) * exp(-q);
+		gain *= exp(clamp(-emitter.push * ricker * DeltaTime, -0.7, 0.7));
+		// The same push raises the rim and presses the middle down; a blow adds its kick and throws the fog up.
+		lift -= 0.8 * emitter.push * ricker * DeltaTime;
+		velocity += emitter.kick * bell;
+		lift += emitter.lift * bell;
 	}
 
-	// 4. Settle. Nothing rests on raised things, and no place holds more than MaxPile times what rests around it
-	// (not counting the pattern: a wisp carried into a gap stays a wisp).
+	// 4. Settle. Nothing rests on raised things, and no place holds more than MaxPile (a patch carried into
+	// a gap stays a patch).
 	// Water is level, and fog lies on it.
 	lowness = lerp(lowness, max(lowness, 1.0), water);
 	const float place = open * (1.0 - raised) * lerp(1.0, lowness, Pooling);
-	rest = place * pattern;
+	rest = GroundFog::RestPattern(xyAbs, TexelSize, place);
 	float amount = max(rest + delta, 0.0) * gain;
 	amount = max(amount * wear, min(amount, WakeFloor * rest));
 	amount += (rest - amount) * RefillRate;
-	amount = clamp(amount, 0.0, min(MaxAmount, max(MaxPile * place, MinRoom * (1.0 - raised))));
+	amount = clamp(amount, 0.0, min(MaxAmount, (1.0 - raised) * (MinRoom + MaxPile * smoothstep(0.0, 0.15, place))));
 	velocity = clamp(velocity, -MaxSpeed, MaxSpeed);
 	if (!(amount >= 0.0) || !(dot(velocity, velocity) < 1.0e9)) {
 		amount = rest;
 		velocity = drift;
 	}
 	StateOut[pixel] = float4(velocity, amount, rest);
+	LiftOut[pixel] = clamp(lift, -0.6, 3.0) * (1.0 - raised);
 
 	// 5. Floor.
 	float seen = GroundFog::FloorEmpty;

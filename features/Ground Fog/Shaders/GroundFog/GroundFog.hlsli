@@ -376,6 +376,9 @@ namespace GroundFog
 	Texture2D<float4> FogSim : register(t8);
 	Texture2D<float> FogFloor : register(t10);
 	Texture2D<float4> FogSlope : register(t11);
+	// How far the top of the pool is thrown up (above 0) or pressed down (below 0) at each texel, as a share of its
+	// height: a plume where something struck the fog, a rim beside a track, settling back over a second or two.
+	Texture2D<float> FogLift : register(t13);
 
 	static const float FloorUnknown = 1.0e20;
 	static const float FloorEmpty = 1.0e30;
@@ -430,22 +433,35 @@ namespace GroundFog
 		return 1.0 + DriftStrength * 0.8 * (2.0 * n - 1.0) * (1.0 - fade);
 	}
 
-	// The pattern the pool rests in, relative to its mean (about 1). At Wispiness 0 the even patches of
-	// DensityModifier. At 1 separate wisps: the two-octave value noise of the resting fog in Iwillbewarlock's
+	// The noise the wisps of the pool are cut from: the two-octave value noise of the resting fog in Iwillbewarlock's
 	// GroundFog (EqFog in its WindShaders.h, GPL-3.0: weights 2/3 and 1/3, riding the wind), here bent by a broader
-	// noise so the shapes are drawn out and curl, and cut by a threshold so there is clear air between them: about
-	// 40 % of the ground has none, and inside a wisp there is up to 2.5 times the mean. The simulation settles to
-	// this and carries only what departs from it, so the wisps stay sharp while they travel.
-	float RestPattern(float2 xyAbs, float reach)
+	// noise so the shapes are drawn out and curl. About 0.5, standard deviation 0.16.
+	float WispNoise(float2 xyAbs)
 	{
-		const float even = DensityModifier(xyAbs, reach);
-		if (Wispiness <= 0.0)
-			return even;
 		const float2 p = (xyAbs - WindTravel) * InvWispScale;
 		const float2 bend = float2(ValueNoise(p * 0.45 + 3.1), ValueNoise(p * 0.45 + 9.7)) - 0.5;
 		const float2 q = p + 1.8 * bend;
-		const float n = (2.0 * ValueNoise(q) + ValueNoise(q * 2.3 + 17.0)) / 3.0;
-		return lerp(even, 2.5 * smoothstep(0.44, 0.68, n), Wispiness);
+		return (2.0 * ValueNoise(q) + ValueNoise(q * 2.3 + 17.0)) / 3.0;
+	}
+
+	// What rests at a place in the pool, for a budget: how much fog the place is due by every rule (time of day,
+	// shade, water, how low it lies), 1 being a full morning on a level hollow floor.
+	// At Wispiness 0: the budget in the even patches of DensityModifier, thinner where there is less.
+	// At 1: presence over coverage. The budget decides how much of the ground has fog, not how thin it is: the noise
+	// is cut at a threshold that falls as the budget rises, so a small budget leaves a few separate patches and a
+	// large one nearly joins them up, and inside a patch the fog is about as dense wherever it lies (WispPeak, a
+	// little more or less with the budget). The cut is narrow, so a patch has an edge and clear air beside it.
+	// The simulation settles to this and carries only what departs from it, so the patches stay sharp while they
+	// travel.
+	static const float WispPeak = 1.25;
+	float RestPattern(float2 xyAbs, float reach, float budget)
+	{
+		const float even = DensityModifier(xyAbs, reach) * budget;
+		if (Wispiness <= 0.0)
+			return even;
+		const float threshold = lerp(0.72, 0.30, saturate(budget / 1.2));
+		const float wisp = WispPeak * sqrt(clamp(budget, 0.5, 1.6)) * smoothstep(threshold, threshold + 0.12, WispNoise(xyAbs)) * smoothstep(0.0, 0.15, budget);
+		return lerp(even, wisp, Wispiness);
 	}
 
 	// Value noise from two lattices turned against each other (by 31 and 68 degrees, the second 1.37 times finer),

@@ -42,8 +42,8 @@ namespace GroundFog
 	// The simulation's amount counts up to this, and the pool's optical depth along a ray levels off at PoolTauMax:
 	// whatever the simulation or the floor map does in one place, the pool stays a veil.
 	static const float PoolAmountMax = 4.0;
-	static const float PoolTauKnee = 1.0;
-	static const float PoolTauMax = 2.0;
+	static const float PoolTauKnee = 1.5;
+	static const float PoolTauMax = 3.0;
 
 	struct Pool
 	{
@@ -119,7 +119,11 @@ namespace GroundFog
 		// The floor here, unless everything here stands well above the floor toward the camera.
 		const float floorZ = lowHere <= lowToward + PoolOtherLevel ? levelHere : levelToward;
 		const float over = known ? z - floorZ : 0.0;
-		const float limit = PoolThickness * (1.0 + NearBreath);
+		// How far the top is thrown up or pressed down here.
+		const float lift = clamp(FogLift.SampleLevel(LinearSampler, uv, 0), -0.6, 3.0);
+		++taps;
+		const float thick = PoolThickness * (1.0 + lift);
+		const float limit = PoolThickness * (1.0 + NearBreath) * (1.0 + max(lift, 0.0));
 		pool.known = known ? 1.0 : 0.0;
 		pool.over = over;
 		// Well under every floor around: the map is not up to date there (it will be on the next frame).
@@ -150,6 +154,8 @@ namespace GroundFog
 		// Without a floor only the ground share has fog.
 		const float share = known ? 1.0 : ground;
 		const float stretch = min(tEnd, 25.0 * PoolThickness);
+		if (start >= thick * (1.0 + NearBreath))
+			return pool;
 
 		// How fast the ray rises above the ground going back toward the camera. The ground the fog lies on is the
 		// floor at the scale of a stride, not the facets of the mesh the pixel is on: first from the slope of the
@@ -161,7 +167,7 @@ namespace GroundFog
 		const float riseOwn = -dot(normal, dir) / max(normal.z, 0.5);
 		float rise = lerp(riseFloor, lerp(riseOwn, riseFloor, slopeKnown), ground);
 		if (known) {
-			const float reach = min(stretch, max(PoolThickness - start, 0.0) / max(rise, PoolMinSlope));
+			const float reach = min(stretch, max(thick - start, 0.0) / max(rise, PoolMinSlope));
 			float levelBack, lowBack;
 			++taps;
 			// A floor back there that stands well above this one is a thing the ray passes over (a cart, a wall,
@@ -175,7 +181,7 @@ namespace GroundFog
 			rise = max(rise, PoolMinSlope);
 
 		// The stretch of the ray inside the layer, for where to read the simulation.
-		const float within = rise > 1e-4 ? min(stretch, max(PoolThickness - start, 0.0) / rise) : stretch;
+		const float within = rise > 1e-4 ? min(stretch, max(thick - start, 0.0) / rise) : stretch;
 		const float4 state = 0.5 * (FogSim.SampleLevel(LinearSampler, SimUv(position.xy - dir.xy * (0.2 * within)), 0) +
 									   FogSim.SampleLevel(LinearSampler, SimUv(position.xy - dir.xy * (0.65 * within)), 0));
 		taps += 2u;
@@ -187,9 +193,10 @@ namespace GroundFog
 			return pool;
 
 		// Where there is less fog the layer is lower too, so a wake is a dip and not only a thin place.
-		const float top = max(PoolThickness * Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) * lerp(0.4, 1.0, saturate(amount)), 1.0);
+		const float top = max(thick * Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) * lerp(0.4, 1.0, saturate(amount)), 1.0);
 		const SoftProfile profile = MakeSoftProfile(top, 0.0, NearFalloff);
-		const float extinction = PoolExtinction * amount * range * share;
+		// Fog thrown up is the same fog over more height: thinner, though not by all of it (it is stirred up too).
+		const float extinction = PoolExtinction * amount * range * share * rsqrt(1.0 + max(lift, 0.0));
 		const float end = start + rise * stretch;
 		const float tau = extinction * SoftLineMean(profile, start, end) * stretch;
 		if (tau <= 0.0)

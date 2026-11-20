@@ -742,6 +742,8 @@ namespace SharedData
 		uint dirLightDiskIndex;
 		float4 dirLightDisc;
 		float4 diskBillboardScale;
+		float4 oceanColorAmount;  // water colour (reflectance of the water body), amount: 0 = no sea below the horizon
+		float4 oceanParams;       // wave slope variance, sun glitter strength, unused, unused
 	};
 
 	struct RainRefractionSettings

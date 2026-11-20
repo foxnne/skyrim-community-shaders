@@ -35,6 +35,98 @@ float TransmittanceRayDistance(float u, float distance, float closest)
 	return closest + (distance - closest) * v * v;
 }
 
+#if LUTGEN == 2
+// Ocean to the horizon. The planet sphere sits at sea level, and from altitude the game's water ends well above
+// the sphere's own horizon (a flat sea that stops 28 km out lies 1.5 degrees down at 740 m; the horizon is at 0.9).
+// The sky-view LUT used to hold only air there, which reads as a pale strip between the sea and the sky. A ray
+// that reaches the sphere now ends on a wind-roughened sea: the sky mirrored in it, the sun's glitter, and the
+// water's own colour.
+
+// Sky radiance along a ray that leaves the sea surface: the same sources as the main march, few steps, bunched
+// near the surface where the air is dense.
+float3 OceanSkyRadiance(float3 pos, float3 rayDir)
+{
+	const SharedData::PhysSkyData data = SharedData::physSkyData;
+	const float tMax = RayIntersectSphere(pos, rayDir, 0, data.rAtmosphere);
+	if (tMax <= 0.0)
+		return 0.0;
+	const float uSun = dot(rayDir, data.sunDir);
+	const float uMasser = dot(rayDir, data.masserDir);
+	const float uSecunda = dot(rayDir, data.secundaDir);
+	const float3 phaseAerosol = float3(SampleDiskPhase(uSun, 0u).z, SampleDiskPhase(uMasser, 1u).z, SampleDiskPhase(uSecunda, 2u).z);
+	const float3 phaseRayleigh = float3(DiskRayleigh(uSun, 0u), DiskRayleigh(uMasser, 1u), DiskRayleigh(uSecunda, 2u));
+	const uint steps = 8;
+	float3 lum = 0.0;
+	float3 tr = 1.0;
+	[loop] for (uint i = 0; i < steps; ++i)
+	{
+		const float u0 = float(i) / steps;
+		const float u1 = float(i + 1) / steps;
+		const float tNear = tMax * u0 * u0;
+		const float tFar = tMax * u1 * u1;
+		const float dt = tFar - tNear;
+		const float3 p = pos + (0.5 * (tNear + tFar)) * rayDir;
+		const float r = length(p);
+		float rouRayleigh, rouAerosol, rouOzone;
+		SampleAtmosphere(max(0.0, r - data.rPlanet), rouRayleigh, rouAerosol, rouOzone);
+		const float3 muSRayleigh = rouRayleigh * data.rayleighScatter;
+		const float3 muSAerosol = rouAerosol * data.aerosolScatter;
+		const float3 extinction = muSRayleigh + muSAerosol + rouAerosol * data.aerosolAbsorption + rouOzone * data.ozoneAbsorption;
+		const float3 trSample = exp(-dt * extinction);
+		const float3 up = p / max(r, 1.0);
+		float3 inscatter = (muSRayleigh * phaseRayleigh.x + muSAerosol * phaseAerosol.x) *
+		                   SampleAtmosphereLightTr(TexTrLut, SampTr, p, data.sunDir, data.diskAngularRadius.x) * data.sunlightColor;
+		inscatter += (muSRayleigh * phaseRayleigh.y + muSAerosol * phaseAerosol.y) *
+		             SampleAtmosphereLightTr(TexTrLut, SampTr, p, data.masserDir, data.diskAngularRadius.y) * data.masserColor;
+		inscatter += (muSRayleigh * phaseRayleigh.z + muSAerosol * phaseAerosol.z) *
+		             SampleAtmosphereLightTr(TexTrLut, SampTr, p, data.secundaDir, data.diskAngularRadius.z) * data.secundaColor;
+		float3 psiMs = TexMsLut.SampleLevel(SampTr, MsLutUv(r, dot(up, data.sunDir)), 0).rgb * data.sunlightColor;
+		psiMs += TexMsLut.SampleLevel(SampTr, MsLutUv(r, dot(up, data.masserDir)), 0).rgb * data.masserColor;
+		psiMs += TexMsLut.SampleLevel(SampTr, MsLutUv(r, dot(up, data.secundaDir)), 0).rgb * data.secundaColor;
+		inscatter += (muSRayleigh + muSAerosol) * psiMs;
+		lum += tr * inscatter * (1.0 - trSample) / max(extinction, 1e-20);
+		tr *= trSample;
+	}
+	return lum;
+}
+
+// Radiance leaving the sea at hitPos towards the viewer (rayDir points from the viewer to the sea).
+float3 OceanSurfaceRadiance(float3 hitPos, float3 rayDir)
+{
+	const SharedData::PhysSkyData data = SharedData::physSkyData;
+	const float3 normal = normalize(hitPos);
+	const float3 surface = normal * (data.rPlanet * (1.0 + 1e-6));
+	// Slope variance of the waves (Cox and Munk: about 0.003 + 0.005 per m/s of wind).
+	const float slope2 = clamp(data.oceanParams.x, 0.002, 0.2);
+	const float slope = sqrt(slope2);
+	const float cosView = saturate(dot(-rayDir, normal));
+	// Mean Fresnel reflectance of a rough sea (Bruneton et al. 2010): near the horizon the waves show their
+	// steeper faces, so the sea mirrors less than a flat plane and stays darker than the sky above it.
+	const float fresnel = 0.02 + 0.98 * pow(1.0 - cosView, 5.0 * exp(-2.69 * slope)) / (1.0 + 22.7 * pow(slope, 1.5));
+	// Those faces also mirror sky from higher up than a flat sea would.
+	const float3 mirrored = normalize(reflect(rayDir, normal) + normal * slope);
+	const float3 sky = OceanSkyRadiance(surface, mirrored);
+
+	// Direct light on the water: the glitter path under the sun, and the sun's share of the water colour.
+	const float3 sunLight = SampleAtmosphereLightTr(TexTrLut, SampTr, surface, data.sunDir, data.diskAngularRadius.x) * data.sunlightColor;
+	const float cosSun = dot(normal, data.sunDir);
+	float3 glitter = 0.0;
+	if (cosSun > 0.0) {
+		const float3 halfway = normalize(data.sunDir - rayDir);
+		const float cosHalf = max(dot(halfway, normal), 1e-3);
+		const float cosHalf2 = cosHalf * cosHalf;
+		const float facets = exp(-(1.0 - cosHalf2) / (cosHalf2 * 2.0 * slope2)) / (Math::PI * 2.0 * slope2 * cosHalf2 * cosHalf2);
+		const float fresnelSun = 0.02 + 0.98 * pow(1.0 - saturate(dot(-rayDir, halfway)), 5.0);
+		// Waves hide one another at grazing angles: keep the view term away from zero. The cap keeps a texel of
+		// this small LUT from holding a spark.
+		glitter = sunLight * min(fresnelSun * facets / (4.0 * max(cosView, 0.15)), 4.0) * data.oceanParams.y;
+	}
+	// Light scattered back out of the water body: a dull, deep colour lit by sun and sky.
+	const float3 water = data.oceanColorAmount.rgb * (sunLight * max(cosSun, 0.0) * RCP_PI + sky);
+	return (fresnel * sky + glitter + (1.0 - fresnel) * water) * data.oceanColorAmount.a;
+}
+#endif
+
 void rayMarch(
 	float3 pos, float3 rayDir,
 #if LUTGEN == 0
@@ -88,9 +180,16 @@ void rayMarch(
 	float tMax = hitGround ? tGround : tAtmos;
 #endif
 #if LUTGEN != 3 && LUTGEN != 0
+#	if LUTGEN == 2
+	const float3 seaPos = pos + rayDir * max(tGround, 0.0);
+#	endif
 #	ifdef SKY_TAIL
-	if (tMax <= AP_MAX_DIST)
+	if (tMax <= AP_MAX_DIST) {
+		// The sea is closer than the end of the view volume, which supplies all the air in front of it.
+		if (hitGround && data.oceanColorAmount.a > 0.0)
+			lum += OceanSurfaceRadiance(seaPos, rayDir);
 		return;
+	}
 	pos += rayDir * AP_MAX_DIST;
 	tMax -= AP_MAX_DIST;
 #	endif
@@ -202,6 +301,11 @@ void rayMarch(
 #endif
 		tr *= trSample;
 	}
+
+#if LUTGEN == 2
+	[branch] if (hitGround && data.oceanColorAmount.a > 0.0)
+		lum += tr * OceanSurfaceRadiance(seaPos, rayDir);
+#endif
 
 #if LUTGEN == 1  // multiscatter
 	if (tGround > 0) {

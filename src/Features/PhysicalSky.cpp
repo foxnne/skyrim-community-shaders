@@ -189,6 +189,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	rayleighScatter,
 	rayleighScatterAP1,
 	aerosolType,
+	oceanHorizon,
+	oceanColor,
+	oceanRoughness,
+	oceanGlitter,
 	aerosolLoading,
 	aerosolHumidity,
 	aerosolFalloff,
@@ -955,6 +959,20 @@ void PhysicalSky::SettingsAtmosphere()
 			ImGui::Text("%s", T(TKEY("planet_radius_is_the_distance_from_the_planet"),
 								  "Planet radius is the distance from the planet center to sea level.\n"
 								  "Atmosphere radius is the distance from the planet center to the top of atmosphere.\n"
+		ImGui::Checkbox(T(TKEY("ocean_horizon"), "Sea Below the Horizon"), &settings.oceanHorizon);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("ocean_horizon_desc"),
+								  "Ends the sky on a sea at sea level instead of bare air. From altitude the game's water stops short of the\n"
+								  "real horizon; this fills the strip between the two with water that mirrors the sky and is hazed by distance."));
+		ImGui::BeginDisabled(!settings.oceanHorizon);
+		ImGui::ColorEdit3(T(TKEY("ocean_color"), "Sea Colour"), &settings.oceanColor.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("ocean_color_desc"), "Light the water body sends back, as a share of the light on it. Deep sea is dark: a few percent, bluest channel highest."));
+		ImGui::SliderFloat(T(TKEY("ocean_roughness"), "Sea Roughness"), &settings.oceanRoughness, 0.002f, 0.1f, "%.3f");
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("ocean_roughness_desc"), "Steepness of the waves (slope variance, about 0.003 + 0.005 per m/s of wind). Rougher water mirrors less sky at the horizon, so the sea meets the sky as a darker line, and the sun's glitter spreads wider."));
+		ImGui::SliderFloat(T(TKEY("ocean_glitter"), "Sun Glitter"), &settings.oceanGlitter, 0.f, 2.f, "%.2f");
+		ImGui::EndDisabled();
 								  "On Earth, they are about 6360 km and 6420 km respectively."));
 	}
 }
@@ -2181,6 +2199,11 @@ void PhysicalSky::ClearVolumetricToNeutral()
 		context->PSSetShaderResources(69, 1, &nullShadowMean);
 		context->CSSetShaderResources(69, 1, &nullShadowMean);
 		context->ClearUnorderedAccessViewFloat(texCloudShadowMean->uav.get(), kClearLuminance);
+	const float3 oceanColor = sRGBToWorkingGamut(settings.oceanColor);
+	cbData.oceanColorAmount = { std::clamp(oceanColor.x, 0.f, 1.f), std::clamp(oceanColor.y, 0.f, 1.f), std::clamp(oceanColor.z, 0.f, 1.f),
+		settings.oceanHorizon ? 1.f : 0.f };
+	cbData.oceanParams = { std::isfinite(settings.oceanRoughness) ? std::clamp(settings.oceanRoughness, 0.002f, 0.2f) : 0.03f,
+		std::isfinite(settings.oceanGlitter) ? std::clamp(settings.oceanGlitter, 0.f, 4.f) : 1.f, 0.f, 0.f };
 	}
 	volumetricNeutralCleared = true;
 }

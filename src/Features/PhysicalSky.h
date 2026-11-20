@@ -153,6 +153,11 @@ struct PhysicalSky final : public Feature
 		float fallbackZBottom = 0.f;
 		float3 groundAlbedo = { .2f, .2f, .2f };
 
+		// Below the horizon the sky ends on a sea instead of bare air (the planet sphere is at sea level).
+		bool oceanHorizon = true;
+		float3 oceanColor = { .010f, .035f, .050f };  // reflectance of the water body
+		float oceanRoughness = 0.03f;                  // slope variance of the waves
+		float oceanGlitter = 1.f;                      // strength of the sun's glitter path
 		float planetRadius = 6.36e3f;      // in km
 		float atmosphereRadius = 6.42e3f;  // in km
 
@@ -309,6 +314,8 @@ struct PhysicalSky final : public Feature
 		float4 dirLightDisc;                 // world direction to that body, and its glow weight fading out and back in across a swap
 		float4 diskBillboardScale;
 	} cbData;
+		float4 oceanColorAmount;  // water colour, amount (0 = no sea below the horizon)
+		float4 oceanParams;       // wave slope variance, sun glitter strength, unused, unused
 	STATIC_ASSERT_ALIGNAS_16(CbData);
 
 	eastl::unique_ptr<Texture2D> texTrLut = nullptr;  // transmittance

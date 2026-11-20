@@ -81,6 +81,16 @@
 #	define NEAR_TREE_LEAF_MIN_ROUGHNESS 0.6
 // Scale of the vanilla soft, rim and back lighting of a leaf (diffuse fill, tinted by the leaf colour), 1 = as authored
 #	define NEAR_TREE_LEAF_SOFT_LIGHT 1.0
+// Tree meshes bake the shade inside the crown into grey vertex colours (half grey on most leaf vertices, which is
+// 0.21 in linear light), and the shader multiplies everything by them. For the sky light that is occlusion, and the
+// skylighting and SSGI occlusion are divided by it so it counts once. For the sun and the lights it is a second
+// shadow on top of the real ones, on leaves the sun does reach: the LOD crowns carry no vertex colours, so the full
+// models came out several times darker. VERTEX_SHADE_DIRECT is the share of the vertex colour the direct light and
+// the light through the leaf keep: 1 = as authored, 0 = only the real shadows shade the sun.
+#	define NEAR_TREE_LEAF_VERTEX_SHADE_DIRECT 0.3
+// Share of the screen-space contact shadow a sunlit leaf keeps, 1 = full. The trace treats the leaf cards in front as
+// solid; the LOD crowns keep 0.3 of it (LODTreeShadowSoftening 0.7).
+#	define NEAR_TREE_LEAF_SCREEN_SHADOW 1.0
 #endif
 
 #if defined(SNOW_COVER)
@@ -3183,6 +3193,10 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 			if (lodTreeCrown)
 				screenSpaceShadows = lerp(1.0, screenSpaceShadows, 1.0 - SharedData::lodTreeLightingSettings.ShadowSoftening);
 #		endif
+#		if defined(NEAR_TREE_LEAF_LIGHTING)
+			if (NearTreeLeaf)
+				screenSpaceShadows = lerp(1.0, screenSpaceShadows, NEAR_TREE_LEAF_SCREEN_SHADOW);
+#		endif
 #		if defined(SKINNED) || defined(SKIN) || defined(HAIR)
 			screenSpaceShadows.x = lerp(1.0, screenSpaceShadows.x, saturate(4.0 * dirLightAngle));
 #		endif
@@ -3846,7 +3860,15 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	}
 #	endif
 
-	color.xyz *= vertexColor;
+#	if defined(NEAR_TREE_LEAF_LIGHTING)
+	// The baked crown shade on the ambient as authored, on the direct light and the light through the leaf only in
+	// part (NEAR_TREE_LEAF_VERTEX_SHADE_DIRECT); diffuseColor still holds the direct light alone here
+	if (NearTreeLeaf) {
+		const float3 leafDirectShade = lerp(1.0, vertexColor, NEAR_TREE_LEAF_VERTEX_SHADE_DIRECT);
+		color.xyz = color.xyz * vertexColor + (diffuseColor * material.BaseColor + transmissionColor) * (leafDirectShade - vertexColor);
+	} else
+#	endif
+		color.xyz *= vertexColor;
 
 #	if defined(SNOW)
 	if (useSnowSpecular)

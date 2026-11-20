@@ -1230,7 +1230,9 @@ float GetLeafChromaWeight(float3 a_baseColor)
 {
 	const float peak = max(max(a_baseColor.r, a_baseColor.g), a_baseColor.b);
 	const float low = min(min(a_baseColor.r, a_baseColor.g), a_baseColor.b);
-	return smoothstep(SharedData::nearTreeLeafSettings.ChromaMin, SharedData::nearTreeLeafSettings.ChromaMax, (peak - low) / max(peak, 1e-4));
+	// The DLL keeps the upper edge above the lower one; the max only guards an all-zero block (shaders newer than the DLL)
+	const float chromaMin = SharedData::nearTreeLeafSettings.ChromaMin;
+	return smoothstep(chromaMin, max(SharedData::nearTreeLeafSettings.ChromaMax, chromaMin + 0.01), (peak - low) / max(peak, 1e-4));
 }
 #	endif
 

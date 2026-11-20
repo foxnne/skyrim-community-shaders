@@ -72,6 +72,15 @@
 #	define NEAR_TREE_LEAF_PREVIEW_BRIGHTNESS 1.0
 // How far the light that crosses a leaf is pulled toward the leaf's own hue, 0 = tinted like the lit side
 #	define NEAR_TREE_LEAF_TRANSMISSION_SATURATION 0.5
+// Shine of the leaves. Leaf meshes often carry the specular flag with a normal map whose alpha (the specular map) is
+// the leaf cutout, so every leaf texel has full-strength white specular on a steep normal map: white sparkles.
+// SPECULAR scales the direct specular of every light and the environment reflection (IBL, SSR), 1 = as authored.
+#	define NEAR_TREE_LEAF_SPECULAR 0.25
+// Lowest roughness of a leaf, 0 = as authored: widens what is left of the highlight into a sheen and blurs the
+// reflection the deferred pass adds from the G-buffer. Caps the vanilla specular power to match.
+#	define NEAR_TREE_LEAF_MIN_ROUGHNESS 0.6
+// Scale of the vanilla soft, rim and back lighting of a leaf (diffuse fill, tinted by the leaf colour), 1 = as authored
+#	define NEAR_TREE_LEAF_SOFT_LIGHT 1.0
 #endif
 
 #if defined(SNOW_COVER)
@@ -3068,6 +3077,17 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		float3 ripplePositionDdy = ddy_coarse(input.WorldPosition.xyz);
 		float rippleBandPixels = SharedData::wetnessEffectsSettings.RippleBreadth / (SharedData::wetnessEffectsSettings.RaindropGridSizeRcp * sqrt(max(dot(ripplePositionDdx, ripplePositionDdx), dot(ripplePositionDdy, ripplePositionDdy))));
 		rippleShade += 0.3 * SharedData::wetnessEffectsSettings.TopDownVisibility * clamp(wetnessState.rippleLens, -1.0, 1.0) * saturate(wetnessState.glossinessSpecular) * saturate(rippleBandPixels / 3.0 - 1.0);
+	}
+#	endif
+
+#	if defined(NEAR_TREE_LEAF_LIGHTING)
+	// Before any light is evaluated and before the G-buffer takes the roughness
+	if (NearTreeLeaf) {
+		const float leafMinRoughness = NEAR_TREE_LEAF_MIN_ROUGHNESS;
+		material.Roughness = max(material.Roughness, leafMinRoughness);
+		// The power with that roughness, the inverse of ShininessToRoughness
+		const float leafMinRoughness2 = max(leafMinRoughness * leafMinRoughness, 1e-3);
+		material.Shininess = min(material.Shininess, max(2.0 / (leafMinRoughness2 * leafMinRoughness2) - 2.0, 1.0));
 	}
 #	endif
 

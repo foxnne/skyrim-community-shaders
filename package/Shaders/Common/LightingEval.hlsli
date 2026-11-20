@@ -196,26 +196,35 @@ void EvaluateLighting(DirectContext context, MaterialProperties material, float3
 #	if defined(HAIR) && defined(HAIR_BACKLIGHTING)
 	HairBacklighting::AddDirectLight(lightingOutput, context, tbnTr[2], material.BaseColor);
 #	endif
+	// The vanilla fill lights and the shine of a leaf of a loaded tree have their own scales (Lighting.hlsl)
+	float softLightScale = Color::BRDFScale;
+	float specularScale = 1.0;
+#	if defined(NEAR_TREE_LEAF_LIGHTING)
+	if (NearTreeLeaf) {
+		softLightScale *= NEAR_TREE_LEAF_SOFT_LIGHT;
+		specularScale = NEAR_TREE_LEAF_SPECULAR;
+	}
+#	endif
 	if (HasSoftLighting())
-		lightingOutput.diffuse += softLightColor * GetSoftLightMultiplier(NdotL) * material.rimSoftLightColor * Color::BRDFScale;
+		lightingOutput.diffuse += softLightColor * GetSoftLightMultiplier(NdotL) * material.rimSoftLightColor * softLightScale;
 
 	if (HasRimLighting())
-		lightingOutput.diffuse += softLightColor * GetRimLightMultiplier(context.lightDir, context.viewDir, context.worldNormal) * material.rimSoftLightColor * Color::BRDFScale;
+		lightingOutput.diffuse += softLightColor * GetRimLightMultiplier(context.lightDir, context.viewDir, context.worldNormal) * material.rimSoftLightColor * softLightScale;
 
 	if (HasBackLighting())
-		lightingOutput.diffuse += softLightColor * saturate(-NdotL) * material.backLightColor * Color::BRDFScale;
+		lightingOutput.diffuse += softLightColor * saturate(-NdotL) * material.backLightColor * softLightScale;
 
 #	if defined(VANILLA_FRESNEL)
 	if (SharedData::vanillaFresnelSettings.Enable && SharedData::vanillaFresnelSettings.EnableGGX) {
 		lightingOutput.specular = diffuseLightColor * MicrofacetSpecular(context, material.F0, material.Roughness) * Color::PBRLightingCompensation * Color::PBRLightingScale;
 
 		float2 specularBRDF = BRDF::EnvBRDF(material.Roughness, saturate(dot(context.worldNormal, context.viewDir)));
-		lightingOutput.specular *= 1 + material.F0 * (1 / (specularBRDF.x + specularBRDF.y) - 1);
+		lightingOutput.specular *= (1 + material.F0 * (1 / (specularBRDF.x + specularBRDF.y) - 1)) * specularScale;
 		return;
 	}
 #	endif
 
-	lightingOutput.specular = VanillaSpecular(context, material.Shininess, HasSpecular(), uv, uv_ddx, uv_ddy) * material.SpecularColor * material.Glossiness * diffuseLightColor * Color::BRDFScale;
+	lightingOutput.specular = VanillaSpecular(context, material.Shininess, HasSpecular(), uv, uv_ddx, uv_ddy) * material.SpecularColor * material.Glossiness * diffuseLightColor * Color::BRDFScale * specularScale;
 #endif
 }
 
@@ -250,6 +259,11 @@ void GetIndirectLobeWeights(out IndirectLobeWeights lobeWeights, IndirectContext
 		float2 specularBRDF = BRDF::EnvBRDF(material.Roughness, NdotV);
 		lobeWeights.specular = material.F0 * specularBRDF.x + specularBRDF.y;
 	}
+#	endif
+#	if defined(NEAR_TREE_LEAF_LIGHTING)
+	// The environment reflection of a leaf of a loaded tree: the deferred pass adds it from this weight
+	if (NearTreeLeaf)
+		lobeWeights.specular *= NEAR_TREE_LEAF_SPECULAR;
 #	endif
 #endif
 }

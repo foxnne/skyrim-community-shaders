@@ -94,6 +94,10 @@ namespace GroundFog
 		float Wispiness;       // 0: the resting fog is even patches; 1: separate wisps with clear air between them
 		float InvWispScale;    // per game unit
 		float CanopyShade;     // how much what stands over the fog (canopy, walls) dims the sky light it takes; 0 = open sky everywhere
+		float FogForward;      // Henyey-Greenstein g of the fog's scattering (see FogScatter)
+		float FogMultiple;     // strength of each octave of multiple scattering relative to the one before
+		float PoolDensityScale;  // the pool's extinction as a share of the near layer's (Pool Opacity)
+		float BridgePad;
 	};
 
 	Texture2D<float> HeightMap : register(t6);
@@ -112,14 +116,12 @@ namespace GroundFog
 
 	// ---------------------------------------------------------------------------------------------------------
 	// Tuning of the bridged fog (pool, sheet and valley layer as one body). Shader constants, so they can be tried
-	// by hot reload; the ones worth a setting are promoted to GroundFogCB.
+	// by hot reload; FogForward, FogMultiple and PoolDensityScale are settings (GroundFogCB).
 	//
 	// Lighting, the same for every layer: fog droplets scatter forward. A Henyey-Greenstein lobe of FogForward, with
 	// SunWrap of the light sent out evenly, plus two octaves of multiple scattering (Wrenninge's approximation):
 	// each octave is FogMultiple times as strong as the one before, sees the light through FogMultipleReach times
 	// as much of the fog above it, and is half as forward. So thick fog in shade glows softly instead of going grey.
-	static const float FogForward = 0.6;
-	static const float FogMultiple = 0.6;
 	static const float FogMultipleReach = 0.35;
 	//
 	// The valley layer. It thins out on land steeper than ValleySlope (rise over run, from x to y), and where the

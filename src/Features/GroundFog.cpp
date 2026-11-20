@@ -45,6 +45,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	SelfShadow,
 	SunDiffusion,
 	SunLimit,
+	ForwardScatter,
+	MultipleScatter,
 	CanopyShade,
 	GroundFill,
 	SurfaceBlendDistance,
@@ -72,6 +74,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	DownhillFlow,
 	Swirl,
 	Pooling,
+	PoolOpacity,
+	WakeTime,
 	HalfResolution,
 	StepGrowth,
 	MaxSteps,
@@ -153,6 +157,12 @@ namespace
 	constexpr float kMinWispScale = 1.0f;
 	constexpr float kMaxWispScale = 15.0f;
 	constexpr float kMaxSunLimit = 8.0f;
+	constexpr float kMaxForwardScatter = 0.9f;
+	constexpr float kMaxMultipleScatter = 0.9f;
+	constexpr float kMinPoolOpacity = 0.05f;
+	constexpr float kMaxPoolOpacity = 1.5f;
+	constexpr float kMinWakeTime = 1.0f;
+	constexpr float kMaxWakeTime = 20.0f;
 	// Speed of a ripple in the fog, game units per second: how fast a hole closes from its rim.
 	constexpr float kSimWaveSpeed = 50.0f;
 	// Acceleration down a slope of 1 at Downhill Flow 1, game units per second^2 (0.5 m/s on a 1 in 5 slope).
@@ -194,7 +204,9 @@ namespace
 	constexpr float kStepMin = 80.0f;
 
 	// The pattern keeps creeping in still air, so it never freezes.
-	constexpr float kMinDriftWind = 0.15f;
+	// The drift in a calm, as a share of a full wind's. Still fog at rest barely travels: at 0.15 the whole pool slid
+	// along at 0.2 m/s at all times and never looked settled.
+	constexpr float kMinDriftWind = 0.03f;
 	// Wind speeds between which Wind Response clears the fog.
 	constexpr float kCalmWind = 0.3f;
 	constexpr float kStrongWind = 0.8f;
@@ -631,6 +643,7 @@ float4 GroundFog::PrepareSim(bool a_pool)
 	simData->GustSpeed = kSimGustSpeed;
 	simData->GustSize = kSimGustSize;
 	simData->LiftKeep = std::exp(-deltaTime / kSimLiftTime);
+	simData->WakeKeep = kSimVelocityTime / std::clamp(settings.WakeTime, kMinWakeTime, kMaxWakeTime);
 	simData->SwirlTime = static_cast<float>(swirlTime);
 	// Without terrain data the fog rests evenly. Interiors would set this from the cell (and a floor level).
 	simData->RestUniform = 1.0f;
@@ -826,6 +839,9 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 	a_data.SunWrap = settings.SunDiffusion;
 	a_data.SunLimit = settings.SunLimit;
 	a_data.CanopyShade = settings.CanopyShade;
+	a_data.FogForward = std::clamp(settings.ForwardScatter, 0.0f, kMaxForwardScatter);
+	a_data.FogMultiple = std::clamp(settings.MultipleScatter, 0.0f, kMaxMultipleScatter);
+	a_data.PoolDensityScale = std::clamp(settings.PoolOpacity, kMinPoolOpacity, kMaxPoolOpacity);
 	a_data.Wispiness = slab ? 0.0f : settings.Wispiness;
 	a_data.InvWispScale = 1.0f / (std::clamp(settings.WispScale, kMinWispScale, kMaxWispScale) * unitsPerMeter);
 	a_data.Flags = 1u | (settings.HalfResolution ? 2u : 0u);
@@ -1240,7 +1256,13 @@ void GroundFog::DrawSettings()
 		Util::HoverTip(T(TKEY("wisp_scale_tooltip"), "Size of the wisps and of the gaps between them."));
 
 		ImGui::SliderFloat(T(TKEY("pooling"), "Pooling"), &settings.Pooling, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-		Util::HoverTip(T(TKEY("pooling_tooltip"), "How much the pool keeps to the low places of the ground you see. At 1 it gathers in dips, gutters and at the foot of slopes and over water, leaves a thin veil on level open ground and none on rises. At 0 it lies evenly everywhere."));
+		Util::HoverTip(T(TKEY("pooling_tooltip"), "How much the pool keeps to the low places of the ground you see. At 1 it gathers in dips, gutters and at the foot of slopes, over water and in shade, and leaves level open ground and rises clear. Below 0.85 it is held at 0.85: the fog does not lie everywhere."));
+
+		ImGui::SliderFloat(T(TKEY("pool_opacity"), "Pool Opacity"), &settings.PoolOpacity, kMinPoolOpacity, kMaxPoolOpacity, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("pool_opacity_tooltip"), "Density of the pool as a share of Near Density. Low: a veil the ground shows through, which thickens where the fog is pushed together. High: dense banks."));
+
+		ImGui::SliderFloat(T(TKEY("wake_time"), "Wake Time"), &settings.WakeTime, kMinWakeTime, kMaxWakeTime, "%.1f s", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
+		Util::HoverTip(T(TKEY("wake_time_tooltip"), "How long the fog keeps moving by itself after something has passed: a wake rolls on, curls into eddies and piles up at its rim, then settles. Short: it stops with the mover."));
 
 		ImGui::SliderFloat(T(TKEY("downhill_flow"), "Downhill Flow"), &settings.DownhillFlow, 0.0f, kMaxDownhillFlow, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("downhill_flow_tooltip"), "How strongly the pool runs down slopes, off steps and rocks and into the low places of the ground you see. 0 leaves it where it rests."));
@@ -1345,7 +1367,13 @@ void GroundFog::DrawSettings()
 		Util::HoverTip(T(TKEY("sun_diffusion_tooltip"), "Share of the sun and moon light that lit fog sends out evenly to all sides, as dense fog does, on top of the glow toward the light. It gives lit fog the colour of the low sun from any direction. 0 leaves only the glow toward the light and the sky light."));
 
 		ImGui::SliderFloat(T(TKEY("sun_limit"), "Sun Limit"), &settings.SunLimit, 0.0f, kMaxSunLimit, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-		Util::HoverTip(T(TKEY("sun_limit_tooltip"), "How much brighter fog in the sun can get than fog in the shade: the sun and moon light it scatters levels off at this many times its sky light. At 1 sunlit fog is at most twice as bright as shaded fog. 0 removes the limit."));
+		Util::HoverTip(T(TKEY("sun_limit_tooltip"), "How much brighter the sheet in the sun can get than in the shade: the sun and moon light it scatters levels off at this many times its sky light. At 1 sunlit fog is at most twice as bright as shaded fog. The pool and the far valley fog are not limited. 0 removes the limit."));
+
+		ImGui::SliderFloat(T(TKEY("forward_scatter"), "Forward Scatter"), &settings.ForwardScatter, 0.0f, kMaxForwardScatter, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("forward_scatter_tooltip"), "How much brighter fog is looking toward the sun or a moon than away from it, as fog droplets scatter forward. 0 scatters evenly to all sides."));
+
+		ImGui::SliderFloat(T(TKEY("multiple_scatter"), "Multiple Scatter"), &settings.MultipleScatter, 0.0f, kMaxMultipleScatter, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("multiple_scatter_tooltip"), "How much light thick fog scatters more than once: a dense bank glows softly in its own shade and away from the sun instead of going grey. Thin veils are hardly changed."));
 
 		ImGui::SliderFloat(T(TKEY("canopy_shade"), "Shade under Cover"), &settings.CanopyShade, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("canopy_shade_tooltip"), "How much trees, walls and roofs over the fog dim the sky light it takes, so fog under a forest canopy is a dim grey like the ground there and not a white sheet. From the Skylighting probes where that feature runs, and from how much of the ground around is in the sun's shadow. 0 lights all fog by the open sky."));
@@ -1495,6 +1523,8 @@ void GroundFog::LoadSettings(json& o_json)
 	sanitize(settings.SelfShadow, defaults.SelfShadow, 0.0f, kMaxLightScale);
 	sanitize(settings.SunDiffusion, defaults.SunDiffusion, 0.0f, 1.0f);
 	sanitize(settings.SunLimit, defaults.SunLimit, 0.0f, kMaxSunLimit);
+	sanitize(settings.ForwardScatter, defaults.ForwardScatter, 0.0f, kMaxForwardScatter);
+	sanitize(settings.MultipleScatter, defaults.MultipleScatter, 0.0f, kMaxMultipleScatter);
 	sanitize(settings.CanopyShade, defaults.CanopyShade, 0.0f, 1.0f);
 	sanitize(settings.Wispiness, defaults.Wispiness, 0.0f, 1.0f);
 	sanitize(settings.WispScale, defaults.WispScale, kMinWispScale, kMaxWispScale);
@@ -1521,6 +1551,8 @@ void GroundFog::LoadSettings(json& o_json)
 	sanitize(settings.DownhillFlow, defaults.DownhillFlow, 0.0f, kMaxDownhillFlow);
 	sanitize(settings.Swirl, defaults.Swirl, 0.0f, kMaxSwirl);
 	sanitize(settings.Pooling, defaults.Pooling, 0.0f, 1.0f);
+	sanitize(settings.PoolOpacity, defaults.PoolOpacity, kMinPoolOpacity, kMaxPoolOpacity);
+	sanitize(settings.WakeTime, defaults.WakeTime, kMinWakeTime, kMaxWakeTime);
 	sanitize(settings.StepGrowth, defaults.StepGrowth, kMinStepGrowth, kMaxStepGrowth);
 	sanitize(settings.FarAmount, defaults.FarAmount, 0.0f, kMaxAmount);
 	sanitize(settings.FarDensity, defaults.FarDensity, kMinFarDensity, kMaxFarDensity);

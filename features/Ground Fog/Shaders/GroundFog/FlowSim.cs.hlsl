@@ -88,7 +88,8 @@ cbuffer SimCB : register(b3)
 	float GustSpeed;  // speed of the gusts, game units per second
 	float GustSize;   // game units per cell of the gust noise
 	float LiftKeep;   // share of the lift kept over this step
-	float3 SimPad;
+	float WakeKeep;  // VelocityKeep is raised to this power (Wake Time)
+	float2 SimPad;
 	Emitter Emitters[MaxEmitters];
 };
 
@@ -127,10 +128,8 @@ static const float FloorDropSlack = 1.0;
 static const float FloorRiseSlack = 8.0;
 static const float MaxSpeed = 1500.0;
 static const float SwirlSize = 140.0;  // game units per cell of the swirl noise (2 m)
-// A wake lives on after what made it has stopped: the fog's own motion (against the air) decays over
-// kSimVelocityTime / WakeKeep seconds (2.5 s / 0.4: about 6 s), not the 2.5 s the constant buffer's VelocityKeep
-// stands for. The sim's own time step decides it; nothing here knows where the camera or the player is.
-static const float WakeKeep = 0.4;
+// A wake lives on after what made it has stopped: the fog's own motion (against the air) decays over Wake Time
+// (the constant buffer's VelocityKeep, which stands for 2.5 s, raised to WakeKeep). The sim's own time step decides it; nothing here knows where the camera or the player is.
 // Vorticity confinement (Fedkiw, Stam and Jensen 2001): the eddies a wake sheds are numerically smeared out by the
 // semi-Lagrangian carry within a second; this gives back what the smearing takes, in proportion to how much the
 // fog is moving against the air, so a wake keeps curling while it dies down and still fog at rest gets none.

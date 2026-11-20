@@ -83,10 +83,9 @@ namespace GroundFog
 	static const float PoolVolumeFull = 600.0;
 	static const float PoolVolumeEnd = 900.0;
 	static const uint PoolVolumeSamples = 8u;
-	// Opacity. The pool's extinction is PoolDensityScale of the near layer's (a veil you see the ground through), and
+	// Opacity. The pool's extinction is PoolDensityScale (Pool Opacity) of the near layer's (a veil you see the ground through), and
 	// its optical depth along a ray levels off from PoolTauKnee; where the flow has pushed fog together (the amount
 	// stands above what rests there) up to PoolPileKnee, so a wake's rim and a heap read as denser fog.
-	static const float PoolDensityScale = 0.55;
 	static const float PoolPileKnee = 1.6;
 	// Something standing in the fog (a wall, a trunk, a leg) gets the fog in front of its foot only up to this share
 	// of the layer's height, fading from the first value to the second: it never looks coated.

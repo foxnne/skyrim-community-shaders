@@ -49,6 +49,30 @@ namespace TreeShapes
 	RE::NiNode* FindNearTreeRoot(const RE::BSRenderPass* a_pass);
 
 	/**
+	 * @brief The root node of the loaded tree whose leaves a Lighting pass draws, or nullptr.
+	 *
+	 * Same tree roots as FindNearTreeRoot, but skinned shapes count too (the trees the engine animates have leaves
+	 * like any other), and only leaf shapes: tree-animated, or two-sided, alpha tested and vertex coloured (the static
+	 * copies of skinned trees and the leaves of tree mods that drop the tree-anim flag). Trunks and branches are
+	 * neither. The lighting shader skips PBR materials by itself.
+	 */
+	RE::NiNode* FindNearTreeLeafRoot(const RE::BSRenderPass* a_pass);
+
+	/** @brief Levels of each of the two tint seeds (brightness, hue) in a tint code. */
+	inline constexpr uint32_t kTintLevels = 11;
+	/** @brief The tint code of a tree without one: both seeds in the middle, no tint. */
+	inline constexpr uint8_t kNeutralTintCode = (kTintLevels / 2) * kTintLevels + kTintLevels / 2;
+
+	/**
+	 * @brief The tint code of the tree standing at a world position: brightness level * kTintLevels + hue level.
+	 *
+	 * The LOD crown of a tree and its full model both take their tint from this, so the tree keeps it across the swap.
+	 * Each seed is a smooth wave over the land with a period of about 400 units: trees a trunk apart differ, while the
+	 * few units between a LOD trunk card and the placed tree's origin change it by at most one level.
+	 */
+	uint8_t GetTintCode(float a_worldX, float a_worldY);
+
+	/**
 	 * @brief Motion of one hand-masked tree model. Lengths are in units of the nif root node, angles in radians,
 	 * speeds are multiples of the wind clock (TreeWind phase, about 0.6 rad/s in calm air and faster in wind).
 	 *

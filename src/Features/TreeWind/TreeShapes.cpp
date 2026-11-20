@@ -456,6 +456,56 @@ namespace TreeShapes
 		return nullptr;
 	}
 
+	RE::NiNode* FindNearTreeLeafRoot(const RE::BSRenderPass* a_pass)
+	{
+		const auto property = a_pass ? a_pass->shaderProperty : nullptr;
+		const auto geometry = a_pass ? a_pass->geometry : nullptr;
+		if (!property || !geometry)
+			return nullptr;
+
+		// The flags first: they rule out nearly every draw before the walk up the scene graph
+		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
+		if (property->flags.any(Flag::kLODObjects, Flag::kHDLODObjects, Flag::kLODLandscape))
+			return nullptr;
+		if (property->flags.none(Flag::kTreeAnim)) {
+			if (!property->flags.all(Flag::kTwoSided, Flag::kVertexColors))
+				return nullptr;
+			const auto alphaProperty = geometry->GetGeometryRuntimeData().alphaProperty.get();
+			if (!alphaProperty || !alphaProperty->GetAlphaTesting())
+				return nullptr;
+		}
+		if (!geometry->AsTriShape())
+			return nullptr;
+
+		static REL::Relocation<const RE::NiRTTI*> leafAnimNodeRTTI{ RE::BSLeafAnimNode::Ni_RTTI };
+		static REL::Relocation<const RE::NiRTTI*> treeNodeRTTI{ RE::BSTreeNode::Ni_RTTI };
+		int depth = 0;
+		for (auto node = geometry->parent; node && depth < kNearTreeDepth; node = node->parent, ++depth) {
+			if (node->AsFadeNode()) {
+				const auto rtti = node->GetRTTI();
+				return rtti == leafAnimNodeRTTI.get() || rtti == treeNodeRTTI.get() ? node : nullptr;
+			}
+		}
+		return nullptr;
+	}
+
+	uint8_t GetTintCode(float a_worldX, float a_worldY)
+	{
+		// Triangle wave 0-1 with period 1, as in TreeWind.hlsli: continuous, so a small error in the position is a
+		// small error in the seed
+		const auto triangle = [](double a_x) {
+			return std::abs((a_x - std::floor(a_x)) * 2.0 - 1.0);
+		};
+		const double x = a_worldX, y = a_worldY;
+		// Two waves each, the second bending the first, so the tint does not run in stripes across a forest
+		const double brightness = triangle(x * 0.0021 + y * 0.0013 + 0.5 * triangle(y * 0.0019 - x * 0.0011));
+		const double hue = triangle(x * 0.0009 - y * 0.0023 + 0.31 + 0.5 * triangle(x * 0.0017 + y * 0.0008));
+		const auto level = [](double a_seed) {
+			return std::isfinite(a_seed) ? std::min(static_cast<uint32_t>(std::clamp(a_seed, 0.0, 1.0) * kTintLevels), kTintLevels - 1) : kTintLevels / 2;
+		};
+		return static_cast<uint8_t>(level(brightness) * kTintLevels + level(hue));
+	}
+
 	namespace
 	{
 		// Model paths compare in lower case with backslashes and without a leading meshes folder

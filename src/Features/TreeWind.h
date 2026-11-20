@@ -24,6 +24,11 @@
  * Lighting.hlsl lights as foliage: wrapped two-sided diffuse, softer screen-space shadow, brighter base colour.
  * Crowns that follow a trunk card also get per-vertex crown data (VS t121, TreeShapes::BendWeights::GetCrownData),
  * which the vertex shader hands to the pixel shader for a rounded normal and a self-shadow gradient per tree.
+ *
+ * The leaf shapes of loaded trees are marked too (ExtraShaderDescriptors::NearTreeLeaf, with the tree's tint code in
+ * ExtraFeatureDescriptors::NearTreeTint), and Lighting.hlsl lights them as thin leaves: light comes through from the far
+ * side and wraps a little, and each tree gets the tint of its LOD crown. This needs neither the sway nor bend data, so
+ * it also covers the trees the engine animates.
  */
 struct TreeWind : Feature
 {
@@ -69,6 +74,11 @@ public:
 		bool NearTrees = true;
 		float NearTreeScale = 0.6f;  // same as NearScale, so both sides of the full-model/LOD swap match
 		float NearTreeMinHeight = 250.0f;
+		bool NearTreeLeafLighting = true;
+		float NearTreeTransmission = 0.5f;
+		float NearTreeWrap = 0.3f;
+		float NearTreeVariation = 0.08f;  // same as LODTreeVariation, so a tree keeps its tint across the full-model/LOD swap
+		float NearTreeBrightness = 1.0f;  // the full-model textures need no lift, unlike the LOD atlas
 	};
 
 	/** @brief Mirrors TreeWindCB in TreeWind.hlsli. */
@@ -97,6 +107,16 @@ public:
 		float pad0[3];
 	};
 	static_assert(sizeof(LODTreeLightingData) == 48);
+
+	/** @brief Mirrors NearTreeLeafSettings in SharedData.hlsli. Read by the pixel shader for draws flagged NearTreeLeaf. */
+	struct alignas(16) NearTreeLeafData
+	{
+		float Transmission;  // share of the light on the far side of a leaf that comes through it
+		float Wrap;          // diffuse wrap, 0 = plain Lambert
+		float Variation;     // per-tree brightness and hue variation
+		float Brightness;    // base colour multiplier
+	};
+	static_assert(sizeof(NearTreeLeafData) == 16);
 
 	enum class Preset
 	{
@@ -145,9 +165,13 @@ public:
 	/** @brief The LOD tree lighting values for the shared feature buffer (FeatureBuffer.cpp). */
 	LODTreeLightingData GetCommonBufferData() const;
 
+	/** @brief The loaded tree leaf lighting values, the last block of the shared feature buffer (FeatureBuffer.cpp). */
+	NearTreeLeafData GetNearLeafBufferData() const;
+
 	/**
 	 * @brief Picks out the tree LOD and loaded tree draws between SetupGeometry and RestoreGeometry of the Lighting and Utility shaders.
-	 * @param a_lighting True for a Lighting draw, which also gets the LODTreeCrown flag when it draws a tree crown.
+	 * @param a_lighting True for a Lighting draw, which also gets the LODTreeCrown flag when it draws a tree crown
+	 * and the NearTreeLeaf flag and tint code when it draws the leaves of a loaded tree.
 	 */
 	void BeginDraw(RE::BSRenderPass* a_pass, bool a_lighting);
 	void EndDraw();
@@ -178,6 +202,7 @@ private:
 	bool swayActive = false;    // set once per frame in Reset: sway on and no map menu open
 	bool crownActive = false;   // set once per frame in Reset: crown data is in use and no map menu open
 	bool nearActive = false;    // set once per frame in Reset: loaded trees sway too (outdoors only)
+	bool leafActive = false;    // set once per frame in Reset: the leaves of loaded trees are lit as thin leaves
 
 	double phase = 0.0;
 	double prevPhase = 0.0;

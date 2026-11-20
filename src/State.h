@@ -450,6 +450,8 @@ public:
 		LODTreeCrown = 1 << 24,
 		// Placed rock that Ground Cover may grow on, set by GroundCover::SetupGeometry.
 		GroundCover = 1 << 25,
+		// Leaf shape of a loaded tree, set by TreeWind::BeginDraw for the near tree leaf lighting.
+		NearTreeLeaf = 1 << 26,
 	};
 
 	/** @brief Bitflags describing extra feature-specific properties related to terrain displacement and material models. */
@@ -463,8 +465,11 @@ public:
 		THLand5HasDisplacement = 1 << 5,
 		ETMaterialModel = 0b111 << 6,
 		THLandHasDisplacement = 1 << 9,
-		TVMeshVariation = 1 << 10
+		TVMeshVariation = 1 << 10,
+		// Tint code of the loaded tree being drawn (TreeShapes::GetTintCode), set with ExtraShaderDescriptors::NearTreeLeaf.
+		NearTreeTint = 0x7Fu << 16
 	};
+	static constexpr uint32_t kNearTreeTintShift = 16;
 
 	bool inWorld = false;
 	bool activeReflections = false;

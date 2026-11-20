@@ -45,7 +45,12 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	LODTreeVariation,
 	NearTrees,
 	NearTreeScale,
-	NearTreeMinHeight)
+	NearTreeMinHeight,
+	NearTreeLeafLighting,
+	NearTreeTransmission,
+	NearTreeWrap,
+	NearTreeVariation,
+	NearTreeBrightness)
 
 namespace
 {
@@ -137,6 +142,21 @@ void TreeWind::DrawSettings()
 							  "Reads the profile files in SKSE/Plugins/CommunityShaders/TreeWind again. A profile gives one hand-masked tree model its own motion: still trunk, slow branches, leaf flutter, swinging vines. Needs Nearby Trees Sway."));
 	}
 
+	ImGui::SeparatorText(T(TKEY("near_tree_leaf_lighting"), "Nearby Tree Leaves"));
+	ImGui::Checkbox(T(TKEY("near_tree_leaf_lighting_enabled"), "Light Nearby Leaves as Foliage"), &settings.NearTreeLeafLighting);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s", T(TKEY("near_tree_leaf_lighting_enabled_tooltip"),
+							  "Lights the leaves of fully loaded trees as thin leaves, like the distant crowns: sunlight comes through from behind and wraps a little, and each tree gets its own slight tint. Trunks and branches stay as they are. Leaves with PBR textures keep their own translucency. Off = leaves are lit as solid cards."));
+	}
+	SliderWithTooltip(T(TKEY("near_tree_transmission"), "Leaf Translucency"), &settings.NearTreeTransmission, 0.0f, 1.0f, "%.2f",
+		T(TKEY("near_tree_transmission_tooltip"), "Sunlight that comes through a leaf seen against the sun, tinted by the leaf colour. Leaves in the shadow of the crown stay dark. 0 = none."));
+	SliderWithTooltip(T(TKEY("near_tree_wrap"), "Leaf Light Wrap"), &settings.NearTreeWrap, 0.0f, 1.0f, "%.2f",
+		T(TKEY("near_tree_wrap_tooltip"), "How far sunlight wraps around leaves turned away from it. 0 = hard falloff."));
+	SliderWithTooltip(T(TKEY("near_tree_variation"), "Leaf Tint Variation"), &settings.NearTreeVariation, 0.0f, 0.3f, "%.2f",
+		T(TKEY("near_tree_variation_tooltip"), "Small brightness and hue difference from one tree to the next. The same value as Tree Variation under Distant Tree Lighting lets a tree keep its tint when it changes between LOD and full model. 0 = all alike."));
+	SliderWithTooltip(T(TKEY("near_tree_brightness"), "Leaf Brightness"), &settings.NearTreeBrightness, 0.5f, 2.0f, "%.2f",
+		T(TKEY("near_tree_brightness_tooltip"), "Brightens or darkens the leaf colour of loaded trees. 1 = unchanged."));
+
 	ImGui::SeparatorText(T(TKEY("tree_mods"), "Tree Mods"));
 	ImGui::Checkbox(T(TKEY("tree_mod_support"), "Tree Mod Support"), &settings.TreeModSupport);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
@@ -197,6 +217,9 @@ void TreeWind::DrawSettings()
 void TreeWind::LoadSettings(json& o_json)
 {
 	settings = o_json;
+	// Settings saved before the leaf lighting existed: the loaded trees start with the variation of the LOD crowns
+	if (o_json.is_object() && !o_json.contains("NearTreeVariation"))
+		settings.NearTreeVariation = settings.LODTreeVariation;
 }
 
 void TreeWind::SaveSettings(json& o_json)
@@ -316,18 +339,30 @@ void TreeWind::PostPostLoad()
 void TreeWind::BeginDraw(RE::BSRenderPass* a_pass, bool a_lighting)
 {
 	constexpr auto crownFlag = static_cast<uint32_t>(State::ExtraShaderDescriptors::LODTreeCrown);
+	constexpr auto leafFlag = static_cast<uint32_t>(State::ExtraShaderDescriptors::NearTreeLeaf);
+	constexpr auto tintBits = static_cast<uint32_t>(State::ExtraFeatureDescriptors::NearTreeTint);
 	drawBendWeights = nullptr;
 	drawNearTree = false;
 	drawBespoke = false;
 	drawCrownData = nullptr;
 	auto& extraDescriptor = globals::state->permutationData.ExtraShaderDescriptor;
-	extraDescriptor &= ~crownFlag;
+	extraDescriptor &= ~(crownFlag | leafFlag);
+	auto& featureDescriptor = globals::state->permutationData.ExtraFeatureDescriptor;
+	featureDescriptor &= ~tintBits;
 
 	const bool lightCrowns = a_lighting && settings.LODTreeLighting;
-	if (!swayActive && !lightCrowns && !crownActive)
+	const bool lightLeaves = a_lighting && leafActive;
+	if (!swayActive && !lightCrowns && !crownActive && !lightLeaves)
 		return;
 	const auto kind = TreeShapes::Classify(a_pass, settings.TreeModSupport);
 	if (kind == TreeShapes::Kind::None) {
+		// The leaves of a loaded tree, swaying or not: the tree's tint comes from where it stands, as for its LOD crown
+		if (lightLeaves) {
+			if (const auto root = TreeShapes::FindNearTreeLeafRoot(a_pass)) {
+				extraDescriptor |= leafFlag;
+				featureDescriptor |= static_cast<uint32_t>(TreeShapes::GetTintCode(root->world.translate.x, root->world.translate.y)) << State::kNearTreeTintShift;
+			}
+		}
 		// Not tree LOD: a loaded tree sways with bend data measured from its whole model
 		if (nearActive) {
 			if (const auto root = TreeShapes::FindNearTreeRoot(a_pass)) {
@@ -361,7 +396,8 @@ void TreeWind::EndDraw()
 	drawNearTree = false;
 	drawBespoke = false;
 	drawCrownData = nullptr;
-	globals::state->permutationData.ExtraShaderDescriptor &= ~static_cast<uint32_t>(State::ExtraShaderDescriptors::LODTreeCrown);
+	globals::state->permutationData.ExtraShaderDescriptor &= ~(static_cast<uint32_t>(State::ExtraShaderDescriptors::LODTreeCrown) | static_cast<uint32_t>(State::ExtraShaderDescriptors::NearTreeLeaf));
+	globals::state->permutationData.ExtraFeatureDescriptor &= ~static_cast<uint32_t>(State::ExtraFeatureDescriptors::NearTreeTint);
 }
 
 TreeWind::LODTreeLightingData TreeWind::GetCommonBufferData() const
@@ -376,6 +412,16 @@ TreeWind::LODTreeLightingData TreeWind::GetCommonBufferData() const
 	data.CrownOcclusion = std::clamp(settings.LODTreeCrownOcclusion, 0.0f, 1.0f);
 	data.WrapFrontLit = std::clamp(settings.LODTreeWrapFrontLit, 0.0f, 1.0f);
 	data.Variation = std::clamp(settings.LODTreeVariation, 0.0f, 0.3f);
+	return data;
+}
+
+TreeWind::NearTreeLeafData TreeWind::GetNearLeafBufferData() const
+{
+	NearTreeLeafData data{};
+	data.Transmission = std::clamp(settings.NearTreeTransmission, 0.0f, 1.0f);
+	data.Wrap = std::clamp(settings.NearTreeWrap, 0.0f, 1.0f);
+	data.Variation = std::clamp(settings.NearTreeVariation, 0.0f, 0.3f);
+	data.Brightness = std::clamp(settings.NearTreeBrightness, 0.0f, 4.0f);
 	return data;
 }
 
@@ -450,6 +496,8 @@ void TreeWind::Reset()
 	// Loaded trees sway only under the open sky: plants in interiors stay still
 	const auto sky = globals::game::sky;
 	nearActive = swayActive && settings.NearTrees && sky && sky->mode.get() == RE::Sky::Mode::kFull;
+	// The map menus draw no loaded trees worth lighting, and their draws skip the per-draw test
+	leafActive = settings.NearTreeLeafLighting && !globals::state->isMapMenuOpen;
 	// The crown data only feeds these four; with all of them neutral the crowns are shaded as without it
 	crownActive = settings.LODTreeLighting && !globals::state->isMapMenuOpen &&
 	              (settings.LODTreeRoundNormal > 0.0f || settings.LODTreeCrownOcclusion > 0.0f || settings.LODTreeWrapFrontLit < 1.0f || settings.LODTreeVariation > 0.0f);

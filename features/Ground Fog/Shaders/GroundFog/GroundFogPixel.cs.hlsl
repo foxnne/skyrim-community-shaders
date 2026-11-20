@@ -58,6 +58,7 @@
 #define GROUND_FOG_SHADE
 #include "GroundFog/GroundFog.hlsli"
 #include "GroundFog/Pool.hlsli"
+#include "GroundFog/PoolVolume.hlsli"
 
 Texture2D<float> SceneDepth : register(t40);
 RWTexture2D<float4> FogOut : register(u0);
@@ -664,13 +665,22 @@ namespace GroundFog
 	float poolShare = 0.0;
 	// From the pool's volume: the sun its fog sees (and how much that stands for the sun map lookup), its sky light.
 	float poolSun = 1.0, poolSunWeight = 0.0, poolSky = 1.0;
+	// Near Volume: the pool is a volume the ray goes through (GroundFog/PoolVolume.hlsli), not a layer on what the
+	// pixel shows.
+	const bool volume = GroundFog::VolumeOn() && GroundFog::PoolExtinction > 0.0;
 	if (GroundFog::PoolExtinction > 0.0 && surface && tEnd < GroundFog::PoolEnd) {
 		normal = GroundFog::SurfaceNormal(scenePixel, depth, position, mainSize, activeMain);
 		hasNormal = true;
 		taps += 4u;
 		const float thin = GroundFog::ThinThing(scenePixel, viewFar, activeMain);
 		taps += 2u;
-		pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, thin, SharedData::DirLightDirection.xyz, taps, poolSun, poolSunWeight, poolSky);
+		if (volume) {
+			// The volume is marched below, for every ray; here only what this pixel tells the floor map.
+			const float2 sightUv = GroundFog::SimUv(position.xy);
+			if (normal.z > 0.8 && GroundFog::SimInside(sightUv) > 0.0 && tEnd >= GroundFog::PoolNearStart)
+				pool.floorZ = position.z + camZ;
+		} else
+			pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, thin, SharedData::DirLightDirection.xyz, taps, poolSun, poolSunWeight, poolSky);
 		// The tops of grass and plants are not the floor (see Pool.hlsli): an up-facing surface a hand to a meter
 		// above the terrain height map is taken for one only if it is not thin and goes on around the pixel as a
 		// plane (a rock slab, a step, a boardwalk). Dense grass seen from above makes a ragged surface that fails
@@ -696,6 +706,15 @@ namespace GroundFog
 					FloorSplat[texel] = pool.floorZ;
 			}
 		}
+	}
+
+	if (volume) {
+		// Every ray, the sky's too: fog at knee height shows against the skyline.
+		const float sighting = pool.floorZ;
+		const float jitter = Random::InterleavedGradientNoise(float2(pixel), SharedData::FrameCount);
+		pool = GroundFog::MarchVolume(dir, tEnd, camZ, tNear, jitter, taps, poolSun, poolSky);
+		poolSunWeight = pool.tau > 0.0 ? 1.0 : 0.0;
+		pool.floorZ = sighting;
 	}
 
 	// Debug views of the pool alone, laid over the scene at half strength.
@@ -1111,5 +1130,5 @@ namespace GroundFog
 	FogOut[pixel] = float4(min(max(light, 0.0), 65504.0), exp(-seen.tau));
 	// w: the share of the fog in front of the nearest depth that is the pool, which lies at the end of the ray and
 	// not along it.
-	FogAuxOut[pixel] = float4(auxDepths, exp(-tauNear), tauNear > 1e-5 ? saturate(pool.tauNear / tauNear) : 0.0);
+	FogAuxOut[pixel] = float4(auxDepths, exp(-tauNear), tauNear > 1e-5 && !volume ? saturate(pool.tauNear / tauNear) : 0.0);
 }

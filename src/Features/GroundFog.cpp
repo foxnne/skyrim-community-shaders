@@ -945,6 +945,7 @@ void GroundFog::ClearShaderCache()
 	pyramidCS = nullptr;
 	pyramidFirstCS = nullptr;
 	flowCS = nullptr;
+	volumeCS = nullptr;
 	shadersRequested = false;
 }
 
@@ -969,6 +970,8 @@ bool GroundFog::EnsureShaders()
 		// Optional: without it nothing moves, and a near layer thin enough to be the pool is marched like the tall
 		// volume. It places the fog by the same rule as the pixel pass, so it takes the same defines.
 		flowCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\GroundFog\\FlowSim.cs.hlsl", defines, "cs_5_0")));
+		// Optional: without it the pool is drawn on the visible surface.
+		volumeCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\GroundFog\\PoolVolume.cs.hlsl", defines, "cs_5_0")));
 	}
 	return pixelCS && pyramidCS && pyramidFirstCS;
 }
@@ -1141,6 +1144,10 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 		data.PoolEnd = std::min(data.NearEnd, 0.46f * static_cast<float>(kSimSize * simTexel));
 		data.NearExtinction = 0.0f;
 	}
+	// Near Volume: the pool is a volume the pixel pass marches through.
+	const bool volume = poolActive && simulated && settings.NearVolume && volumeCS;
+	if (volume)
+		data.Flags |= 4u;
 	volumeConstants->Update(data);
 
 	winrt::com_ptr<ID3D11Buffer> oldConstants;
@@ -1173,6 +1180,14 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 		ID3D11ShaderResourceView* lift = simLift[flowCurrent]->srv.get();
 		a_context->CSSetShaderResources(kLiftSlot, 1, &lift);
 	}
+	static_assert(kPoolVolumeFloorSlot == kPoolVolumeSlot + 1);
+	winrt::com_ptr<ID3D11ShaderResourceView> oldVolume[2];
+	a_context->CSGetShaderResources(kPoolVolumeSlot, 1, oldVolume[0].put());
+	a_context->CSGetShaderResources(kPoolVolumeFloorSlot, 1, oldVolume[1].put());
+	if (volume && FillVolume(a_context)) {
+		ID3D11ShaderResourceView* volumeInputs[] = { poolVolume->srv.get(), poolVolumeFloor->srv.get() };
+		a_context->CSSetShaderResources(kPoolVolumeSlot, 2, volumeInputs);
+	}
 	ID3D11UnorderedAccessView* outputs[] = { fogTexture->uav.get(), fogAuxTexture->uav.get(), simulated && data.PoolExtinction > 0.0f ? floorSeen->uav.get() : nullptr };
 	a_context->CSSetUnorderedAccessViews(0, 3, outputs, nullptr);
 	a_context->CSSetShader(pixelCS.get(), nullptr, 0);
@@ -1193,6 +1208,8 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 	a_context->CSSetShaderResources(kHeightMapSlot, 6, nullGround);
 	ID3D11ShaderResourceView* restoredLift = oldLift.get();
 	a_context->CSSetShaderResources(kLiftSlot, 1, &restoredLift);
+	ID3D11ShaderResourceView* restoredVolume[] = { oldVolume[0].get(), oldVolume[1].get() };
+	a_context->CSSetShaderResources(kPoolVolumeSlot, 2, restoredVolume);
 	ID3D11ShaderResourceView* restoredSkylighting = oldSkylighting.get();
 	a_context->CSSetShaderResources(kSkylightingSlot, 1, &restoredSkylighting);
 	auto* previous = oldConstants.get();
@@ -1200,6 +1217,66 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 	compositeInputs[0] = fogTexture->srv.get();
 	compositeInputs[1] = fogAuxTexture->srv.get();
 	a_context->CSSetShaderResources(kCompositeFogSlot, 2, compositeInputs);
+	return true;
+}
+
+bool GroundFog::FillVolume(ID3D11DeviceContext* a_context)
+{
+	if (!volumeCS || !flowConstants || !simState[0])
+		return false;
+	if (!poolVolume) {
+		D3D11_TEXTURE3D_DESC desc{};
+		desc.Width = desc.Height = kSimSize;
+		desc.Depth = kPoolVolumeLevels;
+		desc.MipLevels = 1;
+		desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		poolVolume = eastl::make_unique<Texture3D>(desc, "GroundFog::PoolVolume");
+		D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
+		srv.Format = desc.Format;
+		srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
+		srv.Texture3D.MipLevels = 1;
+		poolVolume->CreateSRV(srv);
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uav{};
+		uav.Format = desc.Format;
+		uav.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE3D;
+		uav.Texture3D.WSize = kPoolVolumeLevels;
+		poolVolume->CreateUAV(uav);
+	}
+	if (!poolVolumeFloor) {
+		D3D11_TEXTURE2D_DESC desc{};
+		desc.Width = desc.Height = kSimSize;
+		desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+		desc.Format = DXGI_FORMAT_R32_FLOAT;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		poolVolumeFloor = eastl::make_unique<Texture2D>(desc, "GroundFog::PoolVolumeFloor");
+		D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
+		srv.Format = desc.Format;
+		srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+		srv.Texture2D.MipLevels = 1;
+		poolVolumeFloor->CreateSRV(srv);
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uav{};
+		uav.Format = desc.Format;
+		uav.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+		poolVolumeFloor->CreateUAV(uav);
+	}
+	// The simulation's constants for the wind's drift (the start of SimCB).
+	winrt::com_ptr<ID3D11Buffer> oldSimConstants;
+	a_context->CSGetConstantBuffers(kFlowConstantSlot, 1, oldSimConstants.put());
+	auto* simConstants = flowConstants->CB();
+	a_context->CSSetConstantBuffers(kFlowConstantSlot, 1, &simConstants);
+	ID3D11UnorderedAccessView* outputs[] = { poolVolume->uav.get(), poolVolumeFloor->uav.get() };
+	a_context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
+	a_context->CSSetShader(volumeCS.get(), nullptr, 0);
+	globals::profiler->BeginPass("GroundFog::Volume");
+	a_context->Dispatch((kSimSize + 7u) / 8u, (kSimSize + 7u) / 8u, 1);
+	globals::profiler->EndPass();
+	ID3D11UnorderedAccessView* nullOutputs[2]{};
+	a_context->CSSetUnorderedAccessViews(0, 2, nullOutputs, nullptr);
+	auto* previousSim = oldSimConstants.get();
+	a_context->CSSetConstantBuffers(kFlowConstantSlot, 1, &previousSim);
 	return true;
 }
 
@@ -1257,6 +1334,9 @@ void GroundFog::DrawSettings()
 
 		ImGui::SliderFloat(T(TKEY("pooling"), "Pooling"), &settings.Pooling, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("pooling_tooltip"), "How much the pool keeps to the low places of the ground you see. At 1 it gathers in dips, gutters and at the foot of slopes, over water and in shade, and leaves level open ground and rises clear. Below 0.85 it is held at 0.85: the fog does not lie everywhere."));
+
+		ImGui::Checkbox(T(TKEY("near_volume"), "Near Volume"), &settings.NearVolume);
+		Util::HoverTip(T(TKEY("near_volume_tooltip"), "Draws the pool as a true volume of fog around you, knee high: every pixel sees the fog between you and it, so grass, legs and trunks stand in it, it shows against the skyline and moves with parallax, and wakes churn in height. Off draws the pool as a layer on the surfaces you see, as before (for comparison)."));
 
 		ImGui::SliderFloat(T(TKEY("pool_opacity"), "Pool Opacity"), &settings.PoolOpacity, kMinPoolOpacity, kMaxPoolOpacity, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("pool_opacity_tooltip"), "Density of the pool as a share of Near Density. Low: a veil the ground shows through, which thickens where the fog is pushed together. High: dense banks."));
@@ -1498,6 +1578,8 @@ void GroundFog::LoadSettings(json& o_json)
 {
 	settings = o_json;
 	const Settings defaults{};
+	// Past the 64 members NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT takes: read and written by hand.
+	settings.NearVolume = o_json.is_object() && o_json.contains("NearVolume") && o_json["NearVolume"].is_boolean() ? o_json["NearVolume"].get<bool>() : defaults.NearVolume;
 	auto sanitize = [](float& a_value, float a_default, float a_min, float a_max) {
 		a_value = std::clamp(std::isfinite(a_value) ? a_value : a_default, a_min, a_max);
 	};
@@ -1565,6 +1647,7 @@ void GroundFog::LoadSettings(json& o_json)
 void GroundFog::SaveSettings(json& o_json)
 {
 	o_json = settings;
+	o_json["NearVolume"] = settings.NearVolume;
 }
 
 void GroundFog::RestoreDefaultSettings()

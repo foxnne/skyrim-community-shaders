@@ -1828,6 +1828,8 @@
     "feature.ground_fog.pool_opacity_tooltip": "Density of the pool as a share of Near Density. Low: a veil the ground shows through, which thickens where the fog is pushed together. High: dense banks.",
     "feature.ground_fog.wake_time": "Wake Time",
     "feature.ground_fog.wake_time_tooltip": "How long the fog keeps moving by itself after something has passed: a wake rolls on, curls into eddies and piles up at its rim, then settles. Short: it stops with the mover.",
+    "feature.ground_fog.near_volume": "Near Volume",
+    "feature.ground_fog.near_volume_tooltip": "Draws the pool as a true volume of fog around you, knee high: every pixel sees the fog between you and it, so grass, legs and trunks stand in it, it shows against the skyline and moves with parallax, and wakes churn in height. Off draws the pool as a layer on the surfaces you see, as before (for comparison).",
     "feature.ground_fog.reactive": "Reacts to Movement",
     "feature.ground_fog.reactive_strength": "Reaction Strength",
     "feature.ground_fog.reactive_strength_tooltip": "How much of the fog movers stir away. At 0 they still push it about but none is lost.",

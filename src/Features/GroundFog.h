@@ -92,6 +92,7 @@ struct GroundFog : Feature
 		float Pooling = 1.0f;       // how much the pool keeps to dips, low spots, water and shade; the shader takes at least 0.85
 		float PoolOpacity = 0.55f;  // the pool's density as a share of Near Density
 		float WakeTime = 6.0f;      // seconds over which the fog's own motion (a wake, an eddy) dies down
+		bool NearVolume = true;     // the pool as a 3D volume marched per pixel (GroundFog/PoolVolume.cs.hlsl); off: on the visible surface
 		bool HalfResolution = true;
 		float StepGrowth = 0.3f;  // size of terrain detail the march follows, as a share of the distance from the camera
 		int MaxSteps = 72;
@@ -323,6 +324,11 @@ struct GroundFog : Feature
 	static constexpr uint32_t kFloorSlopeSlot = 11;
 	static constexpr uint32_t kFloorSeenSlot = 12;
 	static constexpr uint32_t kLiftSlot = 13;
+	/** The pool's volume and the floor it stands on, for GroundFog/GroundFogPixel.cs.hlsl (GroundFog/PoolVolume.hlsli). */
+	static constexpr uint32_t kPoolVolumeSlot = 14;
+	static constexpr uint32_t kPoolVolumeFloorSlot = 15;
+	/** Levels of the pool's volume over its 1.43 m (GroundFog::VolumeHeight); its xy texels are the simulation's. */
+	static constexpr uint32_t kPoolVolumeLevels = 16;
 	/** The Skylighting probes in GroundFog/GroundFogPixel.cs.hlsl, as in the atmosphere volume. */
 	static constexpr uint32_t kSkylightingSlot = 50;
 	static constexpr uint32_t kFlowConstantSlot = 3;
@@ -367,6 +373,7 @@ private:
 	winrt::com_ptr<ID3D11ComputeShader> pyramidCS;
 	winrt::com_ptr<ID3D11ComputeShader> pyramidFirstCS;
 	winrt::com_ptr<ID3D11ComputeShader> flowCS;
+	winrt::com_ptr<ID3D11ComputeShader> volumeCS;
 	bool shadersRequested = false;
 	// The simulation: two states, swapped every frame. simState: velocity, amount, resting amount. simFloor: the
 	// floor level per texel. floorSeen: what the pixel pass saw of the floor this frame, folded in on the next step.
@@ -376,6 +383,11 @@ private:
 	eastl::unique_ptr<Texture2D> floorSlope[2];  // slope of simFloor over about a meter, validity, and the sun map
 	eastl::unique_ptr<Texture2D> floorSeen;
 	eastl::unique_ptr<Texture2D> simLift[2];  // how far the top of the pool is thrown up or pressed down
+	// The pool as a volume: extinction, sun and sky reach per voxel over the simulation's window, following the floor.
+	eastl::unique_ptr<Texture3D> poolVolume;
+	eastl::unique_ptr<Texture2D> poolVolumeFloor;
+	/** Fills poolVolume from the simulation's present state. Call with the fog's constants and ground and simulation textures bound. */
+	bool FillVolume(ID3D11DeviceContext* a_context);
 	uint32_t flowCurrent = 0;
 	bool flowValid = false;
 	bool simPending = false;   // PrepareSim set up a step that StepSim has not run yet

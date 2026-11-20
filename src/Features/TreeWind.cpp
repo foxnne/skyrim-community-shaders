@@ -50,7 +50,15 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	NearTreeTransmission,
 	NearTreeWrap,
 	NearTreeVariation,
-	NearTreeBrightness)
+	NearTreeBrightness,
+	NearTreeSpecular,
+	NearTreeMinRoughness,
+	NearTreeSoftLight,
+	NearTreeVertexShadeDirect,
+	NearTreeScreenShadow,
+	NearTreeTransmissionSaturation,
+	TreeLeafChromaMin,
+	TreeLeafChromaMax)
 
 namespace
 {
@@ -156,6 +164,23 @@ void TreeWind::DrawSettings()
 		T(TKEY("near_tree_variation_tooltip"), "Small brightness and hue difference from one tree to the next. The same value as Tree Variation under Distant Tree Lighting lets a tree keep its tint when it changes between LOD and full model. 0 = all alike."));
 	SliderWithTooltip(T(TKEY("near_tree_brightness"), "Leaf Brightness"), &settings.NearTreeBrightness, 0.5f, 2.0f, "%.2f",
 		T(TKEY("near_tree_brightness_tooltip"), "Brightens or darkens the leaf colour of loaded trees. 1 = unchanged."));
+	SliderWithTooltip(T(TKEY("near_tree_specular"), "Leaf Shine"), &settings.NearTreeSpecular, 0.0f, 1.0f, "%.2f",
+		T(TKEY("near_tree_specular_tooltip"), "Strength of the highlights and reflections on leaves. Many leaf meshes have full white shine on every leaf, which shows as sparkles. 1 = as the mesh has it, 0 = none."));
+	SliderWithTooltip(T(TKEY("near_tree_min_roughness"), "Leaf Roughness Floor"), &settings.NearTreeMinRoughness, 0.0f, 1.0f, "%.2f",
+		T(TKEY("near_tree_min_roughness_tooltip"), "Leaves are never glossier than this. Higher = what is left of the shine spreads into a soft sheen and reflections on leaves blur. 0 = as the mesh has it."));
+	SliderWithTooltip(T(TKEY("near_tree_soft_light"), "Leaf Soft Lighting"), &settings.NearTreeSoftLight, 0.0f, 2.0f, "%.2f",
+		T(TKEY("near_tree_soft_light_tooltip"), "Strength of the game's own soft, rim and back lighting on leaves. 1 = as the mesh has it."));
+	SliderWithTooltip(T(TKEY("near_tree_vertex_shade_direct"), "Baked Shade on Sunlight"), &settings.NearTreeVertexShadeDirect, 0.0f, 1.0f, "%.2f",
+		T(TKEY("near_tree_vertex_shade_direct_tooltip"), "Tree meshes have the shade inside the crown painted in. This is how much of it also darkens the sunlight on leaves, on top of the real shadows. 1 = all of it (darker crowns than the distant trees), 0 = only real shadows shade the sun. Sky light always keeps the painted shade."));
+	SliderWithTooltip(T(TKEY("near_tree_screen_shadow"), "Leaf Contact Shadows"), &settings.NearTreeScreenShadow, 0.0f, 1.0f, "%.2f",
+		T(TKEY("near_tree_screen_shadow_tooltip"), "Share of the screen-space contact shadow that sunlit leaves keep. Lower = brighter, softer crowns. The distant crowns keep 1 minus their Shadow Softening."));
+	SliderWithTooltip(T(TKEY("near_tree_transmission_saturation"), "Translucency Colour Depth"), &settings.NearTreeTransmissionSaturation, 0.0f, 1.0f, "%.2f",
+		T(TKEY("near_tree_transmission_saturation_tooltip"), "How much deeper in colour the light that comes through a leaf is than the lit side. 0 = the same colour as the lit side."));
+	ImGui::DragFloatRange2(T(TKEY("tree_leaf_chroma"), "Leaf Colour Threshold"), &settings.TreeLeafChromaMin, &settings.TreeLeafChromaMax, 0.005f, 0.0f, 1.0f, "%.2f", "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s", T(TKEY("tree_leaf_chroma_tooltip"),
+							  "Tells leaves from twigs and bark by how colourful the texture is. At or below the first value a texel is treated as twig and keeps the ordinary lighting; from the second value up it gets all of the leaf lighting and tint. Lower both if dull leaves or needles are left out, raise them if twigs start to glow. Also used for the tint of distant crowns."));
+	}
 
 	ImGui::SeparatorText(T(TKEY("tree_mods"), "Tree Mods"));
 	ImGui::Checkbox(T(TKEY("tree_mod_support"), "Tree Mod Support"), &settings.TreeModSupport);
@@ -422,6 +447,15 @@ TreeWind::NearTreeLeafData TreeWind::GetNearLeafBufferData() const
 	data.Wrap = std::clamp(settings.NearTreeWrap, 0.0f, 1.0f);
 	data.Variation = std::clamp(settings.NearTreeVariation, 0.0f, 0.3f);
 	data.Brightness = std::clamp(settings.NearTreeBrightness, 0.0f, 4.0f);
+	data.Specular = std::clamp(settings.NearTreeSpecular, 0.0f, 1.0f);
+	data.MinRoughness = std::clamp(settings.NearTreeMinRoughness, 0.0f, 1.0f);
+	data.SoftLight = std::clamp(settings.NearTreeSoftLight, 0.0f, 2.0f);
+	data.VertexShadeDirect = std::clamp(settings.NearTreeVertexShadeDirect, 0.0f, 1.0f);
+	data.ScreenShadow = std::clamp(settings.NearTreeScreenShadow, 0.0f, 1.0f);
+	data.TransmissionSaturation = std::clamp(settings.NearTreeTransmissionSaturation, 0.0f, 1.0f);
+	// smoothstep needs the upper edge above the lower one
+	data.ChromaMin = std::clamp(settings.TreeLeafChromaMin, 0.0f, 0.98f);
+	data.ChromaMax = std::clamp(settings.TreeLeafChromaMax, data.ChromaMin + 0.01f, 1.0f);
 	return data;
 }
 

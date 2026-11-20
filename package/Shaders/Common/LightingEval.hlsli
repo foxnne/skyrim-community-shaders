@@ -190,7 +190,7 @@ void EvaluateLighting(DirectContext context, MaterialProperties material, float3
 		lightingOutput.diffuse = leafCosines.x * diffuseLightColor * Color::BRDFScale;
 		const float3 leafColor = material.BaseColor;
 		const float leafPeak = max(max(leafColor.r, leafColor.g), max(leafColor.b, 1e-4));
-		const float3 crossingTint = leafColor * lerp(1.0, leafColor / leafPeak, NEAR_TREE_LEAF_TRANSMISSION_SATURATION);
+		const float3 crossingTint = leafColor * lerp(1.0, leafColor / leafPeak, SharedData::nearTreeLeafSettings.TransmissionSaturation);
 		lightingOutput.transmission = leafCosines.y * NearTreeLeafParams.x * NearTreeLeafWeight * softLightColor * crossingTint * Color::BRDFScale;
 	}
 #	endif
@@ -202,8 +202,8 @@ void EvaluateLighting(DirectContext context, MaterialProperties material, float3
 	float specularScale = 1.0;
 #	if defined(NEAR_TREE_LEAF_LIGHTING)
 	if (NearTreeLeaf) {
-		softLightScale *= lerp(1.0, NEAR_TREE_LEAF_SOFT_LIGHT, NearTreeLeafWeight);
-		specularScale = lerp(1.0, NEAR_TREE_LEAF_SPECULAR, NearTreeLeafWeight);
+		softLightScale *= lerp(1.0, SharedData::nearTreeLeafSettings.SoftLight, NearTreeLeafWeight);
+		specularScale = lerp(1.0, SharedData::nearTreeLeafSettings.Specular, NearTreeLeafWeight);
 	}
 #	endif
 	if (HasSoftLighting())
@@ -264,7 +264,7 @@ void GetIndirectLobeWeights(out IndirectLobeWeights lobeWeights, IndirectContext
 #	if defined(NEAR_TREE_LEAF_LIGHTING)
 	// The environment reflection of a leaf of a loaded tree: the deferred pass adds it from this weight
 	if (NearTreeLeaf)
-		lobeWeights.specular *= lerp(1.0, NEAR_TREE_LEAF_SPECULAR, NearTreeLeafWeight);
+		lobeWeights.specular *= lerp(1.0, SharedData::nearTreeLeafSettings.Specular, NearTreeLeafWeight);
 #	endif
 #endif
 }

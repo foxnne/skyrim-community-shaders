@@ -60,10 +60,9 @@
 
 // Leaf atlases hold grey twigs and bark next to the leaves, and twig shapes are drawn as leaf shapes. The leaf-only
 // terms (per-tree tint, brightness, light through the leaf, wrap, shine and vertex-shade changes) fade out with the
-// saturation of the texel, in linear light: none at or below CHROMA_MIN, all of them from CHROMA_MAX up. Twig greys
-// sit below 0.3, autumn and summer leaves above 0.85, dull needles around 0.5.
-#define TREE_LEAF_CHROMA_MIN 0.3
-#define TREE_LEAF_CHROMA_MAX 0.6
+// saturation of the texel, in linear light: none at or below nearTreeLeafSettings.ChromaMin, all of them from
+// ChromaMax up (Tree Wind's Leaf Colour Threshold, 0.3 to 0.6 by default). Twig greys sit below 0.3, autumn and
+// summer leaves above 0.85, dull needles around 0.5.
 
 // The leaves of loaded trees have no define of their own either: Tree Wind marks the draws of their leaf shapes with
 // ExtraFlags::NearTreeLeaf, and they are lit as thin leaves (nearTreeLeafSettings): light comes through from the far
@@ -77,27 +76,24 @@
 #	define NEAR_TREE_LEAF_PREVIEW_TRANSMISSION 0.5
 #	define NEAR_TREE_LEAF_PREVIEW_WRAP 0.3
 #	define NEAR_TREE_LEAF_PREVIEW_BRIGHTNESS 1.0
-// How far the light that crosses a leaf is pulled toward the leaf's own hue, 0 = tinted like the lit side
-#	define NEAR_TREE_LEAF_TRANSMISSION_SATURATION 0.5
-// Shine of the leaves. Leaf meshes often carry the specular flag with a normal map whose alpha (the specular map) is
-// the leaf cutout, so every leaf texel has full-strength white specular on a steep normal map: white sparkles.
-// SPECULAR scales the direct specular of every light and the environment reflection (IBL, SSR), 1 = as authored.
-#	define NEAR_TREE_LEAF_SPECULAR 0.25
-// Lowest roughness of a leaf, 0 = as authored: widens what is left of the highlight into a sheen and blurs the
-// reflection the deferred pass adds from the G-buffer. Caps the vanilla specular power to match.
-#	define NEAR_TREE_LEAF_MIN_ROUGHNESS 0.6
-// Scale of the vanilla soft, rim and back lighting of a leaf (diffuse fill, tinted by the leaf colour), 1 = as authored
-#	define NEAR_TREE_LEAF_SOFT_LIGHT 1.0
-// Tree meshes bake the shade inside the crown into grey vertex colours (half grey on most leaf vertices, which is
+// The rest of the leaf look is live too, in nearTreeLeafSettings (Tree Wind's menu, Nearby Tree Leaves):
+// TransmissionSaturation: how far the light that crosses a leaf is pulled toward the leaf's own hue, 0 = tinted like
+// the lit side.
+// Specular: shine of the leaves. Leaf meshes often carry the specular flag with a normal map whose alpha (the
+// specular map) is the leaf cutout, so every leaf texel has full-strength white specular on a steep normal map: white
+// sparkles. Scales the direct specular of every light and the environment reflection (IBL, SSR), 1 = as authored.
+// MinRoughness: lowest roughness of a leaf, 0 = as authored: widens what is left of the highlight into a sheen and
+// blurs the reflection the deferred pass adds from the G-buffer. Caps the vanilla specular power to match.
+// SoftLight: scale of the vanilla soft, rim and back lighting of a leaf (diffuse fill, tinted by the leaf colour),
+// 1 = as authored.
+// VertexShadeDirect: tree meshes bake the shade inside the crown into grey vertex colours (half grey on most leaf vertices, which is
 // 0.21 in linear light), and the shader multiplies everything by them. For the sky light that is occlusion, and the
 // skylighting and SSGI occlusion are divided by it so it counts once. For the sun and the lights it is a second
 // shadow on top of the real ones, on leaves the sun does reach: the LOD crowns carry no vertex colours, so the full
-// models came out several times darker. VERTEX_SHADE_DIRECT is the share of the vertex colour the direct light and
-// the light through the leaf keep: 1 = as authored, 0 = only the real shadows shade the sun.
-#	define NEAR_TREE_LEAF_VERTEX_SHADE_DIRECT 0.3
-// Share of the screen-space contact shadow a sunlit leaf keeps, 1 = full. The trace treats the leaf cards in front as
-// solid; the LOD crowns keep 0.3 of it (LODTreeShadowSoftening 0.7).
-#	define NEAR_TREE_LEAF_SCREEN_SHADOW 1.0
+// models came out several times darker. This is the share of the vertex colour the direct light and the light
+// through the leaf keep: 1 = as authored, 0 = only the real shadows shade the sun.
+// ScreenShadow: share of the screen-space contact shadow a sunlit leaf keeps, 1 = full. The trace treats the leaf
+// cards in front as solid; the LOD crowns keep 0.3 of it (LODTreeShadowSoftening 0.7).
 #endif
 
 #if defined(SNOW_COVER)
@@ -1234,7 +1230,7 @@ float GetLeafChromaWeight(float3 a_baseColor)
 {
 	const float peak = max(max(a_baseColor.r, a_baseColor.g), a_baseColor.b);
 	const float low = min(min(a_baseColor.r, a_baseColor.g), a_baseColor.b);
-	return smoothstep(TREE_LEAF_CHROMA_MIN, TREE_LEAF_CHROMA_MAX, (peak - low) / max(peak, 1e-4));
+	return smoothstep(SharedData::nearTreeLeafSettings.ChromaMin, SharedData::nearTreeLeafSettings.ChromaMax, (peak - low) / max(peak, 1e-4));
 }
 #	endif
 
@@ -3115,7 +3111,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	if defined(NEAR_TREE_LEAF_LIGHTING)
 	// Before any light is evaluated and before the G-buffer takes the roughness
 	if (NearTreeLeaf) {
-		const float leafMinRoughness = NEAR_TREE_LEAF_MIN_ROUGHNESS * NearTreeLeafWeight;
+		const float leafMinRoughness = SharedData::nearTreeLeafSettings.MinRoughness * NearTreeLeafWeight;
 		material.Roughness = max(material.Roughness, leafMinRoughness);
 		// The power with that roughness, the inverse of ShininessToRoughness
 		const float leafMinRoughness2 = max(leafMinRoughness * leafMinRoughness, 1e-3);
@@ -3217,7 +3213,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		endif
 #		if defined(NEAR_TREE_LEAF_LIGHTING)
 			if (NearTreeLeaf)
-				screenSpaceShadows = lerp(1.0, screenSpaceShadows, lerp(1.0, NEAR_TREE_LEAF_SCREEN_SHADOW, NearTreeLeafWeight));
+				screenSpaceShadows = lerp(1.0, screenSpaceShadows, lerp(1.0, SharedData::nearTreeLeafSettings.ScreenShadow, NearTreeLeafWeight));
 #		endif
 #		if defined(SKINNED) || defined(SKIN) || defined(HAIR)
 			screenSpaceShadows.x = lerp(1.0, screenSpaceShadows.x, saturate(4.0 * dirLightAngle));
@@ -3884,9 +3880,9 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 #	if defined(NEAR_TREE_LEAF_LIGHTING)
 	// The baked crown shade on the ambient as authored, on the direct light and the light through the leaf only in
-	// part (NEAR_TREE_LEAF_VERTEX_SHADE_DIRECT); diffuseColor still holds the direct light alone here
+	// part (nearTreeLeafSettings.VertexShadeDirect); diffuseColor still holds the direct light alone here
 	if (NearTreeLeaf) {
-		const float3 leafDirectShade = lerp(1.0, vertexColor, lerp(1.0, NEAR_TREE_LEAF_VERTEX_SHADE_DIRECT, NearTreeLeafWeight));
+		const float3 leafDirectShade = lerp(1.0, vertexColor, lerp(1.0, SharedData::nearTreeLeafSettings.VertexShadeDirect, NearTreeLeafWeight));
 		color.xyz = color.xyz * vertexColor + (diffuseColor * material.BaseColor + transmissionColor) * (leafDirectShade - vertexColor);
 	} else
 #	endif

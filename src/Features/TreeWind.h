@@ -79,6 +79,14 @@ public:
 		float NearTreeWrap = 0.3f;
 		float NearTreeVariation = 0.08f;  // same as LODTreeVariation, so a tree keeps its tint across the full-model/LOD swap
 		float NearTreeBrightness = 1.0f;  // the full-model textures need no lift, unlike the LOD atlas
+		float NearTreeSpecular = 0.25f;
+		float NearTreeMinRoughness = 0.6f;
+		float NearTreeSoftLight = 1.0f;
+		float NearTreeVertexShadeDirect = 0.3f;
+		float NearTreeScreenShadow = 1.0f;
+		float NearTreeTransmissionSaturation = 0.5f;
+		float TreeLeafChromaMin = 0.3f;  // shared by the leaves of loaded trees and the LOD crown tint
+		float TreeLeafChromaMax = 0.6f;
 	};
 
 	/** @brief Mirrors TreeWindCB in TreeWind.hlsli. */
@@ -115,8 +123,19 @@ public:
 		float Wrap;          // diffuse wrap, 0 = plain Lambert
 		float Variation;     // per-tree brightness and hue variation
 		float Brightness;    // base colour multiplier
+
+		float Specular;           // scale of the direct specular and the environment reflection, 1 = as authored
+		float MinRoughness;       // lowest roughness of a leaf, 0 = as authored
+		float SoftLight;          // scale of the vanilla soft, rim and back lighting, 1 = as authored
+		float VertexShadeDirect;  // share of the baked vertex shade the direct light keeps, 1 = as authored
+
+		float ScreenShadow;            // share of the screen-space contact shadow a sunlit leaf keeps
+		float TransmissionSaturation;  // pull of the light through a leaf toward the leaf's own hue
+		float ChromaMin;               // texel saturation at or below which nothing is leaf (twigs, bark)
+		float ChromaMax;               // texel saturation from which everything is leaf; also used by the LOD crown tint
 	};
-	static_assert(sizeof(NearTreeLeafData) == 16);
+	static_assert(sizeof(NearTreeLeafData) == 48);
+	static_assert(offsetof(NearTreeLeafData, Specular) == 16 && offsetof(NearTreeLeafData, ScreenShadow) == 32 && offsetof(NearTreeLeafData, ChromaMax) == 44);
 
 	enum class Preset
 	{

@@ -815,6 +815,16 @@ namespace SharedData
 		float Wrap;          // diffuse wrap, 0 = plain Lambert
 		float Variation;     // per-tree brightness and hue variation
 		float Brightness;    // base colour multiplier
+
+		float Specular;           // scale of the direct specular and the environment reflection, 1 = as authored
+		float MinRoughness;       // lowest roughness of a leaf, 0 = as authored
+		float SoftLight;          // scale of the vanilla soft, rim and back lighting, 1 = as authored
+		float VertexShadeDirect;  // share of the baked vertex shade the direct light keeps, 1 = as authored
+
+		float ScreenShadow;            // share of the screen-space contact shadow a sunlit leaf keeps
+		float TransmissionSaturation;  // pull of the light through a leaf toward the leaf's own hue
+		float ChromaMin;               // texel saturation at or below which nothing is leaf (twigs, bark)
+		float ChromaMax;               // texel saturation from which everything is leaf; also used by the LOD crown tint
 	};
 
 	// Ground Cover; mirrors GroundCover::PerFrame

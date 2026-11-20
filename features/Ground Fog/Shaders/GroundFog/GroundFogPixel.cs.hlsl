@@ -588,7 +588,7 @@ namespace GroundFog
 		normal = GroundFog::SurfaceNormal(scenePixel, depth, position, mainSize, activeMain);
 		hasNormal = true;
 		taps += 4u;
-		pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, SharedData::DirLightDirection.xyz, taps);
+		pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, taps);
 		if (pool.floorZ < GroundFog::FloorUnknown) {
 			uint2 splatSize;
 			FloorSplat.GetDimensions(splatSize.x, splatSize.y);
@@ -840,11 +840,8 @@ namespace GroundFog
 		const float mapped = GroundFog::SimInside(sunUv);
 		float sun = 1.0;
 		if (mapped > 0.0) {
-			// Two along the ray and two across it, a texel and more apart: a patch of sun in the fog is soft all round.
 			const float2 along = dir.xy * max(0.3 * pool.within, 40.0) * GroundFog::FlowWindow.z;
-			const float2 acrossRay = float2(-dir.y, dir.x) * 34.0 * GroundFog::FlowWindow.z;
-			sun = 0.25 * (GroundFog::FogSlope.SampleLevel(LinearSampler, sunUv - along, 0).w + GroundFog::FogSlope.SampleLevel(LinearSampler, sunUv + along, 0).w +
-							 GroundFog::FogSlope.SampleLevel(LinearSampler, sunUv - acrossRay, 0).w + GroundFog::FogSlope.SampleLevel(LinearSampler, sunUv + acrossRay, 0).w);
+			sun = 0.5 * (GroundFog::FogSlope.SampleLevel(LinearSampler, sunUv - along, 0).w + GroundFog::FogSlope.SampleLevel(LinearSampler, sunUv + along, 0).w);
 		}
 		if (mapped < 1.0)
 			sun = lerp(MediumCascadeShadow(lightPos), sun, mapped);
@@ -912,17 +909,13 @@ namespace GroundFog
 #endif
 		skyOpen = lerp(1.0, skyOpen, GroundFog::CanopyShade);
 	}
-	// And less of the sky reaches the base of thick fog than its top: a core is a little darker low down.
-	const float buried = lerp(1.0, exp(-0.7 * tauAbove), 0.6);
-	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming * skyOpen * buried;
+	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming * skyOpen;
 	// Fog in the sun is brighter than fog in the shade, but not without end: what it scatters of the sun and moons
 	// levels off at SunLimit times its sky light (at the limit's own value it has reached half of that), keeping
 	// its colour. So sunlit fog reads as lit fog, not as paint.
 	if (GroundFog::SunLimit > 0.0) {
 		static const float3 luma = float3(0.2126, 0.7152, 0.0722);
-		// Toward the sun the limit gives way: fog between the eye and a low sun glows, as it does.
-		const float toward = saturate(dot(dir, physSky.sunDir));
-		const float cap = GroundFog::SunLimit * (1.0 + GroundFog::SunGlow * toward * toward * toward * toward) * dot(skyLight, luma);
+		const float cap = GroundFog::SunLimit * dot(skyLight, luma);
 		light *= cap / max(cap + dot(light, luma), 1e-6);
 	}
 	light += skyLight;

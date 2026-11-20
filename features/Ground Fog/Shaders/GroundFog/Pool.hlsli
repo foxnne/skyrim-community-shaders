@@ -28,6 +28,15 @@
 // How much fog there is comes from the simulation (FogSim.z), read at two places along the stretch of the ray that
 // is inside the layer. Nothing depends on the screen or the view except which ray is integrated.
 //
+// Grass, plants and other thin things stand in the fog the way they do in Iwillbewarlock's GroundFog (GPL-3.0,
+// github.com/Iwillbewarlock/GroundFog, RaymarchShaders.h MarchPixel at 0e519e7): the fog is a function of the world
+// alone, over a floor that what stands on it does not move, and each pixel's ray ends at the pixel's own depth. A
+// blade is then only something the fog lies around: its foot is buried, its tip clear, and between blades the
+// ground shows the full layer. So the tops of plants never enter the floor map (GroundFogPixel.cs.hlsl, the splat),
+// and a thin thing takes the whole volume in front of it (thin, PoolPlantFade) where a broad face such as a wall
+// takes less (PoolStandingFade). The light ramp from the floor to the top of the layer is that mod's too (its march
+// lights fog at 0.9 of the fog colour at the ground and 1.05 at the layer's top).
+//
 // Include after GroundFog/GroundFog.hlsli.
 
 // A debug view of the pool that needs no setting, for harnesses that can only change #defines: 1 floor map,
@@ -90,6 +99,11 @@ namespace GroundFog
 	// Something standing in the fog (a wall, a trunk, a leg) gets the fog in front of its foot only up to this share
 	// of the layer's height, fading from the first value to the second: it never looks coated.
 	static const float2 PoolStandingFade = float2(0.2, 0.65);
+	// A thin thing (a blade, a stem, a leaf, a pole) takes the fog in front of it nearly to the layer's top: it stands
+	// in the volume, foot buried and tip clear.
+	static const float2 PoolPlantFade = float2(0.75, 1.05);
+	// The light inside the layer: this share of it at the floor, rising to the second value at the top.
+	static const float2 PoolLightRamp = float2(0.9, 1.05);
 	static const float PoolVoxel = 21.0;
 
 	float Hash3(int3 cell)
@@ -168,6 +182,7 @@ namespace GroundFog
 		// The lumpy top, for shading: 0.5 and 0.5 where there is nothing to say.
 		float crest;    // 0 in a fold between billows, 1 on top of one
 		float sunSide;  // 0 on the side of a billow away from the light, 1 on the side toward it
+		float level;    // height of the point it is lit at, as a share of the layer's height there (0.5: nothing to say)
 	};
 
 	// Texels of the floor map this far above the lowest beside them belong to another level (game units).
@@ -201,7 +216,8 @@ namespace GroundFog
 	// lightSun, lightSunWeight: where the volume is taken (near the camera), how much of the sun reaches the fog the
 	// pixel sees (the sun map at each place, weighted by what that place adds), and how much that should stand for
 	// the pixel's own sun lookup. lightSky: how much of the sky's light reaches it (less low down in thick fog).
-	Pool EvaluatePool(float3 position, float3 dir, float tEnd, float camZ, float3 normal, float tNear, float3 lightDir, inout uint taps,
+	// thin: how much what the pixel shows is a thin thing (GroundFogPixel.cs.hlsl, ThinThing).
+	Pool EvaluatePool(float3 position, float3 dir, float tEnd, float camZ, float3 normal, float tNear, float thin, float3 lightDir, inout uint taps,
 		out float lightSun, out float lightSunWeight, out float lightSky)
 	{
 		lightSun = 1.0;
@@ -212,7 +228,7 @@ namespace GroundFog
 		pool.speed = 0.0;
 		pool.floorZ = FloorEmpty;
 		pool.range = pool.known = pool.ground = pool.over = pool.within = 0.0;
-		pool.crest = pool.sunSide = 0.5;
+		pool.crest = pool.sunSide = pool.level = 0.5;
 
 		const float2 uv = SimUv(position.xy);
 		const float range = (1.0 - smoothstep(0.5 * PoolEnd, PoolEnd, tEnd)) * SimInside(uv) * smoothstep(PoolNearStart, PoolNearFull, tEnd);
@@ -339,7 +355,8 @@ namespace GroundFog
 		// less.
 		const float standing = dir.z < 0.0 && riseFloor >= PoolMinSlope ? 1.0 : 0.0;
 		rise = lerp(max(max(riseFloor, -dir.z), PoolMinSlope), rise, ground);
-		const float certain = lerp(standing * (1.0 - smoothstep(PoolStandingFade.x, PoolStandingFade.y, start / max(limit, 1.0))), 1.0, ground);
+		const float2 fade = lerp(PoolStandingFade, PoolPlantFade, thin);
+		const float certain = lerp(standing * (1.0 - smoothstep(fade.x, fade.y, start / max(limit, 1.0))), 1.0, ground);
 		if (certain <= 0.0)
 			return pool;
 
@@ -381,7 +398,7 @@ namespace GroundFog
 		// counted of it stops at the cut (limit). The lumps are shape only: a fold holds the same fog as a billow,
 		// lower and denser (the column's fog is proportional to the scale, so the density is divided by it), and the
 		// shape averages 1.
-		const float shape = lerp(0.8, 1.2, billow);
+		const float shape = lerp(0.7, 1.3, billow);
 		// The amount sets the top as well as the density: a thin wisp lies a hand high and is see-through, a pool's
 		// core stands to the full height and is dense.
 		const float breath = 1.0 + (Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) - 1.0) * PoolBreathShare;
@@ -473,6 +490,7 @@ namespace GroundFog
 		pool.t = atT;
 		pool.z = atZ;
 		pool.above = above;
+		pool.level = saturate((atZ - (z - start)) / max(top, 1.0));
 
 		// THE HEIGHT RULE, last: see PoolHardTop. The height of this surface over its floor: for what stands in the
 		// fog, over the lowest floor around it and toward the camera; for ground, over the floor it lies on (the

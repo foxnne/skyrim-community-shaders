@@ -567,6 +567,20 @@ namespace GroundFog
 		return support;
 	}
 
+	// How much the pixel shows a thin thing standing up: a blade of grass, a stem, a leaf, a twig, a pole. Its
+	// neighbours a few pixels to both sides lie well behind it (the gap between blades, the ground beyond a stem);
+	// beside a wall, a trunk or the ground they do not. Two loads.
+	float ThinThing(uint2 scenePixel, float viewDepth, uint2 activeMain)
+	{
+		static const int Reach = 3;
+		const int2 p = int2(scenePixel);
+		const int2 last = int2(activeMain) - 1;
+		const float left = SharedData::GetScreenDepth(SceneDepth[clamp(p - int2(Reach, 0), 0, last)]);
+		const float right = SharedData::GetScreenDepth(SceneDepth[clamp(p + int2(Reach, 0), 0, last)]);
+		const float gap = max(28.0, 0.04 * viewDepth);
+		return smoothstep(gap, 2.0 * gap, min(left, right) - viewDepth);
+	}
+
 	float3 TapColor(uint taps)
 	{
 		// Blue: up to 4 reads, green: 34, yellow: 64, red: 94 and more.
@@ -645,7 +659,7 @@ namespace GroundFog
 	pool.speed = 0.0;
 	pool.floorZ = GroundFog::FloorEmpty;
 	pool.range = pool.known = pool.ground = pool.over = pool.within = 0.0;
-	pool.crest = pool.sunSide = 0.5;
+	pool.crest = pool.sunSide = pool.level = 0.5;
 	// How much of the fog this pixel sees is the pool, for what only the pool's shading takes.
 	float poolShare = 0.0;
 	// From the pool's volume: the sun its fog sees (and how much that stands for the sun map lookup), its sky light.
@@ -654,7 +668,21 @@ namespace GroundFog
 		normal = GroundFog::SurfaceNormal(scenePixel, depth, position, mainSize, activeMain);
 		hasNormal = true;
 		taps += 4u;
-		pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, SharedData::DirLightDirection.xyz, taps, poolSun, poolSunWeight, poolSky);
+		const float thin = GroundFog::ThinThing(scenePixel, viewFar, activeMain);
+		taps += 2u;
+		pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, thin, SharedData::DirLightDirection.xyz, taps, poolSun, poolSunWeight, poolSky);
+		// The tops of grass and plants are not the floor (see Pool.hlsli): an up-facing surface a hand to a meter
+		// above the terrain height map is taken for one only if it is not thin and goes on around the pixel as a
+		// plane (a rock slab, a step, a boardwalk). Dense grass seen from above makes a ragged surface that fails
+		// that, so the floor stays on the ground between the blades or, where none is seen, on the height map.
+		if (pool.floorZ < GroundFog::FloorUnknown && GroundFog::MapCoverage(GroundFog::MapUv(position.xy)) > 0.5) {
+			const GroundFog::GroundSample mapped = GroundFog::GroundAt(position.xy, GroundFog::StepMin);
+			taps += mapped.reads;
+			const float aboveMap = pool.floorZ - mapped.z;
+			if (aboveMap > GroundFog::PlantFloor.x && aboveMap < GroundFog::PlantFloor.y &&
+				(thin > 0.5 || GroundFog::FloorSupport(position, normal, mainSize, activeMain, taps) < 0.5))
+				pool.floorZ = GroundFog::FloorEmpty;
+		}
 		if (pool.floorZ < GroundFog::FloorUnknown) {
 			uint2 splatSize;
 			FloorSplat.GetDimensions(splatSize.x, splatSize.y);
@@ -1014,6 +1042,9 @@ namespace GroundFog
 	// The pool's lumpy top: the side of a billow toward the light is a little brighter, the side away from it a
 	// little darker. (Both are about 0.5 on average: shading only, no light is lost.)
 	light *= lerp(1.0, lerp(0.8, 1.2, pool.sunSide), poolShare);
+	// Darker low in the layer, among the stems, brighter at its top (see Pool.hlsli).
+	const float poolRamp = lerp(1.0, lerp(GroundFog::PoolLightRamp.x, GroundFog::PoolLightRamp.y, pool.level), poolShare);
+	light *= poolRamp;
 	light *= GroundFog::SunScale;
 	// Sky light reaches fog in the shadow of terrain and objects too, so it takes no direct visibility.
 	// The sky's light on the fog is what the open sky gives, less what stands over the fog: under a canopy or
@@ -1050,7 +1081,7 @@ namespace GroundFog
 	}
 	// And the folds between its billows see less of the sky than their tops.
 	const float folds = lerp(1.0, lerp(0.8, 1.2, pool.crest), poolShare);
-	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming * skyOpen * folds * lerp(1.0, poolSky, poolShare);
+	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming * skyOpen * folds * lerp(1.0, poolSky, poolShare) * poolRamp;
 	// Fog in the sun is brighter than fog in the shade, but not without end: what it scatters of the sun and moons
 	// levels off at SunLimit times its sky light (at the limit's own value it has reached half of that), keeping
 	// its colour. So sunlit fog reads as lit fog, not as paint.

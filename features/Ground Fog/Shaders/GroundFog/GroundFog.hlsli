@@ -142,6 +142,11 @@ namespace GroundFog
 	static const float SheetShade = 0.4;
 	static const float BridgeToValley = 0.6;
 	static const float PoolRestMean = 0.5;
+	//
+	// An up-facing surface this far above the terrain height map (from x to y, game units: 0.1 m to 1 m) may be the
+	// top of grass or plants; it goes into the pool's floor map only if it is not thin and is a plane around the
+	// pixel (GroundFogPixel.cs.hlsl).
+	static const float2 PlantFloor = float2(7.0, 70.0);
 
 	struct Cell
 	{

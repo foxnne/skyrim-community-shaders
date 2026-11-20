@@ -119,7 +119,7 @@ static const float RaisedEnd = 60.0;
 // Level open ground holds little (RestFlat of the even amount: a few thin wisps), and the fog gathers where the
 // floor lies lower than the floor around it: the mean rise of the floor 2, 4 and 8 m out (RestDepth of it gives the
 // whole even amount more), and of the terrain map about 6 m out (RestDepthMap). A rise holds none.
-static const float RestFlat = 0.12;
+static const float RestFlat = 0.03;
 static const float RestDepth = 25.0;
 static const float RestDepthMap = 50.0;
 static const float RestMax = 1.8;
@@ -127,6 +127,21 @@ static const float FloorDropSlack = 1.0;
 static const float FloorRiseSlack = 8.0;
 static const float MaxSpeed = 1500.0;
 static const float SwirlSize = 140.0;  // game units per cell of the swirl noise (2 m)
+// A wake lives on after what made it has stopped: the fog's own motion (against the air) decays over
+// kSimVelocityTime / WakeKeep seconds (2.5 s / 0.4: about 6 s), not the 2.5 s the constant buffer's VelocityKeep
+// stands for. The sim's own time step decides it; nothing here knows where the camera or the player is.
+static const float WakeKeep = 0.4;
+// Vorticity confinement (Fedkiw, Stam and Jensen 2001): the eddies a wake sheds are numerically smeared out by the
+// semi-Lagrangian carry within a second; this gives back what the smearing takes, in proportion to how much the
+// fog is moving against the air, so a wake keeps curling while it dies down and still fog at rest gets none.
+// Strength per texel; game units per second at which it is at full strength.
+static const float Confinement = 0.6;
+static const float ConfinementSpeed = 60.0;
+// Where the fog rests: in dips and low spots, over water and in shade; level open ground and slopes hold none or
+// very little. The Pooling setting cannot go below MinPooling (at 0 the pool rested everywhere). Level ground
+// keeps RestFlat of the even amount (a few faint wisps at most); shade adds up to RestShade of it.
+static const float MinPooling = 0.85;
+static const float RestShade = 0.35;
 
 float GustPsi(float2 p)
 {
@@ -198,6 +213,21 @@ float GustPsi(float2 p)
 		const float4 d = GroundFog::FogSim.Load(int3(down, 0));
 		const float4 u = GroundFog::FogSim.Load(int3(up, 0));
 		const float2 carried = GroundFog::FogSim.Load(int3(before, 0)).xy;
+		// The curl of the fog's velocity at the four neighbours (each from its own four neighbours), for the
+		// confinement below. Sixteen loads, most of them of texels the neighbours read too.
+		float4 curls = 0.0;
+		{
+			const int2 offsets[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
+			[unroll] for (uint k = 0u; k < 4u; ++k)
+			{
+				const int2 c = clamp(before + offsets[k], 0, last);
+				const float2 cl = GroundFog::FogSim.Load(int3(clamp(c - int2(1, 0), 0, last), 0)).xy;
+				const float2 cr = GroundFog::FogSim.Load(int3(clamp(c + int2(1, 0), 0, last), 0)).xy;
+				const float2 cd = GroundFog::FogSim.Load(int3(clamp(c - int2(0, 1), 0, last), 0)).xy;
+				const float2 cu = GroundFog::FogSim.Load(int3(clamp(c + int2(0, 1), 0, last), 0)).xy;
+				curls[k] = ((cr.y - cl.y) - (cu.x - cd.x)) / (2.0 * TexelSize);
+			}
+		}
 		edge = saturate(length(float2(r.w - l.w, u.w - d.w)) * 2.0);
 
 		// 1. Carry.
@@ -215,7 +245,16 @@ float GustPsi(float2 p)
 		gain *= clamp(1.0 - divergence * DeltaTime, 0.5, 1.5);
 
 		// 3. Wind and gusts, and from thick to thin.
-		velocity = drift + (velocity - drift) * VelocityKeep;
+		velocity = drift + (velocity - drift) * pow(saturate(VelocityKeep), WakeKeep);
+		// Vorticity confinement: push along N x curl, N toward stronger swirl, so the eddies keep their cores.
+		{
+			const float curl = ((r.y - l.y) - (u.x - d.x)) / (2.0 * TexelSize);
+			const float2 gradient = float2(abs(curls.y) - abs(curls.x), abs(curls.w) - abs(curls.z)) / (2.0 * TexelSize);
+			const float size = length(gradient);
+			const float stirred = saturate(length(velocity - drift) / ConfinementSpeed);
+			if (size > 1e-6 && stirred > 0.0)
+				velocity += Confinement * stirred * TexelSize * curl * float2(gradient.y, -gradient.x) / size * DeltaTime;
+		}
 		// Only what is off its resting amount pushes: fog at rest is in balance, patches and all.
 		velocity -= Spread * float2((r.z - r.w) - (l.z - l.w), (u.z - u.w) - (d.z - d.w)) / (2.0 * TexelSize) * DeltaTime;
 
@@ -354,7 +393,9 @@ float GustPsi(float2 p)
 	// a gap stays a patch).
 	// Water is level, and fog lies on it.
 	lowness = lerp(lowness, max(lowness, 1.0), water);
-	const float place = open * (1.0 - raised) * lerp(1.0, lowness, Pooling);
+	// Shade keeps a little on level ground too (under trees, beside walls), never on a rise.
+	lowness += RestShade * shaded * smoothstep(0.0, RestFlat, lowness);
+	const float place = open * (1.0 - raised) * lerp(1.0, lowness, max(Pooling, MinPooling));
 	// The shapes change by themselves only slowly (a fifth of the rate they had: over a few minutes).
 	rest = GroundFog::RestPattern(xyAbs, TexelSize, place, 0.2 * SwirlTime);
 	float amount = max(rest + delta, 0.0) * gain;

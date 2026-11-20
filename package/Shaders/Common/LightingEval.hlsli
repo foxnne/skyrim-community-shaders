@@ -176,6 +176,23 @@ void EvaluateLighting(DirectContext context, MaterialProperties material, float3
 		lightingOutput.diffuse = (diffuseCosines.x * diffuseLightColor + diffuseCosines.y * SharedData::lodTreeLightingSettings.Transmission * softLightColor) * Color::BRDFScale;
 	}
 #	endif
+#	if defined(NEAR_TREE_LEAF_LIGHTING)
+	// Leaves of loaded trees: thin, so the light on the far side comes through. Their normal faces the viewer, so
+	// NdotL < 0 is a leaf seen against its light. The lit side wraps a little and keeps its full strength facing the
+	// light (the wrap is not normalised, unlike the LOD crowns, which have their own brightness). The crossing light is
+	// tinted by the leaf colour, a little deeper than the lit side, and takes the soft shadow; for the sun, main adds
+	// the sun shadow and the contact shadow.
+	[branch] if (NearTreeLeaf)
+	{
+		const float wrap = NearTreeLeafParams.y;
+		const float2 leafCosines = saturate(float2(NdotL + wrap, wrap - NdotL) / (1.0 + wrap));
+		lightingOutput.diffuse = leafCosines.x * diffuseLightColor * Color::BRDFScale;
+		const float3 leafColor = material.BaseColor;
+		const float leafPeak = max(max(leafColor.r, leafColor.g), max(leafColor.b, 1e-4));
+		const float3 crossingTint = leafColor * lerp(1.0, leafColor / leafPeak, NEAR_TREE_LEAF_TRANSMISSION_SATURATION);
+		lightingOutput.transmission = leafCosines.y * NearTreeLeafParams.x * softLightColor * crossingTint * Color::BRDFScale;
+	}
+#	endif
 #	if defined(HAIR) && defined(HAIR_BACKLIGHTING)
 	HairBacklighting::AddDirectLight(lightingOutput, context, tbnTr[2], material.BaseColor);
 #	endif

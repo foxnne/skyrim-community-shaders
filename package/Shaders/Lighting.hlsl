@@ -58,6 +58,22 @@
 #	define LOD_TREE_CROWN_DATA
 #endif
 
+// The leaves of loaded trees have no define of their own either: Tree Wind marks the draws of their leaf shapes with
+// ExtraFlags::NearTreeLeaf, and they are lit as thin leaves (nearTreeLeafSettings): light comes through from the far
+// side and wraps a little, and each tree gets the tint of its LOD crown. Leaf shapes are tree-animated or alpha
+// tested; PBR leaves keep their own subsurface.
+#if defined(PSHADER) && defined(TREE_WIND) && !defined(TRUE_PBR) && !defined(LOD) && !defined(LODLANDSCAPE) && !defined(LANDSCAPE) && !defined(SKIN) && !defined(EYE) && !defined(HAIR) && (defined(TREE_ANIM) || defined(DO_ALPHA_TEST))
+#	define NEAR_TREE_LEAF_LIGHTING
+// A first look without the DLL side: uncomment to light every tree-animated shape with the values below (no
+// per-tree tint, which needs the DLL). With the DLL the flag and the settings decide, and this stays off.
+//#	define NEAR_TREE_LEAF_PREVIEW
+#	define NEAR_TREE_LEAF_PREVIEW_TRANSMISSION 0.5
+#	define NEAR_TREE_LEAF_PREVIEW_WRAP 0.3
+#	define NEAR_TREE_LEAF_PREVIEW_BRIGHTNESS 1.0
+// How far the light that crosses a leaf is pulled toward the leaf's own hue, 0 = tinted like the lit side
+#	define NEAR_TREE_LEAF_TRANSMISSION_SATURATION 0.5
+#endif
+
 #if defined(SNOW_COVER)
 #	if defined(TRUE_PBR)
 #		define GLINT
@@ -1166,6 +1182,23 @@ bool UseSkylightingShadowVisibility()
 static float LODTreeWrapScale = 1.0;
 #	endif
 
+#	if defined(NEAR_TREE_LEAF_LIGHTING)
+// The draw is a leaf shape of a loaded tree, and its settings: transmission, wrap, variation, brightness. Read by
+// EvaluateLighting. Set in main.
+static bool NearTreeLeaf = false;
+static float4 NearTreeLeafParams = float4(0.0, 0.0, 0.0, 1.0);
+#	endif
+
+#	if defined(LOD_TREE_LIGHTING) || defined(NEAR_TREE_LEAF_LIGHTING)
+// Per-tree tint: a_seeds are the tree's brightness and hue seeds, 0-1. Neighbouring trees differ a little in
+// brightness and lean toward yellow or blue-green. One formula for LOD crowns and loaded trees.
+float3 GetTreeTint(float2 a_seeds, float a_variation)
+{
+	const float hue = (a_seeds.y * 2.0 - 1.0) * a_variation;
+	return (1.0 + (a_seeds.x * 2.0 - 1.0) * a_variation) * float3(1.0 + hue, 1.0, 1.0 - hue);
+}
+#	endif
+
 #	include "Common/LightingEval.hlsli"
 
 #	if defined(NIGHT_EYE)
@@ -1222,6 +1255,20 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		const float low = 1.0 - lodTreeHeight;
 		lodTreeOcclusion = SharedData::lodTreeLightingSettings.CrownOcclusion * saturate(0.75 * inner * (1.0 - lodTreeHeight * lodTreeHeight) + 0.25 * low * low);
 	}
+#	endif
+#	if defined(NEAR_TREE_LEAF_LIGHTING)
+#		if defined(NEAR_TREE_LEAF_PREVIEW)
+#			if defined(TREE_ANIM)
+	NearTreeLeaf = true;
+#			else
+	NearTreeLeaf = false;
+#			endif
+	NearTreeLeafParams = float4(NEAR_TREE_LEAF_PREVIEW_TRANSMISSION, NEAR_TREE_LEAF_PREVIEW_WRAP, 0.0, NEAR_TREE_LEAF_PREVIEW_BRIGHTNESS);
+#		else
+	NearTreeLeaf = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::NearTreeLeaf) != 0;
+	NearTreeLeafParams = float4(SharedData::nearTreeLeafSettings.Transmission, SharedData::nearTreeLeafSettings.Wrap,
+		SharedData::nearTreeLeafSettings.Variation, SharedData::nearTreeLeafSettings.Brightness);
+#		endif
 #	endif
 
 	float nearFactor = smoothstep(4096.0 * 2.5, 0.0, viewPosition.z);
@@ -1839,6 +1886,16 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		const float variation = SharedData::lodTreeLightingSettings.Variation;
 		const float hue = (frac(lodTreeRandom * 7.31) * 2.0 - 1.0) * variation;
 		baseColor.xyz *= (1.0 + (lodTreeRandom * 2.0 - 1.0) * variation) * float3(1.0 + hue, 1.0, 1.0 - hue);
+	}
+#	endif
+
+#	if defined(NEAR_TREE_LEAF_LIGHTING)
+	// The tree's own tint, from the code Tree Wind gives each leaf draw, and the brightness setting
+	[branch] if (NearTreeLeaf)
+	{
+		const uint tintCode = min((Permutation::ExtraFeatureDescriptor >> Permutation::ExtraFeatureFlags::NearTreeTintShift) & Permutation::ExtraFeatureFlags::NearTreeTintMask, 120u);
+		const float2 tintSeeds = float2(tintCode / 11u, tintCode % 11u) / 10.0;
+		baseColor.xyz *= NearTreeLeafParams.w * GetTreeTint(tintSeeds, NearTreeLeafParams.z);
 	}
 #	endif
 
@@ -3084,6 +3141,12 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	}
 #	endif
 
+#	if defined(NEAR_TREE_LEAF_LIGHTING)
+	// The sun shadow without the contact shadows and the material terms that follow: what shades the light that
+	// crosses a leaf, so the leaves inside a crown and under other trees stay dark
+	const float nearTreeLeafSunShadow = dirDetailedShadow;
+#	endif
+
 #	if defined(SCREEN_SPACE_SHADOWS) && defined(DEFERRED)
 	if (!SharedData::InInterior) {
 #		if defined(TRUE_PBR)
@@ -3224,6 +3287,12 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	endif
 
 	EvaluateLighting(dirLightContext, material, tbnTr, uvOriginal, uvOriginal_ddx, uvOriginal_ddy, dirLightOutput);
+#	if defined(NEAR_TREE_LEAF_LIGHTING)
+	// EvaluateLighting shades the crossing light with the soft shadow, which can be 1 where the shadow map is not
+	// (volumetric shadows in the deferred path); it never gets more light than the sun shadow lets through
+	if (NearTreeLeaf)
+		dirLightOutput.transmission *= min(1.0, nearTreeLeafSunShadow / max(dirSoftShadow, 1e-4));
+#	endif
 	dirLightOutput.transmission *= dirTransmissionContactShadow;
 #	if defined(WETNESS_EFFECTS)
 	if (waterRoughnessSpecular < 1)

@@ -808,6 +808,15 @@ namespace SharedData
 		float3 pad0;
 	};
 
+	// Tree Wind: lighting of the leaves of loaded trees (Permutation::ExtraFlags::NearTreeLeaf)
+	struct NearTreeLeafSettings
+	{
+		float Transmission;  // share of the light on the far side of a leaf that comes through it
+		float Wrap;          // diffuse wrap, 0 = plain Lambert
+		float Variation;     // per-tree brightness and hue variation
+		float Brightness;    // base colour multiplier
+	};
+
 	// Ground Cover; mirrors GroundCover::PerFrame
 	struct GroundCoverSettings
 	{
@@ -880,6 +889,7 @@ namespace SharedData
 		ViewAtmosphereSettings viewAtmosphereSettings;
 		LODTreeLightingSettings lodTreeLightingSettings;
 		GroundCoverSettings groundCoverSettings;
+		NearTreeLeafSettings nearTreeLeafSettings;
 	};
 
 	Texture2D<float4> DepthTexture : register(t17);

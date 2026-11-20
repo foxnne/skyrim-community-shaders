@@ -103,6 +103,8 @@ namespace Permutation
 		static const uint LODTreeCrown = (1 << 24);
 		// Placed rock that Ground Cover may grow on; see GroundCover.hlsli.
 		static const uint GroundCover = (1 << 25);
+		// Leaf shape of a loaded tree; see NEAR_TREE_LEAF_LIGHTING in Lighting.hlsl.
+		static const uint NearTreeLeaf = (1 << 26);
 	}
 
 	namespace ExtraFeatureFlags
@@ -115,6 +117,10 @@ namespace Permutation
 		static const int THLand5HasDisplacement = (1 << 5);
 		static const int THLandHasDisplacement = (1 << 9);
 		static const int TVMeshVariation = (1 << 10);
+		// Tint code of the loaded tree being drawn (ExtraFlags::NearTreeLeaf draws): 7 bits, brightness level * 11 +
+		// hue level, 11 levels each. The same code a tree's LOD crown carries, so both get the same tint.
+		static const uint NearTreeTintShift = 16;
+		static const uint NearTreeTintMask = 0x7F;
 	}
 
 	cbuffer PerShader : register(b4)

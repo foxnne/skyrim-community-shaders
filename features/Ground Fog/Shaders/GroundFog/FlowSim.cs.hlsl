@@ -142,8 +142,11 @@ float GustPsi(float2 p)
 	float rest = RestUniform;
 	float water = 0.0;
 	float groundZ = FrameBuffer::CameraPosAdjust.z - 120.0;
+	// Where the sun map says the sun does not reach (trees, buildings, as well as terrain), the fog is kept as in
+	// terrain shadow; in the sun it burns off. The map moves with the leaves; the amount follows it over SettleTime.
+	const float shaded = had ? 1.0 - saturate(GroundFog::FogSlope.Load(int3(before, 0)).w) : 0.0;
 	if (SimFlags & 1u)
-		rest = GroundFog::RestingAmountAt(xy, TexelSize, GroundFog::BurnSunlitNear, water, groundZ);
+		rest = GroundFog::RestingAmountAt(xy, TexelSize, GroundFog::BurnSunlitNear, shaded, water, groundZ);
 	const float open = rest;
 
 	// What the air does here with nothing in it: the wind's drift, and gusts. The gusts are the curl of a noise

@@ -54,6 +54,7 @@ struct GroundFog : Feature
 		float SelfShadow = 1.0f;
 		float SunDiffusion = 0.3f;  // share of the sun and moon light the fog sends out evenly to all sides
 		float SunLimit = 1.0f;      // sun and moon light in the fog levels off at this many times its sky light; 0 = no limit
+		float CanopyShade = 1.0f;   // how much canopy and walls over the fog dim the sky light it takes
 		float GroundFill = 0.25f;  // share of Thickness
 		// Pixel pass.
 		float SurfaceBlendDistance = 3.0f;  // end of the view ray over which the ground becomes the visible surface
@@ -63,7 +64,7 @@ struct GroundFog : Feature
 		// The near volume: a taller, softer body of fog around the camera.
 		// Up to 1 m thick it is the pool: drawn on what the screen shows, from the simulation. Thicker, it is the
 		// tall volume of the first versions, marched over the height map.
-		float NearDensity = 1.6f;     // extinction at the ground per meter, at Amount 1; 0 = none
+		float NearDensity = 1.2f;     // extinction at the ground per meter, at Amount 1; 0 = none
 		float NearThickness = 0.45f;  // height at which it has thinned to nothing
 		float NearFalloff = 1.5f;    // how quickly it thins with height
 		float NearDistance = 40.0f;  // meters from the camera; fades out over the second half
@@ -74,7 +75,7 @@ struct GroundFog : Feature
 		float BurnOffStrength = 1.0f;   // 0 = the time of day and the sun change nothing
 		float ShadowRetention = 0.45f;  // share of the morning amount that ground in terrain shadow keeps by day
 		float MorningAmount = 1.4f;
-		float MiddayAmount = 0.2f;
+		float MiddayAmount = 0.1f;
 		float EveningAmount = 0.8f;
 		// Reactive fog: things moving through the fog around the camera push it aside.
 		bool Reactive = true;
@@ -169,7 +170,7 @@ struct GroundFog : Feature
 		float SunLimit;
 		float Wispiness;
 		float InvWispScale;
-		float WispPad;
+		float CanopyShade;
 	};
 	static_assert(sizeof(VolumeData) == 320);
 	static_assert(offsetof(VolumeData, MapZ) == 16);
@@ -312,6 +313,8 @@ struct GroundFog : Feature
 	static constexpr uint32_t kFloorSlopeSlot = 11;
 	static constexpr uint32_t kFloorSeenSlot = 12;
 	static constexpr uint32_t kLiftSlot = 13;
+	/** The Skylighting probes in GroundFog/GroundFogPixel.cs.hlsl, as in the atmosphere volume. */
+	static constexpr uint32_t kSkylightingSlot = 50;
 	static constexpr uint32_t kFlowConstantSlot = 3;
 	static constexpr uint32_t kCompositeFogSlot = 42;
 	static constexpr uint32_t kCompositeDepthSlot = 43;

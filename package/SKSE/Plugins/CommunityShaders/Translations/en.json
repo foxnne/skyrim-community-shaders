@@ -1727,6 +1727,8 @@
     "feature.ground_fog.burn_off": "Time of Day and Sun",
     "feature.ground_fog.burn_off_strength": "Burn-off Strength",
     "feature.ground_fog.burn_off_strength_tooltip": "How much the time of day and the sun change the amount of fog. 0 turns this off: the same fog at every hour, sun or shade.",
+    "feature.ground_fog.canopy_shade": "Shade under Cover",
+    "feature.ground_fog.canopy_shade_tooltip": "How much trees, walls and roofs over the fog dim the sky light it takes, so fog under a forest canopy is a dim grey like the ground there and not a white sheet. From the Skylighting probes where that feature runs, and from how much of the ground around is in the sun's shadow. 0 lights all fog by the open sky.",
     "feature.ground_fog.cloud_darkening": "Darkening under Cloud",
     "feature.ground_fog.cloud_darkening_tooltip": "How much the cloud over the fog dims the sky light it takes, so it darkens under overcast and storm instead of keeping the brightness of the average sky. 0 lights it by the whole sky everywhere.",
     "feature.ground_fog.debug_daylight": "daylight",

@@ -93,7 +93,7 @@ namespace GroundFog
 		float SunLimit;        // the sun and moon light the fog scatters levels off at this many times its sky light; 0 = no limit
 		float Wispiness;       // 0: the resting fog is even patches; 1: separate wisps with clear air between them
 		float InvWispScale;    // per game unit
-		float WispPad;
+		float CanopyShade;     // how much what stands over the fog (canopy, walls) dims the sky light it takes; 0 = open sky everywhere
 	};
 
 	Texture2D<float> HeightMap : register(t6);
@@ -447,20 +447,23 @@ namespace GroundFog
 	// What rests at a place in the pool, for a budget: how much fog the place is due by every rule (time of day,
 	// shade, water, how low it lies), 1 being a full morning on a level hollow floor.
 	// At Wispiness 0: the budget in the even patches of DensityModifier, thinner where there is less.
-	// At 1: presence over coverage. The budget decides how much of the ground has fog, not how thin it is: the noise
-	// is cut at a threshold that falls as the budget rises, so a small budget leaves a few separate patches and a
-	// large one nearly joins them up, and inside a patch the fog is about as dense wherever it lies (WispPeak, a
-	// little more or less with the budget). The cut is narrow, so a patch has an edge and clear air beside it.
-	// The simulation settles to this and carries only what departs from it, so the patches stay sharp while they
-	// travel.
-	static const float WispPeak = 1.25;
+	// At 1: presence over coverage. The budget decides how much of the ground has fog more than how thin it is: the
+	// noise is cut at a threshold that falls as the budget rises, so a small budget leaves a few separate wisps and
+	// a large one nearly joins them up. Above the threshold the fog thickens gradually (WispFeather of noise, about
+	// two of its standard deviations): a long thin veil at the rim, through which the ground shows, and a dense core
+	// only in the middle of a large wisp. So a patch has no plateau and no edge like a drift of snow.
+	// The simulation settles to this and carries only what departs from it, so the wisps stay sharp while they
+	// travel. The finest structure is added where the pool is drawn (Pool.hlsli), below the simulation's texels.
+	static const float WispPeak = 2.2;
+	static const float WispFeather = 0.34;
 	float RestPattern(float2 xyAbs, float reach, float budget)
 	{
 		const float even = DensityModifier(xyAbs, reach) * budget;
 		if (Wispiness <= 0.0)
 			return even;
-		const float threshold = lerp(0.72, 0.30, saturate(budget / 1.2));
-		const float wisp = WispPeak * sqrt(clamp(budget, 0.5, 1.6)) * smoothstep(threshold, threshold + 0.12, WispNoise(xyAbs)) * smoothstep(0.0, 0.15, budget);
+		const float threshold = lerp(0.70, 0.26, saturate(budget / 1.2));
+		const float inside = saturate((WispNoise(xyAbs) - threshold) / WispFeather);
+		const float wisp = WispPeak * sqrt(clamp(budget, 0.5, 1.6)) * inside * sqrt(inside) * smoothstep(0.0, 0.15, budget);
 		return lerp(even, wisp, Wispiness);
 	}
 
@@ -581,7 +584,8 @@ namespace GroundFog
 
 	// The whole rule at a camera-relative xy, with its own reads (up to five). water: how much of the place is water.
 	// groundZ: absolute z of the mapped ground there.
-	float RestingAmountAt(float2 xy, float reach, float sunlit, out float water, out float groundZ)
+	// shade: how much anything else than the terrain keeps the sun off the place (trees, buildings), 0 to 1.
+	float RestingAmountAt(float2 xy, float reach, float sunlit, float shade, out float water, out float groundZ)
 	{
 		water = 0.0;
 		groundZ = FrameBuffer::CameraPosAdjust.z;
@@ -593,7 +597,7 @@ namespace GroundFog
 		water = ground.water;
 		groundZ = ground.z;
 		uint taps = 0u;
-		float rest = RestingAmount(coverage, ground, TerrainShade(xyAbs, ground.z + 70.0, taps), sunlit, xyAbs, reach);
+		float rest = RestingAmount(coverage, ground, max(TerrainShade(xyAbs, ground.z + 70.0, taps), shade), sunlit, xyAbs, reach);
 		if (rest > 0.0 && BasinStrength > 0.0)
 			rest *= Basin(GroundAround(xy, BasinRadius), ground.terrain);
 		return rest;

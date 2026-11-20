@@ -5,6 +5,7 @@
 
 #include "Features/CloudShadows.h"
 #include "Features/ExponentialHeightFog.h"
+#include "Features/Skylighting.h"
 #include "Features/TerrainShadows.h"
 #include "Features/ViewAtmosphere.h"
 #include "Globals.h"
@@ -44,6 +45,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	SelfShadow,
 	SunDiffusion,
 	SunLimit,
+	CanopyShade,
 	GroundFill,
 	SurfaceBlendDistance,
 	SurfaceMaxHeight,
@@ -823,6 +825,7 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 	a_data.SelfShadow = settings.SelfShadow;
 	a_data.SunWrap = settings.SunDiffusion;
 	a_data.SunLimit = settings.SunLimit;
+	a_data.CanopyShade = settings.CanopyShade;
 	a_data.Wispiness = slab ? 0.0f : settings.Wispiness;
 	a_data.InvWispScale = 1.0f / (std::clamp(settings.WispScale, kMinWispScale, kMaxWispScale) * unitsPerMeter);
 	a_data.Flags = 1u | (settings.HalfResolution ? 2u : 0u);
@@ -941,6 +944,9 @@ bool GroundFog::EnsureShaders()
 			defines.emplace_back("TERRAIN_SHADOWS", "");
 		if (globals::features::cloudShadows.loaded)
 			defines.emplace_back("CLOUD_SHADOWS", "");
+		// The simulation does not use it; an unused define changes nothing there.
+		if (globals::features::skylighting.loaded)
+			defines.emplace_back("SKYLIGHTING", "");
 		pixelCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\GroundFog\\GroundFogPixel.cs.hlsl", defines, "cs_5_0")));
 		pyramidCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\GroundFog\\HeightPyramid.cs.hlsl", {}, "cs_5_0")));
 		pyramidFirstCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\GroundFog\\HeightPyramid.cs.hlsl", { { "FIRST_LEVEL", "" } }, "cs_5_0")));
@@ -1131,6 +1137,13 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 	a_context->CSGetShaderResources(kLiftSlot, 1, oldLift.put());
 	a_context->CSGetShaderResources(kFloorMapSlot, 1, oldFloorMaps[0].put());
 	a_context->CSGetShaderResources(kFloorSlopeSlot, 1, oldFloorMaps[1].put());
+	// The Skylighting probes, for what stands over the fog. The shader reads them only when the atmosphere's flags
+	// say they are valid this frame (the same condition as here).
+	winrt::com_ptr<ID3D11ShaderResourceView> oldSkylighting;
+	a_context->CSGetShaderResources(kSkylightingSlot, 1, oldSkylighting.put());
+	auto& skylighting = globals::features::skylighting;
+	ID3D11ShaderResourceView* probes = skylighting.loaded && skylighting.texProbeArray ? skylighting.texProbeArray->srv.get() : nullptr;
+	a_context->CSSetShaderResources(kSkylightingSlot, 1, &probes);
 	ID3D11ShaderResourceView* ground[] = { heightMap, heightPyramid->srv.get(), nullptr, water, nullptr, nullptr };
 	a_context->CSSetShaderResources(kHeightMapSlot, 6, ground);
 	atmosphere.BindLightingInputs(a_context);
@@ -1164,6 +1177,8 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 	a_context->CSSetShaderResources(kHeightMapSlot, 6, nullGround);
 	ID3D11ShaderResourceView* restoredLift = oldLift.get();
 	a_context->CSSetShaderResources(kLiftSlot, 1, &restoredLift);
+	ID3D11ShaderResourceView* restoredSkylighting = oldSkylighting.get();
+	a_context->CSSetShaderResources(kSkylightingSlot, 1, &restoredSkylighting);
 	auto* previous = oldConstants.get();
 	a_context->CSSetConstantBuffers(kConstantSlot, 1, &previous);
 	compositeInputs[0] = fogTexture->srv.get();
@@ -1332,6 +1347,9 @@ void GroundFog::DrawSettings()
 		ImGui::SliderFloat(T(TKEY("sun_limit"), "Sun Limit"), &settings.SunLimit, 0.0f, kMaxSunLimit, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("sun_limit_tooltip"), "How much brighter fog in the sun can get than fog in the shade: the sun and moon light it scatters levels off at this many times its sky light. At 1 sunlit fog is at most twice as bright as shaded fog. 0 removes the limit."));
 
+		ImGui::SliderFloat(T(TKEY("canopy_shade"), "Shade under Cover"), &settings.CanopyShade, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("canopy_shade_tooltip"), "How much trees, walls and roofs over the fog dim the sky light it takes, so fog under a forest canopy is a dim grey like the ground there and not a white sheet. From the Skylighting probes where that feature runs, and from how much of the ground around is in the sun's shadow. 0 lights all fog by the open sky."));
+
 		ImGui::SliderFloat(T(TKEY("sky_ambient_scale"), "Sky Light"), &settings.SkyAmbientScale, 0.0f, kMaxLightScale, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("sky_ambient_scale_tooltip"), "Scales the light the fog takes from the whole sky, which is what lights it in shadow."));
 
@@ -1477,6 +1495,7 @@ void GroundFog::LoadSettings(json& o_json)
 	sanitize(settings.SelfShadow, defaults.SelfShadow, 0.0f, kMaxLightScale);
 	sanitize(settings.SunDiffusion, defaults.SunDiffusion, 0.0f, 1.0f);
 	sanitize(settings.SunLimit, defaults.SunLimit, 0.0f, kMaxSunLimit);
+	sanitize(settings.CanopyShade, defaults.CanopyShade, 0.0f, 1.0f);
 	sanitize(settings.Wispiness, defaults.Wispiness, 0.0f, 1.0f);
 	sanitize(settings.WispScale, defaults.WispScale, kMinWispScale, kMaxWispScale);
 	sanitize(settings.GroundFill, defaults.GroundFill, 0.0f, kMaxGroundFill);

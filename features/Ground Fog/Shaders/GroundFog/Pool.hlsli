@@ -43,7 +43,11 @@ namespace GroundFog
 	// whatever the simulation or the floor map does in one place, the pool stays a veil.
 	static const float PoolAmountMax = 4.0;
 	static const float PoolTauKnee = 1.5;
-	static const float PoolTauMax = 3.0;
+	static const float PoolTauMax = 2.5;
+	// The finest structure of the pool, below the simulation's texels: size of its cells in game units (0.6 m and
+	// a third of that), and how far the air's velocity bends it, in seconds of travel.
+	static const float PoolGrain = 42.0;
+	static const float PoolGrainDrag = 0.5;
 
 	struct Pool
 	{
@@ -148,7 +152,10 @@ namespace GroundFog
 		// Height of the ray above the ground the fog lies on, s back from its end: start + rise * s. On ground it
 		// starts at 0, elsewhere at the height of the pixel over the floor. At or above the layer's top there is
 		// nothing, for any surface.
-		const float start = (1.0 - ground) * max(over, 0.0);
+		// A pixel that counts as ground still starts at its own height over the floor, less what the slope and the
+		// map's own unevenness account for: so a blade of grass or a leaf that happens to face up stands in the fog
+		// by its height like any other, and is not coated as if it were the floor.
+		const float start = max(over - ground * (allowance + 5.0), 0.0);
 		if (start >= limit)
 			return pool;
 		// Without a floor only the ground share has fog.
@@ -186,7 +193,15 @@ namespace GroundFog
 									   FogSim.SampleLevel(LinearSampler, SimUv(position.xy - dir.xy * (0.65 * within)), 0));
 		taps += 2u;
 		pool.within = within;
-		const float amount = clamp(state.z, 0.0, PoolAmountMax);
+		// Fine structure: two octaves of noise fixed in the world, riding the wind and bent by the air's own motion
+		// (so a gust or a blow shears it). It takes most from where the fog is thin, so the rim of a wisp breaks
+		// up into strands and holes, and little from a dense core.
+		float amount = clamp(state.z, 0.0, PoolAmountMax);
+		{
+			const float2 g = (position.xy + FrameBuffer::CameraPosAdjust.xy - WindTravel - state.xy * PoolGrainDrag) / PoolGrain;
+			const float grain = 0.6 * ValueNoise(g) + 0.4 * ValueNoise(g * 2.9 + 31.0);
+			amount = max(amount + (grain - 0.55) * 1.8 * min(amount, 0.7) * Wispiness, 0.0);
+		}
 		pool.amount = amount;
 		pool.speed = state.xy;
 		if (amount <= 0.0)

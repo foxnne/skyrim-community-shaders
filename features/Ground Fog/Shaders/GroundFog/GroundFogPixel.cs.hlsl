@@ -50,6 +50,11 @@
 #include "PhysicalSky/Common.hlsli"
 #include "ViewAtmosphere/MediumLighting.hlsli"
 
+#ifdef SKYLIGHTING
+#	define SKYLIGHTING_PROBE_REGISTER t50
+#	include "Skylighting/Skylighting.hlsli"
+#endif
+
 #define GROUND_FOG_SHADE
 #include "GroundFog/GroundFog.hlsli"
 #include "GroundFog/Pool.hlsli"
@@ -878,7 +883,33 @@ namespace GroundFog
 	}
 	light *= GroundFog::SunScale;
 	// Sky light reaches fog in the shadow of terrain and objects too, so it takes no direct visibility.
-	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming;
+	// The sky's light on the fog is what the open sky gives, less what stands over the fog: under a canopy or
+	// beside a wall it gets as little of it as the ground there does, or it would glow against that ground.
+	// Two measures, the lower counts: the Skylighting probes a meter over the fog, where they are running; and how
+	// much of the ground a few meters around is in the sun's shadow (the sun map, read wide), which is there
+	// whenever the pool is.
+	float skyOpen = 1.0;
+	if (GroundFog::CanopyShade > 0.0) {
+		const float2 shadeUv = GroundFog::SimUv(lightPos.xy);
+		const float mapped = GroundFog::SimInside(shadeUv);
+		if (mapped > 0.0) {
+			uint slopeWidth, slopeHeight;
+			GroundFog::FogSlope.GetDimensions(slopeWidth, slopeHeight);
+			const float2 wide = 7.0 / float2(slopeWidth, slopeHeight);
+			const float lit = 0.25 * (GroundFog::FogSlope.SampleLevel(LinearSampler, shadeUv + wide * float2(1.0, 0.4), 0).w + GroundFog::FogSlope.SampleLevel(LinearSampler, shadeUv + wide * float2(-0.4, 1.0), 0).w +
+										 GroundFog::FogSlope.SampleLevel(LinearSampler, shadeUv + wide * float2(-1.0, -0.4), 0).w + GroundFog::FogSlope.SampleLevel(LinearSampler, shadeUv + wide * float2(0.4, -1.0), 0).w);
+			skyOpen = lerp(1.0, lerp(0.3, 1.0, lit), mapped);
+		}
+#ifdef SKYLIGHTING
+		if (ViewAtmosphere::Data[0].flags.z & 8u) {
+			const float3 probeAt = lightPos + float3(0.0, 0.0, 70.0);
+			const float seen = Skylighting::CosineLobeVisibility(Skylighting::SampleNoBias(probeAt), float3(0.0, 0.0, 1.0), Skylighting::GetFadeOutFactor(probeAt));
+			skyOpen = min(skyOpen, max(Skylighting::MixDiffuse(saturate(seen)), 0.15));
+		}
+#endif
+		skyOpen = lerp(1.0, skyOpen, GroundFog::CanopyShade);
+	}
+	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming * skyOpen;
 	// Fog in the sun is brighter than fog in the shade, but not without end: what it scatters of the sun and moons
 	// levels off at SunLimit times its sky light (at the limit's own value it has reached half of that), keeping
 	// its colour. So sunlit fog reads as lit fog, not as paint.

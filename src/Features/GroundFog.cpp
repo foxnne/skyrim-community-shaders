@@ -45,6 +45,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	SelfShadow,
 	SunDiffusion,
 	SunLimit,
+	SunGlow,
 	CanopyShade,
 	GroundFill,
 	SurfaceBlendDistance,
@@ -53,6 +54,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	FloorMaxHeight,
 	NearDensity,
 	NearThickness,
+	NearBody,
 	NearFalloff,
 	NearDistance,
 	DriftScale,
@@ -826,6 +828,8 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 	a_data.SunWrap = settings.SunDiffusion;
 	a_data.SunLimit = settings.SunLimit;
 	a_data.CanopyShade = settings.CanopyShade;
+	a_data.PoolBody = settings.NearBody;
+	a_data.SunGlow = settings.SunGlow;
 	a_data.Wispiness = slab ? 0.0f : settings.Wispiness;
 	a_data.InvWispScale = 1.0f / (std::clamp(settings.WispScale, kMinWispScale, kMaxWispScale) * unitsPerMeter);
 	a_data.Flags = 1u | (settings.HalfResolution ? 2u : 0u);
@@ -1206,6 +1210,9 @@ void GroundFog::DrawSettings()
 		Util::HoverTip(T(TKEY("near_thickness_tooltip"), "Height above the ground at which the fog around you has thinned to nothing. Up to 1 m it is a pool at your feet: it lies on whatever ground you see, and it flows, swirls and parts around what moves through it. Above 1 m it is the tall, still volume, laid on the terrain map."));
 		ImGui::TextDisabled("%s", settings.NearThickness <= kPoolMaxThickness ? T(TKEY("near_mode_pool"), "Drawn as a pool, from the simulation") : T(TKEY("near_mode_volume"), "Drawn as the tall volume, on the terrain map"));
 
+		ImGui::SliderFloat(T(TKEY("near_body"), "Body"), &settings.NearBody, 0.0f, 1.7f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("near_body_tooltip"), "How much taller the thick parts of the pool stand than its thin parts. At 0 it is one low layer. At 1 a veil lies at about half the Near Thickness and a core or a bank stands at 2.4 times it (waist height at 0.45 m), with a rolling top between. Only for the pool."));
+
 		ImGui::SliderFloat(T(TKEY("near_falloff"), "Near Thinning with Height"), &settings.NearFalloff, kMinNearFalloff, kMaxNearFalloff, "%.1f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("near_falloff_tooltip"), "How strongly the fog around you pools low. Low values fill the whole height evenly; high values keep it at your feet."));
 
@@ -1346,6 +1353,9 @@ void GroundFog::DrawSettings()
 
 		ImGui::SliderFloat(T(TKEY("sun_limit"), "Sun Limit"), &settings.SunLimit, 0.0f, kMaxSunLimit, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("sun_limit_tooltip"), "How much brighter fog in the sun can get than fog in the shade: the sun and moon light it scatters levels off at this many times its sky light. At 1 sunlit fog is at most twice as bright as shaded fog. 0 removes the limit."));
+
+		ImGui::SliderFloat(T(TKEY("sun_glow"), "Glow toward the Sun"), &settings.SunGlow, 0.0f, 4.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("sun_glow_tooltip"), "How far past the Sun Limit the fog may brighten when you look through it toward the sun or moon. 0 keeps the same limit in every direction."));
 
 		ImGui::SliderFloat(T(TKEY("canopy_shade"), "Shade under Cover"), &settings.CanopyShade, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("canopy_shade_tooltip"), "How much trees, walls and roofs over the fog dim the sky light it takes, so fog under a forest canopy is a dim grey like the ground there and not a white sheet. From the Skylighting probes where that feature runs, and from how much of the ground around is in the sun's shadow. 0 lights all fog by the open sky."));
@@ -1496,6 +1506,8 @@ void GroundFog::LoadSettings(json& o_json)
 	sanitize(settings.SunDiffusion, defaults.SunDiffusion, 0.0f, 1.0f);
 	sanitize(settings.SunLimit, defaults.SunLimit, 0.0f, kMaxSunLimit);
 	sanitize(settings.CanopyShade, defaults.CanopyShade, 0.0f, 1.0f);
+	sanitize(settings.SunGlow, defaults.SunGlow, 0.0f, 4.0f);
+	sanitize(settings.NearBody, defaults.NearBody, 0.0f, 1.7f);
 	sanitize(settings.Wispiness, defaults.Wispiness, 0.0f, 1.0f);
 	sanitize(settings.WispScale, defaults.WispScale, kMinWispScale, kMaxWispScale);
 	sanitize(settings.GroundFill, defaults.GroundFill, 0.0f, kMaxGroundFill);

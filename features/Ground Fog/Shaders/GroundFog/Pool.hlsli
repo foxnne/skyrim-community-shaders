@@ -48,6 +48,19 @@ namespace GroundFog
 	// a third of that), and how far the air's velocity bends it, in seconds of travel.
 	static const float PoolGrain = 42.0;
 	static const float PoolGrainDrag = 0.5;
+	// The pool's top is never higher than this many times PoolThickness, plume and all.
+	static const float PoolTopMax = 3.5;
+	// Places along the ray where the simulation is read.
+	static const uint PoolSamples = 4u;
+
+	// The top of the pool over a place, as a multiple of PoolThickness: a thin veil lies low, and where there is
+	// more fog it stands taller, up to 1 + 1.4 x PoolBody in a core (waist height at the defaults). lift: the
+	// simulation's, for fog thrown up or pressed down. So the top is a rolling surface with banks and hollows, and
+	// a wake is a trough.
+	float PoolTop(float amount, float lift)
+	{
+		return min(lerp(0.45, 1.0 + 1.4 * PoolBody, smoothstep(0.15, 2.2, amount)) * (1.0 + lift), PoolTopMax);
+	}
 
 	struct Pool
 	{
@@ -91,7 +104,8 @@ namespace GroundFog
 
 	// position: where the ray ends, camera-relative. normal: of what it ends on, from the depth buffer.
 	// tNear: where the nearest of the output pixel's scene pixels lies along the ray.
-	Pool EvaluatePool(float3 position, float3 dir, float tEnd, float camZ, float3 normal, float tNear, inout uint taps)
+	// lightDir: toward the sun or moon that lights the scene.
+	Pool EvaluatePool(float3 position, float3 dir, float tEnd, float camZ, float3 normal, float tNear, float3 lightDir, inout uint taps)
 	{
 		Pool pool;
 		pool.tau = pool.tauNear = pool.t = pool.z = pool.above = pool.amount = 0.0;
@@ -127,7 +141,8 @@ namespace GroundFog
 		const float lift = clamp(FogLift.SampleLevel(LinearSampler, uv, 0), -0.6, 3.0);
 		++taps;
 		const float thick = PoolThickness * (1.0 + lift);
-		const float limit = PoolThickness * (1.0 + NearBreath) * (1.0 + max(lift, 0.0));
+		// The tallest the pool can stand anywhere: nothing at or above this over its floor has any fog.
+		const float limit = PoolThickness * (1.0 + NearBreath) * PoolTopMax;
 		pool.known = known ? 1.0 : 0.0;
 		pool.over = over;
 		// Well under every floor around: the map is not up to date there (it will be on the next frame).
@@ -161,8 +176,6 @@ namespace GroundFog
 		// Without a floor only the ground share has fog.
 		const float share = known ? 1.0 : ground;
 		const float stretch = min(tEnd, 25.0 * PoolThickness);
-		if (start >= thick * (1.0 + NearBreath))
-			return pool;
 
 		// How fast the ray rises above the ground going back toward the camera. The ground the fog lies on is the
 		// floor at the scale of a stride, not the facets of the mesh the pixel is on: first from the slope of the
@@ -172,8 +185,8 @@ namespace GroundFog
 		// slope yet (new ground) the plane of the pixel itself stands in, measured vertically.
 		const float riseFloor = -dir.z + dot(slope, dir.xy) * slopeKnown;
 		const float riseOwn = -dot(normal, dir) / max(normal.z, 0.5);
-		float rise = lerp(riseFloor, lerp(riseOwn, riseFloor, slopeKnown), ground);
-		if (known) {
+		float rise = lerp(riseOwn, riseFloor, slopeKnown);
+		if (known && ground > 0.0) {
 			const float reach = min(stretch, max(thick - start, 0.0) / max(rise, PoolMinSlope));
 			float levelBack, lowBack;
 			++taps;
@@ -182,53 +195,100 @@ namespace GroundFog
 			if (reach > 1.0 && FloorAround(SimUv(position.xy - dir.xy * reach), levelBack, lowBack) && levelBack - floorZ < PoolThickness + PoolStep)
 				rise = -dir.z - (levelBack - floorZ) / reach;
 		}
-		// Seen from above, no ray is taken to run flatter than PoolMinSlope over the fog's ground: the floor map
-		// is not trusted for more fog than that, on ground or in front of what stands on it.
+		// That is for ground. What stands in the fog (a trunk, a pole, a wall) stands on a level floor as far as
+		// its ray is concerned: the slope of the floor around its foot (roots, a mound, the thing's own base in the
+		// map) says nothing about the fog in front of it, and taking it made rays to such things run flat through
+		// the layer, which drew fog up them.
+		rise = lerp(-dir.z, rise, ground);
+		// Seen from above, no ray is taken to run flatter than PoolMinSlope over the fog's ground.
 		if (dir.z < 0.0)
 			rise = max(rise, PoolMinSlope);
 
-		// The stretch of the ray inside the layer, for where to read the simulation.
-		const float within = rise > 1e-4 ? min(stretch, max(thick - start, 0.0) / rise) : stretch;
-		const float4 state = 0.5 * (FogSim.SampleLevel(LinearSampler, SimUv(position.xy - dir.xy * (0.2 * within)), 0) +
-									   FogSim.SampleLevel(LinearSampler, SimUv(position.xy - dir.xy * (0.65 * within)), 0));
-		taps += 2u;
+		// The stretch of the ray that can be inside the pool: up to where it has risen over the tallest the pool gets.
+		const float within = rise > 1e-4 ? min(stretch, max(limit - start, 0.0) / rise) : stretch;
 		pool.within = within;
-		// Fine structure: two octaves of noise fixed in the world, riding the wind and bent by the air's own motion
-		// (so a gust or a blow shears it). It takes most from where the fog is thin, so the rim of a wisp breaks
-		// up into strands and holes, and little from a dense core.
-		float amount = clamp(state.z, 0.0, PoolAmountMax);
-		{
-			const float2 g = (position.xy + FrameBuffer::CameraPosAdjust.xy - WindTravel - state.xy * PoolGrainDrag) / PoolGrain;
-			const float grain = 0.6 * ValueNoise(g) + 0.4 * ValueNoise(g * 2.9 + 31.0);
-			amount = max(amount + (grain - 0.55) * 1.8 * min(amount, 0.7) * Wispiness, 0.0);
-		}
-		pool.amount = amount;
-		pool.speed = state.xy;
-		if (amount <= 0.0)
-			return pool;
+		const float2 xyAbs = position.xy + FrameBuffer::CameraPosAdjust.xy;
+		const float breath = Breathing(xyAbs);
+		const float back = tEnd - tNear;
 
-		// Where there is less fog the layer is lower too, so a wake is a dip and not only a thin place.
-		const float top = max(thick * Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) * lerp(0.4, 1.0, saturate(amount)), 1.0);
-		const SoftProfile profile = MakeSoftProfile(top, 0.0, NearFalloff);
-		// Fog thrown up is the same fog over more height: thinner, though not by all of it (it is stirred up too).
-		const float extinction = PoolExtinction * amount * range * share * rsqrt(1.0 + max(lift, 0.0));
-		const float end = start + rise * stretch;
-		const float tau = extinction * SoftLineMean(profile, start, end) * stretch;
+		// The pool along that stretch. Its top is not one height: it is read from the simulation at PoolSamples
+		// places going back toward the camera, and each piece of the ray is integrated in closed form against the
+		// top and the amount there. So a bank nearer the camera stands in front of the fog behind it, and the ray
+		// to something that stands in the fog meets only the fog that is really in front of it.
+		float tau = 0.0;
+		float tauFront = 0.0;
+		float tSum = 0.0;
+		float hSum = 0.0;
+		float aboveSum = 0.0;
+		float amountSum = 0.0;
+		float grain = 0.55;
+		float sFrom = 0.0;
+		float hFrom = start;
+		[unroll] for (uint i = 0u; i < PoolSamples; ++i)
+		{
+			const float sTo = within * float(i + 1u) / float(PoolSamples);
+			const float sAt = 0.5 * (sFrom + sTo);
+			const float hTo = start + rise * sTo;
+			const float2 at = SimUv(position.xy - dir.xy * sAt);
+			const float4 state = FogSim.SampleLevel(LinearSampler, at, 0);
+			const float lifted = clamp(FogLift.SampleLevel(LinearSampler, at, 0), -0.6, 3.0);
+			taps += 2u;
+			if (i == 0u) {
+				// Fine structure: two octaves of noise fixed in the world, riding the wind and bent by the air's own
+				// motion (so a gust or a blow shears it). It takes most from where the fog is thin, so the rim of a
+				// wisp breaks up into strands and holes, and little from a dense core.
+				const float2 g = (xyAbs - WindTravel - state.xy * PoolGrainDrag) / PoolGrain;
+				grain = 0.6 * ValueNoise(g) + 0.4 * ValueNoise(g * 2.9 + 31.0);
+				pool.speed = state.xy;
+			}
+			float amount = clamp(state.z, 0.0, PoolAmountMax);
+			amount = max(amount + (grain - 0.55) * 1.8 * min(amount, 0.7) * Wispiness, 0.0);
+			if (i == 0u)
+				pool.amount = amount;
+			if (amount > 0.0) {
+				const float top = max(PoolThickness * PoolTop(amount, lifted) * breath, 1.0);
+				const SoftProfile profile = MakeSoftProfile(top, 0.0, NearFalloff);
+				// Fog that stands taller is the same fog over more height: thinner, though not by all of it.
+				const float extinction = PoolExtinction * amount * sqrt(PoolThickness / max(top, PoolThickness));
+				const float piece = extinction * range * share * SoftLineMean(profile, hFrom, hTo) * (sTo - sFrom);
+				if (piece > 0.0) {
+					tau += piece;
+					if (sTo > back)
+						tauFront += piece * saturate((sTo - max(sFrom, back)) / max(sTo - sFrom, 1e-3));
+					const float lit = clamp(0.5 * (hFrom + hTo), 0.15 * top, top);
+					tSum += piece * (tEnd - sAt);
+					hSum += piece * lit;
+					aboveSum += piece * extinction * SoftAbove(profile, lit);
+					amountSum += piece * amount;
+				}
+			}
+			sFrom = sTo;
+			hFrom = hTo;
+		}
 		if (tau <= 0.0)
 			return pool;
 		// Levels off: no single place can turn the pool into a wall.
 		pool.tau = tau <= PoolTauKnee ? tau : PoolTauKnee + (PoolTauMax - PoolTauKnee) * OneMinusExp((tau - PoolTauKnee) / (PoolTauMax - PoolTauKnee));
-		// In front of the nearest scene pixel: the same integral over the part of the stretch beyond it.
-		const float back = tEnd - tNear;
-		if (back < stretch)
-			pool.tauNear = min(extinction * SoftLineMean(profile, start + rise * back, end) * (stretch - back), tau) * pool.tau / tau;
+		pool.tauNear = min(tauFront, tau) * pool.tau / tau;
+		pool.t = tSum / tau;
+		pool.z = z - start + hSum / tau;
+		pool.above = aboveSum / tau;
 
-		const float lit = clamp(start + 0.25 * top, 0.15 * top, top);
-		pool.t = tEnd - 0.4 * within;
-		pool.z = z - start + lit;
-		pool.above = PoolExtinction * amount * SoftAbove(profile, lit);
+		// The fog between this fog and the light. Beside what stands over the point itself (above), the fog a step
+		// toward the light: a bank is darker on the side away from the sun and brighter on the side toward it.
+		const float lightAcross = length(lightDir.xy);
+		if (lightAcross > 1e-3 && lightDir.z > 0.0) {
+			const float stepOut = min(hSum / tau / max(lightDir.z, 0.2), 4.0 * PoolThickness) + 0.75 * PoolThickness;
+			const float2 toward = SimUv(position.xy - dir.xy * (tEnd - pool.t) + lightDir.xy / lightAcross * stepOut);
+			const float amountToward = clamp(FogSim.SampleLevel(LinearSampler, toward, 0).z, 0.0, PoolAmountMax);
+			++taps;
+			// Only what stands taller there than the fog does here is in the way.
+			const float taller = saturate(PoolTop(amountToward, 0.0) / max(PoolTop(amountSum / tau, 0.0), 0.2) - 0.6);
+			pool.above += 0.5 * PoolExtinction * amountToward * PoolThickness * PoolTop(amountToward, 0.0) * 0.38 * taller * SimInside(toward);
+		}
 		return pool;
 	}
 }
 
 #endif
+

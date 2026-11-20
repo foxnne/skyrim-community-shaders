@@ -94,6 +94,9 @@ namespace GroundFog
 		float Wispiness;       // 0: the resting fog is even patches; 1: separate wisps with clear air between them
 		float InvWispScale;    // per game unit
 		float CanopyShade;     // how much what stands over the fog (canopy, walls) dims the sky light it takes; 0 = open sky everywhere
+		float PoolBody;        // how much taller than PoolThickness the thick parts of the pool stand; 0 = one height
+		float SunGlow;         // how far past SunLimit the fog may glow when seen toward the sun
+		float2 BodyPad;
 	};
 
 	Texture2D<float> HeightMap : register(t6);

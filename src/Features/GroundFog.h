@@ -53,7 +53,8 @@ struct GroundFog : Feature
 		float SkyAmbientScale = 1.0f;
 		float SelfShadow = 1.0f;
 		float SunDiffusion = 0.3f;  // share of the sun and moon light the fog sends out evenly to all sides
-		float SunLimit = 1.0f;      // sun and moon light in the fog levels off at this many times its sky light; 0 = no limit
+		float SunLimit = 1.5f;      // sun and moon light in the fog levels off at this many times its sky light; 0 = no limit
+		float SunGlow = 1.5f;       // how far past that limit the fog may glow when seen toward the sun
 		float CanopyShade = 1.0f;   // how much canopy and walls over the fog dim the sky light it takes
 		float GroundFill = 0.25f;  // share of Thickness
 		// Pixel pass.
@@ -64,8 +65,9 @@ struct GroundFog : Feature
 		// The near volume: a taller, softer body of fog around the camera.
 		// Up to 1 m thick it is the pool: drawn on what the screen shows, from the simulation. Thicker, it is the
 		// tall volume of the first versions, marched over the height map.
-		float NearDensity = 1.2f;     // extinction at the ground per meter, at Amount 1; 0 = none
+		float NearDensity = 1.5f;     // extinction at the ground per meter, at Amount 1; 0 = none
 		float NearThickness = 0.45f;  // height at which it has thinned to nothing
+		float NearBody = 1.0f;        // how much taller the thick parts of the pool stand: 1 = to waist height in a core
 		float NearFalloff = 1.5f;    // how quickly it thins with height
 		float NearDistance = 40.0f;  // meters from the camera; fades out over the second half
 		float DriftScale = 2.5f;     // size of the drifting patches, meters
@@ -171,8 +173,11 @@ struct GroundFog : Feature
 		float Wispiness;
 		float InvWispScale;
 		float CanopyShade;
+		float PoolBody;
+		float SunGlow;
+		float2 BodyPad;
 	};
-	static_assert(sizeof(VolumeData) == 320);
+	static_assert(sizeof(VolumeData) == 336);
 	static_assert(offsetof(VolumeData, MapZ) == 16);
 	static_assert(offsetof(VolumeData, Thickness) == 32);
 	static_assert(offsetof(VolumeData, FadeStart) == 48);

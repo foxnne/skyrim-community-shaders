@@ -42,6 +42,22 @@ namespace ViewMedium
 		return SampleHeightMedium(position, screenUV, samplerState, false);
 	}
 
+	/// The medium between the camera and a cloud that lies at `position` on the view ray.
+	ViewAtmosphere::Medium SampleCloudFrontMedium(float3 position, float2 screenUV, SamplerState samplerState, float cloudDistance)
+	{
+		const bool exaggerated = ViewAtmosphere::CloudExaggerated(cloudDistance, ViewAtmosphere::Data[0].grids[2].depth.y);
+		ViewAtmosphere::Medium front = SampleHeightMedium(position, screenUV, samplerState, exaggerated);
+#if CLOUD_DISTANCE_EXAGGERATION_PERCENT > 0 && CLOUD_DISTANCE_EXAGGERATION_PERCENT < 100
+		[branch] if (exaggerated && ViewAtmosphere::Enabled() && ViewAtmosphere::SurfaceSet() > 0.0)
+		{
+			const ViewAtmosphere::Medium physical = SampleHeightMedium(position, screenUV, samplerState, false);
+			front.luminance = lerp(physical.luminance, front.luminance, CLOUD_DISTANCE_EXAGGERATION_PERCENT * 0.01);
+			front.transmittance = lerp(physical.transmittance, front.transmittance, CLOUD_DISTANCE_EXAGGERATION_PERCENT * 0.01);
+		}
+#endif
+		return front;
+	}
+
 	ViewAtmosphere::Medium SampleViewMedium(float3 position, float2 screenUV, SamplerState samplerState, bool fullCloudRay, bool surface)
 	{
 		if (fullCloudRay && ViewAtmosphere::Enabled())
@@ -65,7 +81,7 @@ namespace ViewMedium
 		if (cloudT >= 1.0)
 			return medium;
 		const float3 cloudL = cloud.rgb * visibility;
-		const ViewAtmosphere::Medium front = SampleHeightMedium(position * (min(cloudDistance, distance) / max(distance, 1e-6)), screenUV, samplerState);
+		const ViewAtmosphere::Medium front = SampleCloudFrontMedium(position * (min(cloudDistance, distance) / max(distance, 1e-6)), screenUV, samplerState, cloudDistance);
 		medium.luminance = lerp(front.luminance, medium.luminance, cloudT) + front.transmittance * cloudL;
 		medium.transmittance *= cloudT;
 #endif

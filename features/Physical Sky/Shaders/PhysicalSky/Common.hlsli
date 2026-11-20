@@ -667,13 +667,22 @@ Texture2D<float4> TexSkyTail : register(t66);
 	ViewAtmosphere::Medium SampleReflectionMedium(float3 viewDir, float2 skyCoord, float distance, SamplerState samp, bool skyRay)
 	{
 		const float2 uv = SkyViewLutTexel(skyCoord, 32u);
-		// A reflected surface sees distance-exaggerated air like a directly viewed one; the sky and the cloud in front of it stay physical.
+		// A reflected surface sees distance-exaggerated air like a directly viewed one, and so does a cloud; the clear sky stays physical.
 		ViewAtmosphere::Medium medium = ViewAtmosphere::SampleReflection(uv, distance, samp, skyRay ? 0.0 : ViewAtmosphere::SurfaceSet());
 		if (SharedData::physSkyData.enableVolumetricClouds) {
 			const float depth = TexVolCubeDepth.SampleLevel(samp, viewDir, 0).x * 1000.0 / GAME_UNIT_TO_M;
 			const float visibility = skyRay ? 1.0 : saturate((distance - depth) * GAME_UNIT_TO_M * 0.025);
 			const float cloudT = lerp(1.0, TexVolCubeTr.SampleLevel(samp, viewDir, 0), visibility);
-			const ViewAtmosphere::Medium front = ViewAtmosphere::SampleReflection(uv, min(depth, distance), samp);
+			const float frontSet = ViewAtmosphere::CloudExaggerated(depth, ViewAtmosphere::Data[0].grids[0].depth.y) ? ViewAtmosphere::SurfaceSet() : 0.0;
+			ViewAtmosphere::Medium front = ViewAtmosphere::SampleReflection(uv, min(depth, distance), samp, frontSet);
+#if CLOUD_DISTANCE_EXAGGERATION_PERCENT > 0 && CLOUD_DISTANCE_EXAGGERATION_PERCENT < 100
+			[branch] if (frontSet > 0.0)
+			{
+				const ViewAtmosphere::Medium physical = ViewAtmosphere::SampleReflection(uv, min(depth, distance), samp);
+				front.luminance = lerp(physical.luminance, front.luminance, CLOUD_DISTANCE_EXAGGERATION_PERCENT * 0.01);
+				front.transmittance = lerp(physical.transmittance, front.transmittance, CLOUD_DISTANCE_EXAGGERATION_PERCENT * 0.01);
+			}
+#endif
 			const float3 flash = SharedData::physSkyData.lightningColorIntensity.w * SharedData::physSkyData.lightningBolt.z > 0.0 ?
 			                         TexLightningReflection.SampleLevel(samp, viewDir, 0).rgb * (SharedData::physSkyData.lightningColorIntensity.w * SharedData::physSkyData.lightningBolt.z) :
 			                         0.0;

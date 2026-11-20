@@ -2851,7 +2851,15 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	const bool groundCoverTerrain = false;
 	const bool groundCoverSurface = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::GroundCover) != 0;
 #		endif
-	[branch] if (SharedData::groundCoverSettings.Enabled && groundCoverSurface && inWorld)
+	[branch] if (SharedData::groundCoverSettings.DebugView >= GroundCover::Debug::Why && SharedData::groundCoverSettings.Enabled && !groundCoverSurface && inWorld)
+	{
+		material.BaseColor = GroundCover::DebugNotEligible(material.BaseColor);
+	}
+	else if (SharedData::groundCoverSettings.DebugView == GroundCover::Debug::Eligible && SharedData::groundCoverSettings.Enabled && inWorld)
+	{
+		material.BaseColor = float3(1, 0, 1);
+	}
+	else if (SharedData::groundCoverSettings.Enabled && groundCoverSurface && inWorld)
 	{
 #		if defined(SNOW_COVER)
 		const float groundCoverSnow = snowFactor;

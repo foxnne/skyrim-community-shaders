@@ -838,7 +838,8 @@ namespace SharedData
 		float2 MapOffset;
 
 		float WhiteLimit;
-		float3 pad0;
+		float RiseHeight;  // cover fades in over this height above the plain level
+		float2 pad0;
 	};
 
 	cbuffer FeatureData : register(b6)

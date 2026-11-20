@@ -893,7 +893,8 @@ namespace GroundFog
 		light = lerp(light, white, poolShare);
 	}
 	// The pool's lumpy top: the side of a billow toward the light is brighter, the side away from it darker.
-	light *= lerp(1.0, lerp(0.55, 1.3, pool.sunSide), poolShare);
+	// (Both are about 0.5 on average, and these average 1: shading only, no light is lost.)
+	light *= lerp(1.0, lerp(0.7, 1.3, pool.sunSide), poolShare);
 	light *= GroundFog::SunScale;
 	// Sky light reaches fog in the shadow of terrain and objects too, so it takes no direct visibility.
 	// The sky's light on the fog is what the open sky gives, less what stands over the fog: under a canopy or
@@ -923,7 +924,7 @@ namespace GroundFog
 		skyOpen = lerp(1.0, skyOpen, GroundFog::CanopyShade);
 	}
 	// And the folds between its billows see less of the sky than their tops.
-	const float folds = lerp(1.0, lerp(0.7, 1.12, pool.crest), poolShare);
+	const float folds = lerp(1.0, lerp(0.8, 1.2, pool.crest), poolShare);
 	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming * skyOpen * folds;
 	// Fog in the sun is brighter than fog in the shade, but not without end: what it scatters of the sun and moons
 	// levels off at SunLimit times its sky light (at the limit's own value it has reached half of that), keeping

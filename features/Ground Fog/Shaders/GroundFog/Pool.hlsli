@@ -265,7 +265,8 @@ namespace GroundFog
 		{
 			const float2 g = (position.xy + FrameBuffer::CameraPosAdjust.xy - WindTravel - state.xy * PoolGrainDrag) / PoolGrain;
 			const float grain = 0.6 * ValueNoise(g) + 0.4 * ValueNoise(g * 2.9 + 31.0);
-			amount = max(amount + (grain - 0.55) * 1.8 * min(amount, 0.7) * Wispiness, 0.0);
+			// (The noise averages 0.5, so on average this takes nothing away.)
+			amount = max(amount + (grain - 0.5) * 1.8 * min(amount, 0.7) * Wispiness, 0.0);
 			// The same noise is the lumps of the top: billows 0.6 m across with smaller ones on them. Where it is
 			// high the top stands up (a crest), where it is low there is a fold. And the same noise a hand's width
 			// toward the light says which side of a billow this is: lower there, and this side faces the light.
@@ -275,7 +276,8 @@ namespace GroundFog
 				const float2 gToward = g + lightDir.xy / lightAcross * (14.0 / PoolGrain);
 				pool.sunSide = saturate(0.5 + 2.2 * (grain - (0.6 * ValueNoise(gToward) + 0.4 * ValueNoise(gToward * 2.9 + 31.0))));
 			}
-			pool.crest = smoothstep(0.3, 0.75, grain);
+			// Symmetric about the noise's mean, so the shading it drives averages out.
+			pool.crest = saturate(0.5 + 2.2 * (grain - 0.5));
 		}
 		pool.amount = amount;
 		pool.speed = state.xy;
@@ -283,12 +285,15 @@ namespace GroundFog
 			return pool;
 
 		// Where there is less fog the layer is lower too, so a wake is a dip and not only a thin place.
-		// And the top is lumpy: lower in the folds, a little higher on the billows. This is the profile's scale;
-		// what is counted of it stops at the cut (limit).
-		const float top = max(thick * Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) * lerp(0.4, 1.0, saturate(amount)) * lerp(0.72, 1.12, billow), 1.0);
+		// And the top is lumpy: lower in the folds, higher on the billows. This is the profile's scale; what is
+		// counted of it stops at the cut (limit). The lumps are shape only: a fold holds the same fog as a billow,
+		// lower and denser (the column's fog is proportional to the scale, so the density is divided by it), and the
+		// shape averages 1.
+		const float shape = lerp(0.8, 1.2, billow);
+		const float top = max(thick * Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) * lerp(0.4, 1.0, saturate(amount)) * shape, 1.0);
 		const SoftProfile profile = MakeSoftProfile(top, 0.0, NearFalloff);
 		// Fog thrown up is the same fog over more height: thinner, though not by all of it (it is stirred up too).
-		const float extinction = PoolExtinction * amount * range * share * certain * rsqrt(1.0 + max(lift, 0.0));
+		const float extinction = PoolExtinction * amount * range * share * certain * rsqrt(1.0 + max(lift, 0.0)) / shape;
 		const float end = start + rise * stretch;
 		const float tau = extinction * ClippedLineMean(profile, start, end, limit) * stretch;
 		if (tau <= 0.0)

@@ -184,13 +184,14 @@ void EvaluateLighting(DirectContext context, MaterialProperties material, float3
 	// the sun shadow and the contact shadow.
 	[branch] if (NearTreeLeaf)
 	{
-		const float wrap = NearTreeLeafParams.y;
+		// Twig and bark texels (NearTreeLeafWeight 0) keep the plain lighting above
+		const float wrap = NearTreeLeafParams.y * NearTreeLeafWeight;
 		const float2 leafCosines = saturate(float2(NdotL + wrap, wrap - NdotL) / (1.0 + wrap));
 		lightingOutput.diffuse = leafCosines.x * diffuseLightColor * Color::BRDFScale;
 		const float3 leafColor = material.BaseColor;
 		const float leafPeak = max(max(leafColor.r, leafColor.g), max(leafColor.b, 1e-4));
 		const float3 crossingTint = leafColor * lerp(1.0, leafColor / leafPeak, NEAR_TREE_LEAF_TRANSMISSION_SATURATION);
-		lightingOutput.transmission = leafCosines.y * NearTreeLeafParams.x * softLightColor * crossingTint * Color::BRDFScale;
+		lightingOutput.transmission = leafCosines.y * NearTreeLeafParams.x * NearTreeLeafWeight * softLightColor * crossingTint * Color::BRDFScale;
 	}
 #	endif
 #	if defined(HAIR) && defined(HAIR_BACKLIGHTING)
@@ -201,8 +202,8 @@ void EvaluateLighting(DirectContext context, MaterialProperties material, float3
 	float specularScale = 1.0;
 #	if defined(NEAR_TREE_LEAF_LIGHTING)
 	if (NearTreeLeaf) {
-		softLightScale *= NEAR_TREE_LEAF_SOFT_LIGHT;
-		specularScale = NEAR_TREE_LEAF_SPECULAR;
+		softLightScale *= lerp(1.0, NEAR_TREE_LEAF_SOFT_LIGHT, NearTreeLeafWeight);
+		specularScale = lerp(1.0, NEAR_TREE_LEAF_SPECULAR, NearTreeLeafWeight);
 	}
 #	endif
 	if (HasSoftLighting())
@@ -263,7 +264,7 @@ void GetIndirectLobeWeights(out IndirectLobeWeights lobeWeights, IndirectContext
 #	if defined(NEAR_TREE_LEAF_LIGHTING)
 	// The environment reflection of a leaf of a loaded tree: the deferred pass adds it from this weight
 	if (NearTreeLeaf)
-		lobeWeights.specular *= NEAR_TREE_LEAF_SPECULAR;
+		lobeWeights.specular *= lerp(1.0, NEAR_TREE_LEAF_SPECULAR, NearTreeLeafWeight);
 #	endif
 #endif
 }

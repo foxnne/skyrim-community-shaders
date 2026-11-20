@@ -58,6 +58,13 @@
 #	define LOD_TREE_CROWN_DATA
 #endif
 
+// Leaf atlases hold grey twigs and bark next to the leaves, and twig shapes are drawn as leaf shapes. The leaf-only
+// terms (per-tree tint, brightness, light through the leaf, wrap, shine and vertex-shade changes) fade out with the
+// saturation of the texel, in linear light: none at or below CHROMA_MIN, all of them from CHROMA_MAX up. Twig greys
+// sit below 0.3, autumn and summer leaves above 0.85, dull needles around 0.5.
+#define TREE_LEAF_CHROMA_MIN 0.3
+#define TREE_LEAF_CHROMA_MAX 0.6
+
 // The leaves of loaded trees have no define of their own either: Tree Wind marks the draws of their leaf shapes with
 // ExtraFlags::NearTreeLeaf, and they are lit as thin leaves (nearTreeLeafSettings): light comes through from the far
 // side and wraps a little, and each tree gets the tint of its LOD crown. Leaf shapes are tree-animated or alpha
@@ -1208,6 +1215,9 @@ static float LODTreeWrapScale = 1.0;
 // EvaluateLighting. Set in main.
 static bool NearTreeLeaf = false;
 static float4 NearTreeLeafParams = float4(0.0, 0.0, 0.0, 1.0);
+// How much of a leaf this texel is, 0 for grey twig and bark texels (GetLeafChromaWeight). Set in main with the
+// base colour; every leaf-only term is scaled by it.
+static float NearTreeLeafWeight = 0.0;
 #	endif
 
 #	if defined(LOD_TREE_LIGHTING) || defined(NEAR_TREE_LEAF_LIGHTING)
@@ -1217,6 +1227,14 @@ float3 GetTreeTint(float2 a_seeds, float a_variation)
 {
 	const float hue = (a_seeds.y * 2.0 - 1.0) * a_variation;
 	return (1.0 + (a_seeds.x * 2.0 - 1.0) * a_variation) * float3(1.0 + hue, 1.0, 1.0 - hue);
+}
+
+// 1 for a leaf-coloured texel, 0 for a grey one (twigs, bark), from the saturation of its base colour
+float GetLeafChromaWeight(float3 a_baseColor)
+{
+	const float peak = max(max(a_baseColor.r, a_baseColor.g), a_baseColor.b);
+	const float low = min(min(a_baseColor.r, a_baseColor.g), a_baseColor.b);
+	return smoothstep(TREE_LEAF_CHROMA_MIN, TREE_LEAF_CHROMA_MAX, (peak - low) / max(peak, 1e-4));
 }
 #	endif
 
@@ -1903,8 +1921,10 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		baseColor.xyz *= SharedData::lodTreeLightingSettings.Brightness;
 	// Neighbouring trees differ a little in brightness and lean toward yellow or blue-green: the tint of the tree
 	// where it stands, which its full model gets too (NEAR_TREE_LEAF_LIGHTING)
+	// Grey twig texels of the crown atlas keep their colour (the weight is taken before the brightness, which
+	// does not change it)
 	if (lodTreeCrownData)
-		baseColor.xyz *= GetTreeTint(input.TreeTint, SharedData::lodTreeLightingSettings.Variation);
+		baseColor.xyz *= lerp(1.0, GetTreeTint(input.TreeTint, SharedData::lodTreeLightingSettings.Variation), GetLeafChromaWeight(baseColor.xyz));
 #	endif
 
 #	if defined(NEAR_TREE_LEAF_LIGHTING)
@@ -1913,7 +1933,9 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	{
 		const uint tintCode = min((Permutation::ExtraFeatureDescriptor >> Permutation::ExtraFeatureFlags::NearTreeTintShift) & Permutation::ExtraFeatureFlags::NearTreeTintMask, 120u);
 		const float2 tintSeeds = float2(tintCode / 11u, tintCode % 11u) / 10.0;
-		baseColor.xyz *= NearTreeLeafParams.w * GetTreeTint(tintSeeds, NearTreeLeafParams.z);
+		// Twig and bark texels in the leaf atlas stay as they are: no tint, no brightness, ordinary lighting
+		NearTreeLeafWeight = GetLeafChromaWeight(baseColor.xyz);
+		baseColor.xyz *= lerp(1.0, NearTreeLeafParams.w * GetTreeTint(tintSeeds, NearTreeLeafParams.z), NearTreeLeafWeight);
 	}
 #	endif
 
@@ -3093,7 +3115,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	if defined(NEAR_TREE_LEAF_LIGHTING)
 	// Before any light is evaluated and before the G-buffer takes the roughness
 	if (NearTreeLeaf) {
-		const float leafMinRoughness = NEAR_TREE_LEAF_MIN_ROUGHNESS;
+		const float leafMinRoughness = NEAR_TREE_LEAF_MIN_ROUGHNESS * NearTreeLeafWeight;
 		material.Roughness = max(material.Roughness, leafMinRoughness);
 		// The power with that roughness, the inverse of ShininessToRoughness
 		const float leafMinRoughness2 = max(leafMinRoughness * leafMinRoughness, 1e-3);
@@ -3195,7 +3217,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		endif
 #		if defined(NEAR_TREE_LEAF_LIGHTING)
 			if (NearTreeLeaf)
-				screenSpaceShadows = lerp(1.0, screenSpaceShadows, NEAR_TREE_LEAF_SCREEN_SHADOW);
+				screenSpaceShadows = lerp(1.0, screenSpaceShadows, lerp(1.0, NEAR_TREE_LEAF_SCREEN_SHADOW, NearTreeLeafWeight));
 #		endif
 #		if defined(SKINNED) || defined(SKIN) || defined(HAIR)
 			screenSpaceShadows.x = lerp(1.0, screenSpaceShadows.x, saturate(4.0 * dirLightAngle));
@@ -3864,7 +3886,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// The baked crown shade on the ambient as authored, on the direct light and the light through the leaf only in
 	// part (NEAR_TREE_LEAF_VERTEX_SHADE_DIRECT); diffuseColor still holds the direct light alone here
 	if (NearTreeLeaf) {
-		const float3 leafDirectShade = lerp(1.0, vertexColor, NEAR_TREE_LEAF_VERTEX_SHADE_DIRECT);
+		const float3 leafDirectShade = lerp(1.0, vertexColor, lerp(1.0, NEAR_TREE_LEAF_VERTEX_SHADE_DIRECT, NearTreeLeafWeight));
 		color.xyz = color.xyz * vertexColor + (diffuseColor * material.BaseColor + transmissionColor) * (leafDirectShade - vertexColor);
 	} else
 #	endif

@@ -176,7 +176,20 @@ namespace GroundFog
 		FloorAround(uv, z, levelHere, lowHere, nearHere);
 		FloorAround(SimUv(position.xy - dir.xy * (across > 1e-3 ? 1.5 * texel / across : 0.0)), z, levelToward, lowToward, nearToward);
 		taps += 2u;
-		const bool known = min(lowHere, lowToward) < FloorUnknown;
+		bool known = min(lowHere, lowToward) < FloorUnknown;
+		// Where the screen has not shown the floor around this pixel (it is hidden under grass, ferns and plants
+		// beyond the nearest few meters, or has not been looked at yet), the terrain height map stands in for it,
+		// where there is one: the floor of open country, good to a hand's width, and a mesh floor is seen soon
+		// enough. Two reads.
+		bool fromMap = false;
+		if (!known && MapCoverage(MapUv(position.xy)) > 0.5) {
+			const GroundSample mapped = GroundAt(position.xy, StepMin);
+			taps += mapped.reads;
+			levelHere = levelToward = lowHere = lowToward = mapped.z;
+			nearHere = nearToward = max(abs(z - mapped.z) - PoolGroundBand, 0.0);
+			known = true;
+			fromMap = true;
+		}
 		// The floor here, unless everything here stands well above the floor toward the camera.
 		const float floorZ = lowHere <= lowToward + PoolOtherLevel ? levelHere : levelToward;
 		const float over = known ? z - floorZ : 0.0;
@@ -186,7 +199,7 @@ namespace GroundFog
 		// The layer keeps the scale of Near Thickness (lifted where it is struck); what of it is counted stops at
 		// PoolHardTop, or for a moment up to PoolPlumeMax times that over ground where it is thrown up.
 		const float thick = PoolThickness * (1.0 + lift);
-		pool.known = known ? 1.0 : 0.0;
+		pool.known = known ? (fromMap ? 0.5 : 1.0) : 0.0;
 		pool.over = over;
 		// Well under every floor around: the map is not up to date there (it will be on the next frame).
 		if (over <= -2.0 * PoolStep)
@@ -334,9 +347,14 @@ namespace GroundFog
 		// THE HEIGHT RULE, last: see PoolHardTop. The height of this surface over its floor: for what stands in the
 		// fog, over the lowest floor around it and toward the camera; for ground, over the floor it lies on (the
 		// nearest level, less the slope's share). 0 where no floor is known (only nearly level ground gets here then).
+		// Ground must also not stand more than that over the lowest floor around it, less the band and what the
+		// slope accounts for over the two texels between: so the top of a barrel, a small rock or the edge of a
+		// cart bed, which is a floor level of its own in the map, gets nothing even where the simulation has not
+		// marked it as a raised thing.
 		const float lowFloor = min(lowHere, lowToward);
 		const float standingHeight = known ? max(z - lowFloor, 0.0) : 0.0;
-		const float allowed = PoolHeightRule(lerp(standingHeight, known ? nearest : 0.0, ground));
+		const float groundHeight = known ? max(nearest, standingHeight - PoolGroundBand - 2.0 * allowance) : 0.0;
+		const float allowed = PoolHeightRule(lerp(standingHeight, groundHeight, ground));
 		pool.tau *= allowed;
 		pool.tauNear *= allowed;
 		return pool;

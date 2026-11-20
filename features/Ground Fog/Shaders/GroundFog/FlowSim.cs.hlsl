@@ -224,13 +224,20 @@ float GustPsi(float2 p)
 			velocity -= Downhill * slope * DeltaTime;
 		}
 
-		// How far this floor stands above the lowest floor around it, three texels out.
+		// How far this floor stands above the lowest floor around it, three texels out. A raised thing (a cart,
+		// a table, a wall top, a big rock) stands above it everywhere within a texel of this one: the lowest floor
+		// within 0.6 m is what is compared. Grass, ferns and plants are not raised things: their tops are seen at
+		// all heights, and within 0.6 m of any of them there is a lower one or the ground. (Small things, a barrel,
+		// a stump, are not marked either; the pool's height rule keeps fog off their tops.)
 		if (level < GroundFog::FloorUnknown) {
 			static const int2 ring[8] = { int2(3, 0), int2(-3, 0), int2(0, 3), int2(0, -3), int2(2, 2), int2(-2, 2), int2(2, -2), int2(-2, -2) };
 			float lowest = min(min(floors.x, floors.y), min(floors.z, floors.w));
 			[unroll] for (uint k = 0u; k < 8u; ++k)
 				lowest = min(lowest, GroundFog::FogFloor.Load(int3(clamp(before + ring[k], 0, last), 0)));
-			raised = smoothstep(RaisedStart, RaisedEnd, level - lowest);
+			const float4 corners = float4(GroundFog::FogFloor.Load(int3(left.x, down.y, 0)), GroundFog::FogFloor.Load(int3(right.x, down.y, 0)),
+				GroundFog::FogFloor.Load(int3(left.x, up.y, 0)), GroundFog::FogFloor.Load(int3(right.x, up.y, 0)));
+			const float near = min(level, min(min(min(floors.x, floors.y), min(floors.z, floors.w)), min(min(corners.x, corners.y), min(corners.z, corners.w))));
+			raised = smoothstep(RaisedStart, RaisedEnd, near - lowest);
 			// For the drawing of the pool: z says how much this texel is a floor the fog lies on (known, and not
 			// the top of a raised thing), and the slope is weighted by it.
 			floorSlope.xyz = float3(floorSlope.xy, 1.0) * (1.0 - raised);

@@ -634,7 +634,8 @@ namespace GroundFog
 		// The pool's debug view chosen by #define (see Pool.hlsli), opaque over the scene within the pool's reach.
 		// 1 Floor map. Blue: no floor known under the pixel. Green: ground, the fog lies on it. Red: stands in the
 		//   fog on a known floor, bright at the floor, dark at and above the top of the fog. Magenta: ground on
-		//   the top of a raised thing (a cart bed, a table, a rock), which gets no fog.
+		//   the top of a raised thing (a cart bed, a table, a rock), which gets no fog. A blue tint on green or
+		//   red: the floor there comes from the terrain height map (the screen has not shown it).
 		// 2 Pool optical depth along the ray: black none, then blue 0.05, green 0.5, yellow 1, red 2 (its cap).
 		// 3 Simulation at the pixel. Red: amount of fog (full at 2). Green: the resting amount it settles to (full
 		//   at 2). Blue: how fast it moves (full at 3 m/s).
@@ -653,7 +654,7 @@ namespace GroundFog
 			if (pool.known <= 0.0)
 				colour = float3(0.0, 0.25 * pool.ground, 1.0);
 			else
-				colour = float3((1.0 - pool.ground) * (0.15 + 0.85 * standing) + pool.ground * (1.0 - floorness), pool.ground * floorness, pool.ground * (1.0 - floorness));
+				colour = float3((1.0 - pool.ground) * (0.15 + 0.85 * standing) + pool.ground * (1.0 - floorness), pool.ground * floorness, pool.ground * (1.0 - floorness) + (pool.known < 1.0 ? 0.4 : 0.0));
 	#	elif GROUND_FOG_POOL_DEBUG == 2
 			colour = pool.tau > 0.0 ? GroundFog::Hue(0.66 * (1.0 - saturate(log2(pool.tau / 0.05) / log2(40.0)))) : 0.0;
 	#	elif GROUND_FOG_POOL_DEBUG == 3

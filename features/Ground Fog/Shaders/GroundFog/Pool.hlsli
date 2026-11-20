@@ -80,6 +80,9 @@ namespace GroundFog
 		float ground;  // how much the pixel counts as ground
 		float over;    // its height over the floor, game units
 		float within;  // length of the stretch of the ray inside the layer, game units
+		// The lumpy top, for shading: 0.5 and 0.5 where there is nothing to say.
+		float crest;    // 0 in a fold between billows, 1 on top of one
+		float sunSide;  // 0 on the side of a billow away from the light, 1 on the side toward it
 	};
 
 	// Texels of the floor map this far above the lowest beside them belong to another level (game units).
@@ -106,13 +109,15 @@ namespace GroundFog
 
 	// position: where the ray ends, camera-relative. normal: of what it ends on, from the depth buffer.
 	// tNear: where the nearest of the output pixel's scene pixels lies along the ray.
-	Pool EvaluatePool(float3 position, float3 dir, float tEnd, float camZ, float3 normal, float tNear, inout uint taps)
+	// lightDir: toward the sun or moon that lights the scene.
+	Pool EvaluatePool(float3 position, float3 dir, float tEnd, float camZ, float3 normal, float tNear, float3 lightDir, inout uint taps)
 	{
 		Pool pool;
 		pool.tau = pool.tauNear = pool.t = pool.z = pool.above = pool.amount = 0.0;
 		pool.speed = 0.0;
 		pool.floorZ = FloorEmpty;
 		pool.range = pool.known = pool.ground = pool.over = pool.within = 0.0;
+		pool.crest = pool.sunSide = 0.5;
 
 		const float2 uv = SimUv(position.xy);
 		const float range = (1.0 - smoothstep(0.5 * PoolEnd, PoolEnd, tEnd)) * SimInside(uv) * smoothstep(PoolNearStart, PoolNearFull, tEnd);
@@ -225,10 +230,21 @@ namespace GroundFog
 		// (so a gust or a blow shears it). It takes most from where the fog is thin, so the rim of a wisp breaks
 		// up into strands and holes, and little from a dense core.
 		float amount = clamp(state.z, 0.0, PoolAmountMax);
+		float billow = 0.55;
 		{
 			const float2 g = (position.xy + FrameBuffer::CameraPosAdjust.xy - WindTravel - state.xy * PoolGrainDrag) / PoolGrain;
 			const float grain = 0.6 * ValueNoise(g) + 0.4 * ValueNoise(g * 2.9 + 31.0);
 			amount = max(amount + (grain - 0.55) * 1.8 * min(amount, 0.7) * Wispiness, 0.0);
+			// The same noise is the lumps of the top: billows 0.6 m across with smaller ones on them. Where it is
+			// high the top stands up (a crest), where it is low there is a fold. And the same noise a hand's width
+			// toward the light says which side of a billow this is: lower there, and this side faces the light.
+			billow = grain;
+			const float lightAcross = length(lightDir.xy);
+			if (lightAcross > 1e-3) {
+				const float2 gToward = g + lightDir.xy / lightAcross * (14.0 / PoolGrain);
+				pool.sunSide = saturate(0.5 + 2.2 * (grain - (0.6 * ValueNoise(gToward) + 0.4 * ValueNoise(gToward * 2.9 + 31.0))));
+			}
+			pool.crest = smoothstep(0.3, 0.75, grain);
 		}
 		pool.amount = amount;
 		pool.speed = state.xy;
@@ -236,7 +252,8 @@ namespace GroundFog
 			return pool;
 
 		// Where there is less fog the layer is lower too, so a wake is a dip and not only a thin place.
-		const float top = max(thick * Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) * lerp(0.4, 1.0, saturate(amount)), 1.0);
+		// And the top is lumpy: lower in the folds, a little higher on the billows, never over the limit.
+		const float top = max(min(thick * Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) * lerp(0.4, 1.0, saturate(amount)) * lerp(0.72, 1.12, billow), max(limit, 1.0)), 1.0);
 		const SoftProfile profile = MakeSoftProfile(top, 0.0, NearFalloff);
 		// Fog thrown up is the same fog over more height: thinner, though not by all of it (it is stirred up too).
 		const float extinction = PoolExtinction * amount * range * share * certain * rsqrt(1.0 + max(lift, 0.0));

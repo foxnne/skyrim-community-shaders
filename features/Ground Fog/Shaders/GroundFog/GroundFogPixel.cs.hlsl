@@ -584,11 +584,14 @@ namespace GroundFog
 	pool.speed = 0.0;
 	pool.floorZ = GroundFog::FloorEmpty;
 	pool.range = pool.known = pool.ground = pool.over = pool.within = 0.0;
+	pool.crest = pool.sunSide = 0.5;
+	// How much of the fog this pixel sees is the pool, for what only the pool's shading takes.
+	float poolShare = 0.0;
 	if (GroundFog::PoolExtinction > 0.0 && surface && tEnd < GroundFog::PoolEnd) {
 		normal = GroundFog::SurfaceNormal(scenePixel, depth, position, mainSize, activeMain);
 		hasNormal = true;
 		taps += 4u;
-		pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, taps);
+		pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, SharedData::DirLightDirection.xyz, taps);
 		if (pool.floorZ < GroundFog::FloorUnknown) {
 			uint2 splatSize;
 			FloorSplat.GetDimensions(splatSize.x, splatSize.y);
@@ -792,6 +795,7 @@ namespace GroundFog
 		seen.above += share * pool.above;
 		seen.tau += pool.tau;
 		tauNear += pool.tauNear;
+		poolShare = share / max(seen.share, 1e-6);
 	}
 
 	if (debugTaps) {
@@ -881,6 +885,8 @@ namespace GroundFog
 				         (albedo * GroundFog::SunWrap * 0.0795775 * visibility * GroundFog::SelfShadowing(tauAbove, lightDirs[l].z));
 		}
 	}
+	// The pool's lumpy top: the side of a billow toward the light is brighter, the side away from it darker.
+	light *= lerp(1.0, lerp(0.55, 1.3, pool.sunSide), poolShare);
 	light *= GroundFog::SunScale;
 	// Sky light reaches fog in the shadow of terrain and objects too, so it takes no direct visibility.
 	// The sky's light on the fog is what the open sky gives, less what stands over the fog: under a canopy or
@@ -909,7 +915,9 @@ namespace GroundFog
 #endif
 		skyOpen = lerp(1.0, skyOpen, GroundFog::CanopyShade);
 	}
-	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming * skyOpen;
+	// And the folds between its billows see less of the sky than their tops.
+	const float folds = lerp(1.0, lerp(0.7, 1.12, pool.crest), poolShare);
+	const float3 skyLight = albedo * GroundFog::SkyMean() * GroundFog::SkyAmbientScale * skyDimming * skyOpen * folds;
 	// Fog in the sun is brighter than fog in the shade, but not without end: what it scatters of the sun and moons
 	// levels off at SunLimit times its sky light (at the limit's own value it has reached half of that), keeping
 	// its colour. So sunlit fog reads as lit fog, not as paint.

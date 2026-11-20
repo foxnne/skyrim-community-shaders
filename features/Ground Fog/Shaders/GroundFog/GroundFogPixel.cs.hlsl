@@ -337,18 +337,25 @@ namespace GroundFog
 			const float pool = smoothstep(0.0, 1.0, max(hollow, ground.water));
 			// Broad banks, travelling with the wind like the sheet's.
 			const float bank = lerp(0.7, 1.25, ValueNoise((xyAbs - WindTravel) * InvBankScale * 0.25 + 7.3));
-			joint.valley.top = max(FarThickness * (0.35 + 0.65 * pool) * bank, 1.0);
-			float place = coverage * ground.amount * valleyFade * pool * BurnOff(BurnSunlitFar, joint.shade);
+			// How much fog the time of day and the sun leave it. Burning off lowers the layer as well as thinning
+			// it: a valley bank at dawn stands its full depth, by midday what is left is a shallow haze on the
+			// floor. (Its top over the ground falls as the hollow gets shallower, so the bank's surface is close
+			// to level across a valley: the land rises out of it instead of carrying it up a slope.)
+			const float burn = BurnOff(BurnSunlitFar, joint.shade);
+			joint.valley.top = max(FarThickness * (0.35 + 0.65 * pool) * bank * clamp(sqrt(burn), ValleyLowest, 1.2), 1.0);
+			float place = coverage * ground.amount * valleyFade * pool * burn;
 			if (place > 0.0) {
 				// It pools on level low ground and does not climb hillsides. And the ground it is laid on is
 				// read coarsely this far out: where that ground may be off the land by more than the layer is
 				// thick, the layer would hang over the land or sink into it in bands, so it thins out there,
 				// except near the end of a ray, where its ground is the surface the pixel shows. Water is
-				// level and exactly known.
+				// level and exactly known. Both rules only take away what is clearly wrong: at 25ccbccb2 there
+				// were none and the bank lay soft and whole over the low country; their first versions (slopes
+				// from 0.12, doubt from half the layer's depth) cut most of it away.
 				if (ground.water < 1.0) {
 					const float2 lie = LandLieAt(ray, joint.t, slow, taps);
-					const float level = 1.0 - smoothstep(0.12, 0.35, lie.x);
-					const float sure = 1.0 - smoothstep(0.5, 1.5, lie.y / joint.valley.top);
+					const float level = 1.0 - smoothstep(ValleySlope.x, ValleySlope.y, lie.x);
+					const float sure = 1.0 - smoothstep(ValleyDoubt.x, ValleyDoubt.y, lie.y / joint.valley.top);
 					place *= lerp(level * lerp(sure, 1.0, ValleyAnchorAt(ray, joint.t)), 1.0, ground.water);
 				}
 				if (ground.water > 0.0)

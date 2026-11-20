@@ -121,6 +121,13 @@ namespace GroundFog
 	static const float FogForward = 0.6;
 	static const float FogMultiple = 0.6;
 	static const float FogMultipleReach = 0.35;
+	//
+	// The valley layer. It thins out on land steeper than ValleySlope (rise over run, from x to y), and where the
+	// coarse ground under it may be off the land by more than ValleyDoubt times its depth (from x to y). When the
+	// time of day burns it off its depth falls with the square root of what is left, to no less than ValleyLowest.
+	static const float2 ValleySlope = float2(0.2, 0.5);
+	static const float2 ValleyDoubt = float2(0.9, 2.5);
+	static const float ValleyLowest = 0.4;
 
 	struct Cell
 	{

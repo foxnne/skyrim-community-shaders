@@ -50,12 +50,39 @@ namespace GroundFog
 	static const float PoolGrainDrag = 0.5;
 	// THE HEIGHT RULE. The pool is a blanket a foot thick at its thickest. No surface more than PoolHardTop above
 	// its floor ever receives pool fog, whatever the settings, the simulation or the floor map say: EvaluatePool
-	// ends with that test (PoolHeightRule), after everything else. The layer itself is held to it as well, so the
-	// fog over the ground is no deeper than what things standing in it can show. Game units (0.35 m).
+	// ends with that test (PoolHeightRule), after everything else. The fog itself is cut off at that height too:
+	// its profile keeps the scale Near Thickness gives it (so it is dense nearly up to the cut), and nothing of it
+	// is counted above PoolHardTop. Game units (0.35 m).
 	static const float PoolHardTop = 24.5;
 	// Fog that is struck may stand up to this many times taller for a moment, over the ground only (a plume is
 	// seen against the ground behind it; it still puts nothing on a surface above PoolHardTop).
 	static const float PoolPlumeMax = 2.0;
+	// A pixel that faces up at least this much (normal z) and lies within PoolGroundBand of a floor level around it
+	// is ground: the fog lies on it, in full. Game units (0.1 m), and as much again to fade out.
+	static const float PoolGroundFacing = 0.5;
+	static const float PoolGroundBand = 7.0;
+
+	// The soft profile, cut off at `cap`: the mean density along a straight piece of ray whose height runs from ha
+	// to hb, counting nothing above the cap; and the density integrated from h up to the cap.
+	float ClippedLineMean(SoftProfile profile, float ha, float hb, float cap)
+	{
+		const float low = min(ha, hb);
+		const float high = max(ha, hb);
+		const float ceiling = min(profile.top, cap);
+		if (high <= -profile.fill || low >= ceiling)
+			return 0.0;
+		if (high - low < 1.0) {
+			const float mid = 0.5 * (low + high);
+			return mid > ceiling ? 0.0 : SoftDensity(profile, mid);
+		}
+		return (SoftFirst(profile, min(high, ceiling)) - SoftFirst(profile, min(low, ceiling))) / (high - low);
+	}
+
+	float ClippedAbove(SoftProfile profile, float h, float cap)
+	{
+		const float ceiling = min(profile.top, cap);
+		return h >= ceiling ? 0.0 : SoftFirst(profile, ceiling) - SoftFirst(profile, max(h, 0.0));
+	}
 
 	// The last word on every result of EvaluatePool: nothing for a surface higher than PoolHardTop over its floor.
 	// height: of the surface over the floor under it, game units; 0 for ground.
@@ -89,8 +116,9 @@ namespace GroundFog
 	static const float PoolOtherLevel = 60.0;
 
 	// The floor at a simulation uv, from the four texels around it: the lowest of them, and the level filtered
-	// between those that are no more than PoolOtherLevel above it. False where none is known. One read.
-	bool FloorAround(float2 uv, out float level, out float lowest)
+	// between those that are no more than PoolOtherLevel above it. nearest: how far z lies from the nearest floor
+	// level among the four (above or below it). False where none is known. One read.
+	bool FloorAround(float2 uv, float z, out float level, out float lowest, out float nearest)
 	{
 		uint width, height;
 		FogFloor.GetDimensions(width, height);
@@ -99,6 +127,8 @@ namespace GroundFog
 		// A texel counts at least a little wherever the pixel is among the four, so one that is known is never lost.
 		float4 weights = float4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y), (1.0 - f.x) * (1.0 - f.y)) + 0.02;
 		lowest = min(min(levels.x, levels.y), min(levels.z, levels.w));
+		const float4 distances = levels < FloorUnknown ? abs(z - levels) : 1.0e30;
+		nearest = min(min(distances.x, distances.y), min(distances.z, distances.w));
 		const bool4 known = levels < min(lowest + PoolOtherLevel, FloorUnknown);
 		weights = known ? weights : 0.0;
 		levels = known ? levels : 0.0;
@@ -135,9 +165,9 @@ namespace GroundFog
 		FogFloor.GetDimensions(width, height);
 		const float texel = 1.0 / (FlowWindow.z * float(width));
 		const float across = length(dir.xy);
-		float levelHere, lowHere, levelToward, lowToward;
-		FloorAround(uv, levelHere, lowHere);
-		FloorAround(SimUv(position.xy - dir.xy * (across > 1e-3 ? 1.5 * texel / across : 0.0)), levelToward, lowToward);
+		float levelHere, lowHere, levelToward, lowToward, nearHere, nearToward;
+		FloorAround(uv, z, levelHere, lowHere, nearHere);
+		FloorAround(SimUv(position.xy - dir.xy * (across > 1e-3 ? 1.5 * texel / across : 0.0)), z, levelToward, lowToward, nearToward);
 		taps += 2u;
 		const bool known = min(lowHere, lowToward) < FloorUnknown;
 		// The floor here, unless everything here stands well above the floor toward the camera.
@@ -146,10 +176,9 @@ namespace GroundFog
 		// How far the top is thrown up or pressed down here.
 		const float lift = clamp(FogLift.SampleLevel(LinearSampler, uv, 0), -0.6, 3.0);
 		++taps;
-		// The layer: Near Thickness, held so that its top with breathing stays at PoolHardTop or under.
-		const float layer = min(PoolThickness, PoolHardTop / (1.0 + NearBreath));
-		const float thick = layer * min(1.0 + lift, PoolPlumeMax);
-		const float limit = min(thick * (1.0 + NearBreath), PoolHardTop);
+		// The layer keeps the scale of Near Thickness (lifted where it is struck); what of it is counted stops at
+		// PoolHardTop, or for a moment up to PoolPlumeMax times that over ground where it is thrown up.
+		const float thick = PoolThickness * (1.0 + lift);
 		pool.known = known ? 1.0 : 0.0;
 		pool.over = over;
 		// Well under every floor around: the map is not up to date there (it will be on the next frame).
@@ -165,24 +194,26 @@ namespace GroundFog
 		// Ground: faces up and lies at the level of the floor, give or take what the slope there accounts for
 		// (the lowest floor within a texel or two of a place on a slope is lower than the place).
 		const float allowance = min(min(length(slope), 0.6) * slopeKnown * 1.5 * texel, PoolStep);
-		// With no known floor only what is very nearly level counts.
-		const float ground = known ? smoothstep(0.6, 0.85, normal.z) * (1.0 - smoothstep(0.5 * layer, layer, over - allowance)) : smoothstep(0.88, 0.96, normal.z);
+		// Ground: faces up and lies within PoolGroundBand of a floor level around it (the nearest of the eight
+		// texels read here and toward the camera, so the edge of a road or a step counts on both sides), give or
+		// take what the slope accounts for. With no known floor only what is very nearly level counts.
+		const float nearest = max(min(nearHere, nearToward) - allowance, 0.0);
+		const float ground = known ? smoothstep(PoolGroundFacing - 0.05, PoolGroundFacing + 0.1, normal.z) * (1.0 - smoothstep(PoolGroundBand, 2.0 * PoolGroundBand, nearest)) :
+		                             smoothstep(0.88, 0.96, normal.z);
 		pool.ground = ground;
 		if (!known && ground <= 0.0)
 			return pool;
+		const float limit = PoolHardTop * lerp(1.0, clamp(1.0 + lift, 1.0, PoolPlumeMax), ground);
 
-		// Height of the ray above the ground the fog lies on, s back from its end: start + rise * s. On ground it
-		// starts at 0, elsewhere at the height of the pixel over the floor. At or above the layer's top there is
-		// nothing, for any surface.
-		// A pixel that counts as ground still starts at its own height over the floor, less what the slope and the
-		// map's own unevenness account for: so a blade of grass or a leaf that happens to face up stands in the fog
-		// by its height like any other, and is not coated as if it were the floor.
-		const float start = max(over - ground * (allowance + 5.0), 0.0);
+		// Height of the ray above the ground the fog lies on, s back from its end: start + rise * s. Ground is the
+		// floor the fog lies on: it starts at 0. What is not ground starts at its height over the floor, and at or
+		// above the cut there is nothing.
+		const float start = (1.0 - ground) * max(over, 0.0);
 		if (start >= limit)
 			return pool;
 		// Without a floor only the ground share has fog.
 		const float share = known ? 1.0 : ground;
-		const float stretch = min(tEnd, 25.0 * layer);
+		const float stretch = min(tEnd, 25.0 * PoolThickness);
 		if (start >= thick * (1.0 + NearBreath))
 			return pool;
 
@@ -196,12 +227,12 @@ namespace GroundFog
 		const float riseOwn = -dot(normal, dir) / max(normal.z, 0.5);
 		float rise = lerp(riseOwn, riseFloor, slopeKnown);
 		if (known && ground > 0.0) {
-			const float reach = min(stretch, max(thick - start, 0.0) / max(rise, PoolMinSlope));
-			float levelBack, lowBack;
+			const float reach = min(stretch, max(min(thick, limit) - start, 0.0) / max(rise, PoolMinSlope));
+			float levelBack, lowBack, nearBack;
 			++taps;
 			// A floor back there that stands well above this one is a thing the ray passes over (a cart, a wall,
 			// a porch), not the rim of a dip the fog fills: it says nothing about the ground the fog lies on.
-			if (reach > 1.0 && FloorAround(SimUv(position.xy - dir.xy * reach), levelBack, lowBack) && levelBack - floorZ < layer + PoolStep)
+			if (reach > 1.0 && FloorAround(SimUv(position.xy - dir.xy * reach), z, levelBack, lowBack, nearBack) && levelBack - floorZ < PoolHardTop + PoolStep)
 				rise = -dir.z - (levelBack - floorZ) / reach;
 		}
 		// Seen from above, no ray is taken to run flatter than PoolMinSlope over the fog's ground: the floor map
@@ -221,7 +252,7 @@ namespace GroundFog
 			return pool;
 
 		// The stretch of the ray inside the layer, for where to read the simulation.
-		const float within = rise > 1e-4 ? min(stretch, max(thick - start, 0.0) / rise) : stretch;
+		const float within = rise > 1e-4 ? min(stretch, max(min(thick, limit) - start, 0.0) / rise) : stretch;
 		const float4 state = 0.5 * (FogSim.SampleLevel(LinearSampler, SimUv(position.xy - dir.xy * (0.2 * within)), 0) +
 									   FogSim.SampleLevel(LinearSampler, SimUv(position.xy - dir.xy * (0.65 * within)), 0));
 		taps += 2u;
@@ -252,13 +283,14 @@ namespace GroundFog
 			return pool;
 
 		// Where there is less fog the layer is lower too, so a wake is a dip and not only a thin place.
-		// And the top is lumpy: lower in the folds, a little higher on the billows, never over the limit.
-		const float top = max(min(thick * Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) * lerp(0.4, 1.0, saturate(amount)) * lerp(0.72, 1.12, billow), max(limit, 1.0)), 1.0);
+		// And the top is lumpy: lower in the folds, a little higher on the billows. This is the profile's scale;
+		// what is counted of it stops at the cut (limit).
+		const float top = max(thick * Breathing(position.xy + FrameBuffer::CameraPosAdjust.xy) * lerp(0.4, 1.0, saturate(amount)) * lerp(0.72, 1.12, billow), 1.0);
 		const SoftProfile profile = MakeSoftProfile(top, 0.0, NearFalloff);
 		// Fog thrown up is the same fog over more height: thinner, though not by all of it (it is stirred up too).
 		const float extinction = PoolExtinction * amount * range * share * certain * rsqrt(1.0 + max(lift, 0.0));
 		const float end = start + rise * stretch;
-		const float tau = extinction * SoftLineMean(profile, start, end) * stretch;
+		const float tau = extinction * ClippedLineMean(profile, start, end, limit) * stretch;
 		if (tau <= 0.0)
 			return pool;
 		// Levels off: no single place can turn the pool into a wall.
@@ -266,16 +298,19 @@ namespace GroundFog
 		// In front of the nearest scene pixel: the same integral over the part of the stretch beyond it.
 		const float back = tEnd - tNear;
 		if (back < stretch)
-			pool.tauNear = min(extinction * SoftLineMean(profile, start + rise * back, end) * (stretch - back), tau) * pool.tau / tau;
+			pool.tauNear = min(extinction * ClippedLineMean(profile, start + rise * back, end, limit) * (stretch - back), tau) * pool.tau / tau;
 
-		const float lit = clamp(start + 0.25 * top, 0.15 * top, top);
+		const float lit = clamp(start + 0.25 * top, 0.15 * top, min(top, limit));
 		pool.t = tEnd - 0.4 * within;
 		pool.z = z - start + lit;
-		pool.above = PoolExtinction * amount * SoftAbove(profile, lit);
+		pool.above = PoolExtinction * amount * ClippedAbove(profile, lit, limit);
 
-		// THE HEIGHT RULE, last: see PoolHardTop. `over` is the height of this surface above its floor (0 where
-		// no floor is known, and only nearly level ground gets this far then).
-		const float allowed = PoolHeightRule(max(over - ground * (allowance + 5.0), 0.0));
+		// THE HEIGHT RULE, last: see PoolHardTop. The height of this surface over its floor: for what stands in the
+		// fog, over the lowest floor around it and toward the camera; for ground, over the floor it lies on (the
+		// nearest level, less the slope's share). 0 where no floor is known (only nearly level ground gets here then).
+		const float lowFloor = min(lowHere, lowToward);
+		const float standingHeight = known ? max(z - lowFloor, 0.0) : 0.0;
+		const float allowed = PoolHeightRule(lerp(standingHeight, known ? nearest : 0.0, ground));
 		pool.tau *= allowed;
 		pool.tauNear *= allowed;
 		return pool;

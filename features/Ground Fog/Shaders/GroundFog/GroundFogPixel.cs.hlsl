@@ -10,9 +10,13 @@
 //   segment keeps its mass and its shape. There are no depth slices to band or ladder as the camera moves.
 // - Nothing is accumulated over frames: the result is a function of the pixel's ray, its depth and the world.
 //
+// The pool, the knee-high fog around the camera, is not part of the march: a layer that thin cannot take its ground
+// from a height map. It is integrated in closed form over the end of the ray, on what the pixel shows, from the
+// simulation (GroundFog/Pool.hlsli, GroundFog/FlowSim.cs.hlsl), and added behind what the march found.
+//
 // Three layers share the march:
-// - the near volume: a few meters tall, soft-topped, within NearEnd of the camera. This is what reads as fog in the
-//   air from any direction: a level ray at eye height runs through it. Near the camera the joints are one height
+// - the near volume (only when the near layer is set thicker than a pool): a few meters tall, soft-topped, within
+//   NearEnd of the camera. A level ray at eye height runs through it. Near the camera the joints are one height
 //   map texel (under 2 m) apart, and each segment is integrated in closed form.
 // - the sheet: thin, on the ground, out to FadeEnd.
 // - the valley layer: deeper, in hollows and over water, from where the sheet fades out to kilometers away. It lies
@@ -42,11 +46,16 @@
 #include "PhysicalSky/Common.hlsli"
 #include "ViewAtmosphere/MediumLighting.hlsli"
 
+#define GROUND_FOG_SHADE
 #include "GroundFog/GroundFog.hlsli"
+#include "GroundFog/Pool.hlsli"
 
 Texture2D<float> SceneDepth : register(t40);
 RWTexture2D<float4> FogOut : register(u0);
 RWTexture2D<float4> FogAuxOut : register(u1);
+// What this frame shows of the floor, for the simulation's floor map: per texel of its window the lowest absolute z
+// of the up-facing surfaces seen there. Cleared to FloorEmpty before the pass.
+RWTexture2D<float> FloorSplat : register(u2);
 
 namespace GroundFog
 {
@@ -55,8 +64,6 @@ namespace GroundFog
 	static const float FloorFar = 3150.0;
 	// A level surface above the mapped ground is a floor if it continues this far around the pixel, game units.
 	static const float FloorSupportRadius = 84.0;
-	// Ground this far below the terrain shadow's surface has been out of the sun for long: it keeps all its fog.
-	static const float ShadeDepth = 1050.0;
 
 	// One layer at a point of the ray.
 	struct Layer
@@ -246,42 +253,6 @@ namespace GroundFog
 		return lerp(slow.lieNear, slow.lieFar, saturate((t - tNear) / (tNear * (LieStep - 1.0))));
 	}
 
-	// Hollows hold more, rises less: the terrain averaged around the point against the terrain at it.
-	float Basin(float around, float terrain)
-	{
-		const float hollow = clamp((around - terrain) * InvBasinDepth, -1.0, 1.0);
-		return clamp(1.0 + BasinStrength * hollow, 0.0, 1.0 + BasinStrength);
-	}
-
-	// 1 where the terrain has kept the sun off a point for long, 0 where the sun reaches it. From the Terrain
-	// Shadows height field for the present sun: a point is in shadow when it lies below that field, and the deeper
-	// below, the longer ago the shadow's edge passed over it (in the morning the field sinks as the sun climbs).
-	// So depth below the field stands for time out of the sun, with no history stored, and the edge of the mask
-	// moves smoothly as the sun does. One read.
-	float TerrainShade(float2 xyAbs, float z, inout uint taps)
-	{
-#ifdef TERRAIN_SHADOWS
-		if (BurnRetention <= 0.0 || !(ViewAtmosphere::Data[0].flags.z & 256u) || !SharedData::terraOccSettings.EnableTerrainShadow)
-			return 0.0;
-		const float2 uv = TerrainShadows::GetTerrainShadowUV(xyAbs);
-		if (any(uv < 0.0) || any(uv > 1.0))
-			return 0.0;
-		++taps;
-		const float2 heights = TerrainShadows::GetTerrainZ(TerrainShadows::ShadowHeightTexture.SampleLevel(LinearSampler, uv, 0));
-		// The field is stored lowered by SelfShadowBias; one meter of slack keeps lit slopes clear of the mask.
-		const float field = 0.5 * (heights.x + heights.y) + TerrainShadows::SelfShadowBias;
-		return smoothstep(70.0, 70.0 + ShadeDepth, field - z);
-#else
-		return 0.0;
-#endif
-	}
-
-	// Amount by time of day and sun: what sunlit ground holds now, raised toward the shaded amount in shadow.
-	float BurnOff(float sunlit, float shade)
-	{
-		return lerp(sunlit, max(sunlit, BurnShaded), BurnRetention * shade);
-	}
-
 	// No fog lies higher than this above the mapped ground anywhere between two distances along the ray.
 	float SlabTop(float from, float to, float lift, float floorLift, float valleyLift)
 	{
@@ -322,12 +293,9 @@ namespace GroundFog
 		}
 		joint.shade = slow.shade;
 		if (joint.sheet.inside || joint.near.inside) {
-			// Shared by the sheet and the near volume: they are one body of fog, thin far away and tall close by.
-			// Over water: WaterPreference times as much, through the water's own drifting patches. ground.water
-			// rises from 0 at the waterline over the shore depth, so the change has the shape of the shore.
-			float place = coverage * ground.amount * BurnOff(BurnSunlitNear, joint.shade);
-			if (ground.water > 0.0)
-				place *= lerp(1.0, WaterPreference * WaterPatches(xyAbs, reach), ground.water);
+			// Shared by the sheet and the near volume: they are one body of fog, thin far away and tall close by,
+			// placed by the resting amount (the same pieces as RestingAmountAt, with the slow reads held).
+			float place = RestingAmount(coverage, ground, joint.shade, BurnSunlitNear, xyAbs, reach);
 			if (place > 0.0 && BasinStrength > 0.0) {
 				if (Stale(slow.tAround, joint.t)) {
 					slow.around = GroundAround(xy, BasinRadius);
@@ -336,19 +304,18 @@ namespace GroundFog
 				}
 				place *= Basin(slow.around, ground.terrain);
 			}
-			float3 flow = 0.0;
-			if (InFlowWindow(xy)) {
-				flow = Flow(xy);
+			place *= DensityModifier(xyAbs, reach);
+			// Inside the simulation's window: by how far the fog there is from rest (a wake, a pile-up).
+			if (place > 0.0 && InSimWindow(xy)) {
+				place *= SimDisturbance(xy);
 				++taps;
 			}
-			const float2 pattern = xyAbs - flow.xy;
-			place *= DensityModifier(pattern, reach) * (1.0 - saturate(flow.z));
 			joint.sheet.place = place * sheetFade;
 			joint.near.place = place * nearFade;
 			if (joint.sheet.inside)
-				joint.sheet.top = LayerTop(pattern, reach);
+				joint.sheet.top = LayerTop(xyAbs, reach);
 			if (joint.near.inside)
-				joint.near.top = max(NearThickness * Breathing(pattern), 1.0);
+				joint.near.top = max(NearThickness * Breathing(xyAbs), 1.0);
 		}
 		if (joint.valley.inside) {
 			// Only where the land lies lower than the country around it, or on water: pools in basins and on
@@ -594,9 +561,40 @@ namespace GroundFog
 	const float4 clear = float4(0.0, 0.0, 0.0, 1.0);
 	const float4 clearAux = float4(auxDepths, 1.0, 1.0);
 
+	// Where the nearest of the four scene pixels lies along this ray.
+	const float tNear = viewNear < viewFar * 0.98 ? min(sceneDistance * viewNear / viewFar, tEnd) : tEnd;
+
+	// The pool: from the pixel, its surface and the simulation alone. No height map is read for it.
+	float3 normal = 0.0;
+	bool hasNormal = false;
+	GroundFog::Pool pool;
+	pool.tau = pool.tauNear = pool.t = pool.z = pool.above = pool.amount = 0.0;
+	pool.speed = 0.0;
+	pool.floorZ = GroundFog::FloorEmpty;
+	if (GroundFog::PoolExtinction > 0.0 && surface && tEnd < GroundFog::PoolEnd) {
+		normal = GroundFog::SurfaceNormal(scenePixel, depth, position, mainSize, activeMain);
+		hasNormal = true;
+		taps += 4u;
+		pool = GroundFog::EvaluatePool(position, dir, tEnd, camZ, normal, tNear, taps);
+		if (pool.floorZ < GroundFog::FloorUnknown) {
+			uint2 splatSize;
+			FloorSplat.GetDimensions(splatSize.x, splatSize.y);
+			const float2 splatUv = GroundFog::SimUv(position.xy);
+			if (all(splatUv > 0.0) && all(splatUv < 1.0)) {
+				// Not atomic: of two pixels that write one texel at the same moment either may win. The simulation
+				// takes the lowest of each texel's surroundings and lets the floor rise only slowly, so a lost
+				// write changes nothing that lasts.
+				const uint2 texel = min(uint2(splatUv * float2(splatSize)), splatSize - 1u);
+				if (pool.floorZ < FloorSplat[texel])
+					FloorSplat[texel] = pool.floorZ;
+			}
+		}
+	}
+
 	// The whole ray against the highest ground under it: one read settles short rays that end well above the ground.
 	++taps;
-	if (camZ + min(dir.z * tEnd, 0.0) - GroundFog::GroundMaxAlong(0.0, endXY) > GroundFog::SlabTop(0.0, tEnd, lift, floorLift, valleyLift)) {
+	const bool march = camZ + min(dir.z * tEnd, 0.0) - GroundFog::GroundMaxAlong(0.0, endXY) <= GroundFog::SlabTop(0.0, tEnd, lift, floorLift, valleyLift);
+	if (!march && pool.tau <= 0.0) {
 		FogOut[pixel] = debugTaps ? float4(GroundFog::TapColor(taps) * GroundFog::SkyMean() * 4.0, 0.5) : clear;
 		FogAuxOut[pixel] = debugTaps ? float4(auxDepths, 0.5, 1.0) : clearAux;
 		return;
@@ -613,7 +611,7 @@ namespace GroundFog
 	ray.tFloorEnd = tEnd;
 	ray.valleyOffset = 0.0;
 	ray.valleyLength = 0.0;
-	if (anchor) {
+	if (anchor && march) {
 		// Far ground is read from coarse levels of the height map, and a layer a few meters thick laid on that
 		// lifts off rising ground or sinks into it in bands. Where the ray ends on a surface, that surface is the
 		// ground there: the layer's ground meets it over the end of the ray, so the fog touches what the pixel
@@ -629,12 +627,14 @@ namespace GroundFog
 	// In front of anything that is not ground the fog fades out over the end of the ray, so it never draws the
 	// outline of what stands in it.
 	float softScale = 1.0;
-	if (wrap) {
+	if (wrap && march) {
 		// Near its end the ray is over whatever the pixel shows, not over the mapped terrain. If that faces up it
 		// is ground: the ground under the end of the ray is moved to it, so the fog lies on rocks, roads and
 		// floors and thins out against them like against the terrain. If it does not, nothing moves.
-		const float3 normal = GroundFog::SurfaceNormal(scenePixel, depth, position, mainSize, activeMain);
-		taps += 4u;
+		if (!hasNormal) {
+			normal = GroundFog::SurfaceNormal(scenePixel, depth, position, mainSize, activeMain);
+			taps += 4u;
+		}
 		const float facingUp = smoothstep(0.5, 0.85, normal.z);
 		softScale = lerp(0.5, 1.0, facingUp);
 		const bool nearEnd = GroundFog::NearExtinction > 0.0 && tEnd < GroundFog::NearEnd;
@@ -670,8 +670,6 @@ namespace GroundFog
 	ray.tBlend = tEnd - ray.blendLength;
 	ray.tFloor = ray.tFloorEnd - ray.floorLength;
 	const float tSoft = softScale < 1.0 && GroundFog::SoftLength > 0.0 ? max(tEnd - GroundFog::SoftLength, 0.0) : tEnd;
-	// Where the nearest of the four scene pixels lies along this ray.
-	const float tNear = viewNear < viewFar * 0.98 ? min(sceneDistance * viewNear / viewFar, tEnd) : tEnd;
 	const float4 stops = float4(ray.tBlend, ray.tFloor, tSoft, tNear);
 
 	// The ray in height map uv, to find where it crosses the texel grid.
@@ -684,12 +682,15 @@ namespace GroundFog
 	slow.lieIndex = -1000;
 	slow.lieNear = slow.lieFar = 0.0;
 	slow.waterCeiling = 1.0e30;
-	GroundFog::Joint a = GroundFog::MakeJoint(ray, 0.0, GroundFog::StepMin, slow, taps);
 
 	GroundFog::Seen seen;
 	seen.tau = seen.share = seen.t = seen.z = seen.above = seen.valley = seen.shade = 0.0;
 	float tauNear = -1.0;
-	[loop] for (uint i = 0u; i < GroundFog::MaxSteps; ++i)
+	// A ray that only the pool has fog for is not marched.
+	GroundFog::Joint a = (GroundFog::Joint)0;
+	if (march)
+		a = GroundFog::MakeJoint(ray, 0.0, GroundFog::StepMin, slow, taps);
+	[loop] for (uint i = 0u; i < (march ? GroundFog::MaxSteps : 0u); ++i)
 	{
 		if (a.t >= tEnd - 0.01)
 			break;
@@ -747,6 +748,17 @@ namespace GroundFog
 	if (tauNear < 0.0)
 		tauNear = seen.tau;
 
+	// The pool lies at the end of the ray, behind what the march found.
+	if (pool.tau > 0.0) {
+		const float share = exp(-seen.tau) * GroundFog::OneMinusExp(pool.tau);
+		seen.share += share;
+		seen.t += share * pool.t;
+		seen.z += share * pool.z;
+		seen.above += share * pool.above;
+		seen.tau += pool.tau;
+		tauNear += pool.tauNear;
+	}
+
 	if (debugTaps) {
 		FogOut[pixel] = float4(GroundFog::TapColor(taps) * GroundFog::SkyMean() * 4.0, 0.5);
 		FogAuxOut[pixel] = float4(auxDepths, 0.5, 1.0);
@@ -773,6 +785,10 @@ namespace GroundFog
 		// Red: valley layer. Green: sheet and near volume. Blue: fog kept by terrain shadow (the burn-off mask).
 		const float valley = seen.valley / seen.share;
 		albedo = 0.08 + 0.92 * float3(valley, 1.0 - valley, seen.shade / seen.share);
+	} else if (GroundFog::DebugMode == 5u) {
+		// The simulation under the pool. Red: how fast the fog moves (full at 3 m/s). Green: how much there is
+		// (full at twice the mean). Blue: pixels that are not floor (they add nothing to the floor map).
+		albedo = pool.tau > 0.0 ? 0.05 + 0.95 * float3(saturate(length(pool.speed) / 210.0), saturate(0.5 * pool.amount), pool.floorZ < GroundFog::FloorUnknown ? 0.0 : 1.0) : 0.02;
 	}
 
 	const SharedData::PhysSkyData physSky = SharedData::physSkyData;

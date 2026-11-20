@@ -61,6 +61,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	EveningAmount,
 	Reactive,
 	ReactiveStrength,
+	SettleTime,
+	DownhillFlow,
+	Swirl,
 	HalfResolution,
 	StepGrowth,
 	MaxSteps,
@@ -117,18 +120,32 @@ namespace
 	// starts to return.
 	constexpr float kBurnOffHours = 3.0f;
 	constexpr float kReturnHours = 2.0f;
-	// Reactive flow map: texels across, game units per texel (0.4 m; the window covers 51 m).
-	constexpr uint32_t kFlowSize = 128;
-	constexpr double kFlowTexel = 28.0;
-	// Seconds over which the fog's motion dies down, and over which displaced and cleared fog flows back.
-	constexpr float kFlowVelocityTime = 1.0f;
-	constexpr float kFlowDisplacementTime = 4.0f;
-	constexpr float kFlowClearTime = 3.5f;
-	constexpr float kFlowMaxDisplacement = 210.0f;  // 3 m
+	// The near layer is the pool up to this thickness (meters) and the tall marched volume above it.
+	constexpr float kPoolMaxThickness = 1.0f;
+	// The simulation: texels across, and the smallest game units per texel (0.4 m; the window then covers 102 m).
+	// With a longer Near Distance the texels grow so that the window still holds it.
+	constexpr uint32_t kSimSize = 256;
+	constexpr double kSimMinTexel = 28.0;
+	constexpr double kSimTexelStep = 7.0;
+	// Seconds over which the fog's motion relative to the wind dies down.
+	constexpr float kSimVelocityTime = 1.2f;
+	// Speed of a ripple in the fog, game units per second: how fast a hole closes from its rim.
+	constexpr float kSimWaveSpeed = 50.0f;
+	// Acceleration down a slope of 1 at Downhill Flow 1, game units per second^2 (0.5 m/s on a 1 in 5 slope).
+	constexpr float kSimDownhill = 120.0f;
+	// Seconds over which the floor map rises to a higher surface (it drops to a lower one at once).
+	constexpr float kSimFloorRiseTime = 0.75f;
+	constexpr float kMinSettleTime = 0.5f;
+	constexpr float kMaxSettleTime = 30.0f;
+	constexpr float kMaxDownhillFlow = 4.0f;
+	constexpr float kMaxSwirl = 2.0f;
 	// Movers slower than this leave the fog alone; faster than the cap they push it no harder. Game units per second.
 	constexpr float kFlowMinSpeed = 20.0f;
 	constexpr float kFlowMaxSpeed = 600.0f;
-	// Things higher than this above the land are over the fog, not in it. Game units.
+	// Things higher than this above the ground are over the fog, not in it. Game units: for the pool, and for the
+	// tall volume.
+	constexpr float kFlowHeightStartPool = 110.0f;
+	constexpr float kFlowHeightEndPool = 230.0f;
 	constexpr float kFlowHeightStart = 280.0f;
 	constexpr float kFlowHeightEnd = 490.0f;
 	constexpr float kMaxReactiveStrength = 2.0f;
@@ -184,6 +201,7 @@ void GroundFog::SetupResources()
 {
 	volumeConstants = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<VolumeData>(), "GroundFog::VolumeData");
 	flowConstants = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<FlowData>(), "GroundFog::FlowData");
+	simData = std::make_unique<FlowData>();
 	FindWaterMaps();
 }
 
@@ -313,7 +331,7 @@ void GroundFog::UpdateFloorOffset(float a_deltaTime)
 		floorOffset = 0.0f;
 }
 
-uint32_t GroundFog::GatherFlowEmitters(FlowEmitter* a_emitters, double a_originX, double a_originY, float a_deltaTime)
+uint32_t GroundFog::GatherSimEmitters(FlowEmitter* a_emitters, double a_originX, double a_originY, float a_deltaTime)
 {
 	// Sources, all read from lists the game keeps anyway (no hooks):
 	// - actors: the player and RE::ProcessLists::highActorHandles (the actors near the player that are fully
@@ -323,8 +341,13 @@ uint32_t GroundFog::GatherFlowEmitters(FlowEmitter* a_emitters, double a_originX
 	//   missiles, cones, flames. Their runtime data has the velocity.
 	// - impacts: a projectile that was flying last frame and is gone this frame ended there: a burst at its last
 	//   position, larger for one that carried a spell or an explosion.
-	// Not gathered yet (the emitter list is the interface; add entries here): spell casts and shouts at the
-	// caster, RE::Explosion references, hazards, falling objects.
+	// Not gathered yet. The emitter list is the whole interface, so each of these is an add() call here and nothing
+	// in the shader changes:
+	// - spell casts and shouts at the caster: a burst at the caster (add(position, {}, radius, burst, clear, 0));
+	// - RE::Explosion references and hazards: a burst, or a standing clear for a hazard;
+	// - heat (torches, campfires, flame spells): an emitter with no velocity and a small clear every frame, which
+	//   keeps a hole open that refills over Settle Time when the source goes;
+	// - falling objects and ragdolls that are not actors.
 	struct Candidate
 	{
 		FlowEmitter emitter;
@@ -332,7 +355,10 @@ uint32_t GroundFog::GatherFlowEmitters(FlowEmitter* a_emitters, double a_originX
 	};
 	eastl::vector<Candidate> candidates;
 	const auto eye = Util::GetEyePosition();
-	const float reach = static_cast<float>(kFlowSize * kFlowTexel) * 0.5f + 300.0f;
+	const float reach = static_cast<float>(kSimSize * simTexel) * 0.5f + 300.0f;
+	// The height map knows the land; near the player the fog lies on the floor the player stands on.
+	const float heightStart = poolActive ? kFlowHeightStartPool : kFlowHeightStart;
+	const float heightEnd = poolActive ? kFlowHeightEndPool : kFlowHeightEnd;
 	const float invDelta = a_deltaTime > 1.0e-4f ? 1.0f / a_deltaTime : 0.0f;
 	auto tes = RE::TES::GetSingleton();
 	// 1 in the fog's height range above the land, 0 well above it. Unknown land counts as in range.
@@ -340,10 +366,11 @@ uint32_t GroundFog::GatherFlowEmitters(FlowEmitter* a_emitters, double a_originX
 		float land = 0.0f;
 		if (!tes || !tes->GetLandHeight(a_position, land) || !std::isfinite(land))
 			return 1.0f;
-		return 1.0f - Util::Smoothstep(kFlowHeightStart, kFlowHeightEnd, a_position.z - land);
+		return 1.0f - Util::Smoothstep(heightStart, heightEnd, a_position.z - land - floorOffset);
 	};
-	auto add = [&](const RE::NiPoint3& a_position, RE::NiPoint3 a_velocity, float a_radius, float a_burst, float a_clear, float a_priority) {
-		const float weight = inFog(a_position);
+	// a_weight: how far the thing is in the fog, 0 to 1; negative to work it out from its height above the land.
+	auto add = [&](const RE::NiPoint3& a_position, RE::NiPoint3 a_velocity, float a_radius, float a_burst, float a_clear, float a_priority, float a_weight = -1.0f) {
+		const float weight = a_weight >= 0.0f ? a_weight : inFog(a_position);
 		if (weight <= 0.0f)
 			return;
 		const float speed = std::sqrt(a_velocity.x * a_velocity.x + a_velocity.y * a_velocity.y);
@@ -416,7 +443,10 @@ uint32_t GroundFog::GatherFlowEmitters(FlowEmitter* a_emitters, double a_originX
 		const float clear = std::min(speed / 400.0f, 1.5f) * 0.9f * a_deltaTime;
 		const float dx = position.x - eye.x;
 		const float dy = position.y - eye.y;
-		add(position, velocity, radius * 1.5f, 0.0f, clear, 2.0f + (dx * dx + dy * dy) * 1.0e-8f);
+		// Whatever walks stands on the floor the fog lies on, whatever the land map says is under it. What flies
+		// (a dragon overhead) is over it.
+		const float weight = a_actor->IsInMidair() ? -1.0f : 1.0f;
+		add(position, velocity, radius * 1.5f, 0.0f, clear, 2.0f + (dx * dx + dy * dy) * 1.0e-8f, weight);
 	};
 	if (auto player = RE::PlayerCharacter::GetSingleton())
 		visitActor(player, player->GetHandle().native_handle());
@@ -433,99 +463,147 @@ uint32_t GroundFog::GatherFlowEmitters(FlowEmitter* a_emitters, double a_originX
 	return count;
 }
 
-float4 GroundFog::UpdateFlow(ID3D11DeviceContext* a_context)
+float4 GroundFog::PrepareSim(bool a_pool)
 {
 	if (flowFrame == globals::state->frameCount)
 		return flowWindow;
 	flowFrame = globals::state->frameCount;
 	flowWindow = {};
 	flowEmitterCount = 0;
-	if (!settings.Reactive || !flowCS || !flowConstants) {
+	simPending = false;
+	// The pool is drawn from the simulation. The tall volume and the sheet only react through it.
+	if (!(a_pool || settings.Reactive) || !flowCS || !flowConstants || !simData) {
 		flowValid = false;
 		return flowWindow;
 	}
-	if (!flowState[0]) {
-		D3D11_TEXTURE2D_DESC desc{};
-		desc.Width = desc.Height = kFlowSize;
-		desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
-		desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-		desc.Usage = D3D11_USAGE_DEFAULT;
-		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-		D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
-		srv.Format = desc.Format;
-		srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-		srv.Texture2D.MipLevels = 1;
-		D3D11_UNORDERED_ACCESS_VIEW_DESC uav{};
-		uav.Format = desc.Format;
-		uav.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
-		for (uint32_t i = 0; i < 2; ++i) {
-			flowState[i] = eastl::make_unique<Texture2D>(desc, i == 0 ? "GroundFog::FlowState0" : "GroundFog::FlowState1");
-			flowShift[i] = eastl::make_unique<Texture2D>(desc, i == 0 ? "GroundFog::FlowShift0" : "GroundFog::FlowShift1");
-			flowState[i]->CreateSRV(srv);
-			flowState[i]->CreateUAV(uav);
-			flowShift[i]->CreateSRV(srv);
-			flowShift[i]->CreateUAV(uav);
-		}
+	// The window holds the near layer's range with a margin. Its texels are fixed in the world for as long as
+	// their size stays; a change of Near Distance that changes the size starts afresh.
+	const float unitsPerMeter = 1.0f / Util::Units::GAME_UNIT_TO_M;
+	const double nearEnd = static_cast<double>(std::clamp(settings.NearDistance, kMinNearDistance, kMaxNearDistance) * unitsPerMeter);
+	const double texel = std::max(kSimMinTexel, std::ceil(nearEnd * 2.15 / kSimSize / kSimTexelStep) * kSimTexelStep);
+	if (texel != simTexel) {
+		simTexel = texel;
+		flowValid = false;
+	}
+	if (!simState[0]) {
+		auto make = [](DXGI_FORMAT a_format, const char* a_name) {
+			D3D11_TEXTURE2D_DESC desc{};
+			desc.Width = desc.Height = kSimSize;
+			desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+			desc.Format = a_format;
+			desc.Usage = D3D11_USAGE_DEFAULT;
+			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+			D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
+			srv.Format = a_format;
+			srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+			srv.Texture2D.MipLevels = 1;
+			D3D11_UNORDERED_ACCESS_VIEW_DESC uav{};
+			uav.Format = a_format;
+			uav.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+			auto texture = eastl::make_unique<Texture2D>(desc, a_name);
+			texture->CreateSRV(srv);
+			texture->CreateUAV(uav);
+			return texture;
+		};
+		simState[0] = make(DXGI_FORMAT_R16G16B16A16_FLOAT, "GroundFog::SimState0");
+		simState[1] = make(DXGI_FORMAT_R16G16B16A16_FLOAT, "GroundFog::SimState1");
+		simFloor[0] = make(DXGI_FORMAT_R32_FLOAT, "GroundFog::SimFloor0");
+		simFloor[1] = make(DXGI_FORMAT_R32_FLOAT, "GroundFog::SimFloor1");
+		floorSlope = make(DXGI_FORMAT_R16G16B16A16_FLOAT, "GroundFog::FloorSlope");
+		floorSeen = make(DXGI_FORMAT_R32_FLOAT, "GroundFog::FloorSeen");
 		flowValid = false;
 	}
 
 	// The window is fixed to a world grid of whole texels and follows the camera in whole steps.
 	const auto eye = Util::GetEyePosition();
-	const int64_t originX = static_cast<int64_t>(std::floor(static_cast<double>(eye.x) / kFlowTexel)) - kFlowSize / 2;
-	const int64_t originY = static_cast<int64_t>(std::floor(static_cast<double>(eye.y) / kFlowTexel)) - kFlowSize / 2;
+	const int64_t originX = static_cast<int64_t>(std::floor(static_cast<double>(eye.x) / simTexel)) - kSimSize / 2;
+	const int64_t originY = static_cast<int64_t>(std::floor(static_cast<double>(eye.y) / simTexel)) - kSimSize / 2;
 	const float deltaTime = std::clamp(frameDeltaTime, 0.0f, 0.05f);
+	const float cornerX = static_cast<float>(static_cast<double>(originX) * simTexel - static_cast<double>(eye.x));
+	const float cornerY = static_cast<float>(static_cast<double>(originY) * simTexel - static_cast<double>(eye.y));
 
-	FlowData data{};
-	// A step larger than the window (first frame, cell change, teleport) reads nothing: a clean start.
-	const int64_t farStep = 4 * static_cast<int64_t>(kFlowSize);
-	data.Shift[0] = static_cast<int32_t>(flowValid ? std::clamp(originX - flowOriginX, -farStep, farStep) : farStep);
-	data.Shift[1] = static_cast<int32_t>(flowValid ? std::clamp(originY - flowOriginY, -farStep, farStep) : farStep);
-	data.TexelSize = static_cast<float>(kFlowTexel);
-	data.DeltaTime = deltaTime;
-	data.VelocityKeep = std::exp(-deltaTime / kFlowVelocityTime);
-	data.DisplacementKeep = std::exp(-deltaTime / kFlowDisplacementTime);
-	data.ClearKeep = std::exp(-deltaTime / kFlowClearTime);
-	data.MaxDisplacement = kFlowMaxDisplacement;
-	data.EmitterCount = GatherFlowEmitters(data.Emitters, static_cast<double>(originX) * kFlowTexel, static_cast<double>(originY) * kFlowTexel, deltaTime);
-	flowEmitterCount = data.EmitterCount;
-	flowConstants->Update(data);
+	*simData = {};
+	// A step larger than the window (first frame, cell change, teleport) reads nothing: a clean start at rest.
+	const int64_t farStep = 4 * static_cast<int64_t>(kSimSize);
+	simData->Shift[0] = static_cast<int32_t>(flowValid ? std::clamp(originX - flowOriginX, -farStep, farStep) : farStep);
+	simData->Shift[1] = static_cast<int32_t>(flowValid ? std::clamp(originY - flowOriginY, -farStep, farStep) : farStep);
+	simData->TexelSize = static_cast<float>(simTexel);
+	simData->DeltaTime = deltaTime;
+	simData->VelocityKeep = std::exp(-deltaTime / kSimVelocityTime);
+	simData->RefillRate = 1.0f - std::exp(-deltaTime / std::clamp(settings.SettleTime, kMinSettleTime, kMaxSettleTime));
+	simData->ClearStrength = settings.ReactiveStrength;
+	simData->Wind = windVelocity;
+	simData->Downhill = kSimDownhill * settings.DownhillFlow;
+	simData->Spread = kSimWaveSpeed * kSimWaveSpeed;
+	simData->Corner = { cornerX, cornerY };
+	simData->Swirl = settings.Swirl;
+	simData->SwirlTime = static_cast<float>(swirlTime);
+	// Without terrain data the fog rests evenly. Interiors would set this from the cell (and a floor level).
+	simData->RestUniform = 1.0f;
+	simData->FloorRise = 1.0f - std::exp(-deltaTime / kSimFloorRiseTime);
+	if (settings.Reactive)
+		simData->EmitterCount = GatherSimEmitters(simData->Emitters, static_cast<double>(originX) * simTexel, static_cast<double>(originY) * simTexel, deltaTime);
+	else {
+		flowActors.clear();
+		flowProjectiles.clear();
+	}
+	flowEmitterCount = simData->EmitterCount;
+	simNextOriginX = originX;
+	simNextOriginY = originY;
+	simPending = true;
+
+	// uv = camera-relative xy * z + xy.
+	const float extent = static_cast<float>(kSimSize * simTexel);
+	flowWindow = { -cornerX / extent, -cornerY / extent, 1.0f / extent, 1.0f };
+	return flowWindow;
+}
+
+void GroundFog::StepSim(ID3D11DeviceContext* a_context, bool a_terrain)
+{
+	if (!simPending)
+		return;
+	simPending = false;
+	simData->SimFlags = a_terrain ? 1u : 0u;
+	flowConstants->Update(*simData);
 
 	const uint32_t next = flowCurrent ^ 1u;
 	winrt::com_ptr<ID3D11Buffer> oldConstants;
 	a_context->CSGetConstantBuffers(kFlowConstantSlot, 1, oldConstants.put());
 	auto* constants = flowConstants->CB();
 	a_context->CSSetConstantBuffers(kFlowConstantSlot, 1, &constants);
-	// The map may still be bound from the last frame's pixel pass.
-	ID3D11ShaderResourceView* nullMap = nullptr;
-	a_context->CSSetShaderResources(kFlowMapSlot, 1, &nullMap);
-	winrt::com_ptr<ID3D11ShaderResourceView> oldInputs[2];
-	a_context->CSGetShaderResources(0, 1, oldInputs[0].put());
-	a_context->CSGetShaderResources(1, 1, oldInputs[1].put());
-	ID3D11ShaderResourceView* inputs[] = { flowState[flowCurrent]->srv.get(), flowShift[flowCurrent]->srv.get() };
-	a_context->CSSetShaderResources(0, 2, inputs);
-	ID3D11UnorderedAccessView* outputs[] = { flowState[next]->uav.get(), flowShift[next]->uav.get() };
-	a_context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
+	static_assert(kFloorSlopeSlot == kFloorMapSlot + 1 && kFloorSeenSlot == kFloorMapSlot + 2);
+	winrt::com_ptr<ID3D11ShaderResourceView> oldInputs[4];
+	a_context->CSGetShaderResources(kFlowMapSlot, 1, oldInputs[0].put());
+	a_context->CSGetShaderResources(kFloorMapSlot, 1, oldInputs[1].put());
+	a_context->CSGetShaderResources(kFloorSlopeSlot, 1, oldInputs[2].put());
+	a_context->CSGetShaderResources(kFloorSeenSlot, 1, oldInputs[3].put());
+	// The slope map is an output here; it may still be bound as an input from the last frame.
+	ID3D11ShaderResourceView* state = simState[flowCurrent]->srv.get();
+	ID3D11ShaderResourceView* floors[] = { simFloor[flowCurrent]->srv.get(), nullptr, floorSeen->srv.get() };
+	a_context->CSSetShaderResources(kFlowMapSlot, 1, &state);
+	a_context->CSSetShaderResources(kFloorMapSlot, 3, floors);
+	ID3D11UnorderedAccessView* outputs[] = { simState[next]->uav.get(), simFloor[next]->uav.get(), floorSlope->uav.get() };
+	a_context->CSSetUnorderedAccessViews(0, 3, outputs, nullptr);
 	a_context->CSSetShader(flowCS.get(), nullptr, 0);
-	globals::profiler->BeginPass("GroundFog::Flow");
-	a_context->Dispatch((kFlowSize + 7u) / 8u, (kFlowSize + 7u) / 8u, 1);
+	globals::profiler->BeginPass("GroundFog::Simulation");
+	a_context->Dispatch((kSimSize + 7u) / 8u, (kSimSize + 7u) / 8u, 1);
 	globals::profiler->EndPass();
-	ID3D11UnorderedAccessView* nullOutputs[2]{};
-	a_context->CSSetUnorderedAccessViews(0, 2, nullOutputs, nullptr);
-	ID3D11ShaderResourceView* restoredInputs[] = { oldInputs[0].get(), oldInputs[1].get() };
-	a_context->CSSetShaderResources(0, 2, restoredInputs);
+	ID3D11UnorderedAccessView* nullOutputs[3]{};
+	a_context->CSSetUnorderedAccessViews(0, 3, nullOutputs, nullptr);
+	ID3D11ShaderResourceView* restoredState = oldInputs[0].get();
+	ID3D11ShaderResourceView* restoredFloors[] = { oldInputs[1].get(), oldInputs[2].get(), oldInputs[3].get() };
+	a_context->CSSetShaderResources(kFlowMapSlot, 1, &restoredState);
+	a_context->CSSetShaderResources(kFloorMapSlot, 3, restoredFloors);
 	auto* previous = oldConstants.get();
 	a_context->CSSetConstantBuffers(kFlowConstantSlot, 1, &previous);
+	// What was seen of the floor has been taken in; the pixel pass starts from nothing.
+	const float empty[4] = { 1.0e30f, 1.0e30f, 1.0e30f, 1.0e30f };
+	a_context->ClearUnorderedAccessViewFloat(floorSeen->uav.get(), empty);
 
 	flowCurrent = next;
-	flowOriginX = originX;
-	flowOriginY = originY;
+	flowOriginX = simNextOriginX;
+	flowOriginY = simNextOriginY;
 	flowValid = true;
-	// uv = camera-relative xy * z + xy.
-	const float extent = static_cast<float>(kFlowSize * kFlowTexel);
-	flowWindow = { static_cast<float>(static_cast<double>(eye.x) - static_cast<double>(originX) * kFlowTexel) / extent,
-		static_cast<float>(static_cast<double>(eye.y) - static_cast<double>(originY) * kFlowTexel) / extent,
-		1.0f / extent, std::max(settings.ReactiveStrength, 1.0e-3f) };
-	return flowWindow;
 }
 
 float GroundFog::TimeOfDayAmount(float& a_daylight) const
@@ -599,6 +677,8 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 		const float speed = settings.WindDriftSpeed * unitsPerMeter * std::max(windSpeed, kMinDriftWind);
 		windTravelX += static_cast<double>(windDirection.x) * speed * deltaTime;
 		windTravelY += static_cast<double>(windDirection.y) * speed * deltaTime;
+		windVelocity = { windDirection.x * speed, windDirection.y * speed };
+		swirlTime = std::fmod(swirlTime + deltaTime, 36000.0);
 		frameDeltaTime = deltaTime;
 		breathTime = std::fmod(breathTime + deltaTime, static_cast<double>(kBreathPeriod));
 		UpdateFloorOffset(deltaTime);
@@ -617,7 +697,8 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 		return Status::kNoAmount;
 
 	const float thickness = (slab ? kDebugThickness : std::max(settings.Thickness, 0.1f)) * unitsPerMeter;
-	const float density = debug ? std::max(effectiveAmount * settings.Density, kDebugDensity) : effectiveAmount * settings.Density;
+	// The simulation view shows the pool as it is, so the sheet over it is not made dense.
+	const float density = debug && debugMode != DebugMode::kSimulation ? std::max(effectiveAmount * settings.Density, kDebugDensity) : effectiveAmount * settings.Density;
 	const float fadeStart = settings.FadeStart * unitsPerMeter;
 
 	a_data = {};
@@ -660,6 +741,9 @@ GroundFog::Status GroundFog::Update(VolumeData& a_data, ID3D11ShaderResourceView
 	a_data.FarBasinRadius = kFarBasinRadius;
 	a_data.InvFarBasinDepth = 1.0f / kFarBasinDepth;
 	a_data.CloudDarkening = settings.CloudDarkening;
+	// Up to kPoolMaxThickness the near layer is the pool; RenderPixel moves the density over once it knows the
+	// simulation runs.
+	poolActive = nearDensity > 0.0f && settings.NearThickness <= kPoolMaxThickness;
 	a_data.NearExtinction = nearDensity * Util::Units::GAME_UNIT_TO_M;
 	a_data.NearThickness = std::max(settings.NearThickness, kMinNearThickness) * unitsPerMeter;
 	a_data.NearFalloff = std::clamp(settings.NearFalloff, kMinNearFalloff, kMaxNearFalloff);
@@ -759,8 +843,9 @@ bool GroundFog::EnsureShaders()
 		pixelCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\GroundFog\\GroundFogPixel.cs.hlsl", defines, "cs_5_0")));
 		pyramidCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\GroundFog\\HeightPyramid.cs.hlsl", {}, "cs_5_0")));
 		pyramidFirstCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\GroundFog\\HeightPyramid.cs.hlsl", { { "FIRST_LEVEL", "" } }, "cs_5_0")));
-		// Optional: without it the fog is drawn as it is, unmoved.
-		flowCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\GroundFog\\FlowSim.cs.hlsl", {}, "cs_5_0")));
+		// Optional: without it nothing moves, and a near layer thin enough to be the pool is marched like the tall
+		// volume. It places the fog by the same rule as the pixel pass, so it takes the same defines.
+		flowCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\GroundFog\\FlowSim.cs.hlsl", defines, "cs_5_0")));
 	}
 	return pixelCS && pyramidCS && pyramidFirstCS;
 }
@@ -922,24 +1007,40 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 
 	data.PyramidSize = { static_cast<float>(heightPyramid->desc.Width), static_cast<float>(heightPyramid->desc.Height) };
 	data.PyramidLevels = static_cast<float>(heightPyramidLevels);
-	// The reactive flow map of this frame. It runs on its own inputs; the slab views show the fog unmoved.
+	// The simulation of this frame. The slab views show the fog unmoved.
 	const bool slabView = debugMode == DebugMode::kSlab || debugMode == DebugMode::kGroundHeight;
-	data.FlowWindow = UpdateFlow(a_context);
-	ID3D11ShaderResourceView* flowMap = flowValid && data.FlowWindow.w > 0.0f && !slabView ? flowShift[flowCurrent]->srv.get() : nullptr;
-	if (!flowMap)
-		data.FlowWindow = {};
+	data.FlowWindow = slabView ? float4{} : PrepareSim(poolActive);
+	const bool simulated = data.FlowWindow.w > 0.0f;
+	if (poolActive && simulated) {
+		// The near layer is the pool: drawn from the simulation on what the screen shows, not marched.
+		data.PoolExtinction = data.NearExtinction;
+		data.PoolThickness = data.NearThickness;
+		data.PoolEnd = std::min(data.NearEnd, 0.46f * static_cast<float>(kSimSize * simTexel));
+		data.NearExtinction = 0.0f;
+	}
 	volumeConstants->Update(data);
 
 	winrt::com_ptr<ID3D11Buffer> oldConstants;
 	a_context->CSGetConstantBuffers(kConstantSlot, 1, oldConstants.put());
 	auto* constants = volumeConstants->CB();
 	a_context->CSSetConstantBuffers(kConstantSlot, 1, &constants);
-	static_assert(kFlowMapSlot == kHeightPyramidSlot + 1 && kWaterMapSlot == kFlowMapSlot + 1);
-	ID3D11ShaderResourceView* ground[] = { heightMap, heightPyramid->srv.get(), flowMap, water };
-	a_context->CSSetShaderResources(kHeightMapSlot, 4, ground);
+	static_assert(kFlowMapSlot == kHeightPyramidSlot + 1 && kWaterMapSlot == kFlowMapSlot + 1 && kFloorMapSlot == kWaterMapSlot + 1 && kFloorSlopeSlot == kFloorMapSlot + 1);
+	winrt::com_ptr<ID3D11ShaderResourceView> oldFloorMaps[2];
+	a_context->CSGetShaderResources(kFloorMapSlot, 1, oldFloorMaps[0].put());
+	a_context->CSGetShaderResources(kFloorSlopeSlot, 1, oldFloorMaps[1].put());
+	ID3D11ShaderResourceView* ground[] = { heightMap, heightPyramid->srv.get(), nullptr, water, nullptr, nullptr };
+	a_context->CSSetShaderResources(kHeightMapSlot, 6, ground);
 	atmosphere.BindLightingInputs(a_context);
-	ID3D11UnorderedAccessView* outputs[] = { fogTexture->uav.get(), fogAuxTexture->uav.get() };
-	a_context->CSSetUnorderedAccessViews(0, 2, outputs, nullptr);
+	// The simulation places its fog by the same rule as the pixel pass, from the same inputs.
+	if (simulated) {
+		StepSim(a_context, true);
+		ground[2] = simState[flowCurrent]->srv.get();
+		ground[4] = simFloor[flowCurrent]->srv.get();
+		ground[5] = floorSlope->srv.get();
+		a_context->CSSetShaderResources(kHeightMapSlot, 6, ground);
+	}
+	ID3D11UnorderedAccessView* outputs[] = { fogTexture->uav.get(), fogAuxTexture->uav.get(), simulated && data.PoolExtinction > 0.0f ? floorSeen->uav.get() : nullptr };
+	a_context->CSSetUnorderedAccessViews(0, 3, outputs, nullptr);
 	a_context->CSSetShader(pixelCS.get(), nullptr, 0);
 
 	// The same active area as the composite under dynamic resolution.
@@ -950,10 +1051,12 @@ bool GroundFog::RenderPixel(ID3D11DeviceContext* a_context)
 	a_context->Dispatch((width + 7u) / 8u, (height + 7u) / 8u, 1);
 	globals::profiler->EndPass();
 
-	ID3D11UnorderedAccessView* nullOutputs[2]{};
-	a_context->CSSetUnorderedAccessViews(0, 2, nullOutputs, nullptr);
-	ID3D11ShaderResourceView* nullGround[4]{};
-	a_context->CSSetShaderResources(kHeightMapSlot, 4, nullGround);
+	ID3D11UnorderedAccessView* nullOutputs[3]{};
+	a_context->CSSetUnorderedAccessViews(0, 3, nullOutputs, nullptr);
+	ID3D11ShaderResourceView* nullGround[6]{};
+	nullGround[4] = oldFloorMaps[0].get();
+	nullGround[5] = oldFloorMaps[1].get();
+	a_context->CSSetShaderResources(kHeightMapSlot, 6, nullGround);
 	auto* previous = oldConstants.get();
 	a_context->CSSetConstantBuffers(kConstantSlot, 1, &previous);
 	compositeInputs[0] = fogTexture->srv.get();
@@ -978,7 +1081,8 @@ void GroundFog::DrawSettings()
 		Util::HoverTip(T(TKEY("near_density_tooltip"), "How opaque the fog around you is at the ground when Amount is 1. This is the fog you see in the air between you and things nearby. 0 removes it and leaves the thin sheet."));
 
 		ImGui::SliderFloat(T(TKEY("near_thickness"), "Near Thickness"), &settings.NearThickness, kMinNearThickness, kMaxNearThickness, "%.1f m", ImGuiSliderFlags_AlwaysClamp);
-		Util::HoverTip(T(TKEY("near_thickness_tooltip"), "Height above the ground at which the fog around you has thinned to nothing. Above eye height you stand inside it."));
+		Util::HoverTip(T(TKEY("near_thickness_tooltip"), "Height above the ground at which the fog around you has thinned to nothing. Up to 1 m it is a pool at your feet: it lies on whatever ground you see, and it flows, swirls and parts around what moves through it. Above 1 m it is the tall, still volume, laid on the terrain map."));
+		ImGui::TextDisabled("%s", settings.NearThickness <= kPoolMaxThickness ? T(TKEY("near_mode_pool"), "Drawn as a pool, from the simulation") : T(TKEY("near_mode_volume"), "Drawn as the tall volume, on the terrain map"));
 
 		ImGui::SliderFloat(T(TKEY("near_falloff"), "Near Thinning with Height"), &settings.NearFalloff, kMinNearFalloff, kMaxNearFalloff, "%.1f", ImGuiSliderFlags_AlwaysClamp);
 		Util::HoverTip(T(TKEY("near_falloff_tooltip"), "How strongly the fog around you pools low. Low values fill the whole height evenly; high values keep it at your feet."));
@@ -996,10 +1100,19 @@ void GroundFog::DrawSettings()
 		Util::HoverTip(T(TKEY("breathing_tooltip"), "Share by which the top of the fog around you slowly rises and falls, out of step from place to place."));
 
 		ImGui::Checkbox(T(TKEY("reactive"), "Reacts to Movement"), &settings.Reactive);
-		Util::HoverTip(T(TKEY("reactive_tooltip"), "You, other actors, arrows and spell projectiles push the fog aside within about 25 m of the camera. It parts around a runner, follows a fireball and puffs outward where a projectile ends, then flows back over a few seconds."));
+		Util::HoverTip(T(TKEY("reactive_tooltip"), "You, other actors, arrows and spell projectiles push the fog about within the Near Distance. It piles up ahead of a runner and thins behind, follows a fireball and puffs outward where a projectile ends, then flows back and settles."));
 
 		ImGui::SliderFloat(T(TKEY("reactive_strength"), "Reaction Strength"), &settings.ReactiveStrength, 0.0f, kMaxReactiveStrength, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-		Util::HoverTip(T(TKEY("reactive_strength_tooltip"), "How much of the fog movers clear away. At 0 they still push the patches about but leave the amount alone."));
+		Util::HoverTip(T(TKEY("reactive_strength_tooltip"), "How much of the fog movers stir away. At 0 they still push it about but none is lost."));
+
+		ImGui::SliderFloat(T(TKEY("settle_time"), "Settle Time"), &settings.SettleTime, kMinSettleTime, kMaxSettleTime, "%.1f s", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
+		Util::HoverTip(T(TKEY("settle_time_tooltip"), "How long the pool takes to come back to its resting amount after it has been disturbed, and to follow the time of day, shade and water as you move. Short heals wakes quickly; long leaves trails."));
+
+		ImGui::SliderFloat(T(TKEY("downhill_flow"), "Downhill Flow"), &settings.DownhillFlow, 0.0f, kMaxDownhillFlow, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("downhill_flow_tooltip"), "How strongly the pool runs down slopes, off steps and rocks and into the low places of the ground you see. 0 leaves it where it rests."));
+
+		ImGui::SliderFloat(T(TKEY("swirl"), "Swirl"), &settings.Swirl, 0.0f, kMaxSwirl, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		Util::HoverTip(T(TKEY("swirl_tooltip"), "Eddies in the pool: slow ones in still fog, stronger ones where it is moving, so wakes curl up as they close. 0 is smooth flow."));
 		ImGui::TreePop();
 	}
 
@@ -1150,12 +1263,13 @@ void GroundFog::DrawDebugSection()
 		T(TKEY("debug_mode_slab"), "Slab"),
 		T(TKEY("debug_mode_ground_height"), "Ground Height"),
 		T(TKEY("debug_mode_layer_mask"), "Layer Mask"),
-		T(TKEY("debug_mode_tap_count"), "Tap Count")
+		T(TKEY("debug_mode_tap_count"), "Tap Count"),
+		T(TKEY("debug_mode_simulation"), "Simulation")
 	};
 	int mode = static_cast<int>(debugMode);
 	if (ImGui::Combo(T(TKEY("debug_mode"), "Debug View"), &mode, modes, static_cast<int>(std::size(modes))))
 		debugMode = static_cast<DebugMode>(std::clamp(mode, 0, static_cast<int>(std::size(modes)) - 1));
-	Util::HoverTip(T(TKEY("debug_mode_tooltip"), "Slab: a dense, level-topped 1 m layer with no noise, to check the height map against the ground.\nGround Height: the slab colored by the sampled height, one stripe per 64 units.\nLayer Mask: the real fog, dense, green where it is the sheet or the fog around you, red where it is valley fog, blue where terrain shadow keeps it from burning off.\nTap Count: texture and depth reads per pixel of the per-pixel pass. Blue is 4 or fewer, green 34, yellow 64, red 94 or more."));
+	Util::HoverTip(T(TKEY("debug_mode_tooltip"), "Slab: a dense, level-topped 1 m layer with no noise, to check the height map against the ground.\nGround Height: the slab colored by the sampled height, one stripe per 64 units.\nLayer Mask: the real fog, dense, green where it is the sheet or the fog around you, red where it is valley fog, blue where terrain shadow keeps it from burning off.\nTap Count: texture and depth reads per pixel of the per-pixel pass. Blue is 4 or fewer, green 34, yellow 64, red 94 or more.\nSimulation: the pool coloured by its simulation. Red is how fast the fog moves, green how much there is, blue marks what stands in the fog instead of being its floor."));
 
 	// Atmosphere and Fog asks for the layer every frame it composes (or, with volume injection, fills its volume).
 	const bool volumeRunning = lastBindFrame != UINT32_MAX && globals::state->frameCount - lastBindFrame <= 2u;
@@ -1200,6 +1314,7 @@ void GroundFog::DrawDebugSection()
 	ImGui::Text("%s: %.2f, %s %.2f", T(TKEY("debug_time_amount"), "Time of day amount"), timeAmount, T(TKEY("debug_daylight"), "daylight"), daylight);
 	ImGui::Text("%s: %.2f m", T(TKEY("debug_floor_offset"), "Floor under you above the map"), floorOffset * Util::Units::GAME_UNIT_TO_M);
 	ImGui::Text("%s: %u / %u", T(TKEY("debug_flow_emitters"), "Things moving the fog"), flowEmitterCount, kMaxFlowEmitters);
+	ImGui::Text("%s: %s, %.2f m", T(TKEY("debug_simulation"), "Simulation"), flowValid ? (poolActive ? T(TKEY("debug_simulation_pool"), "running, pool") : T(TKEY("debug_simulation_reactive"), "running, reaction only")) : T(TKEY("debug_simulation_off"), "off"), simTexel * Util::Units::GAME_UNIT_TO_M);
 	ImGui::Text("%s: %.0f x %.0f, DXGI %d", T(TKEY("debug_height_map"), "Height map"), heightMapSize.x, heightMapSize.y, static_cast<int>(heightMapFormat));
 	ImGui::Text("%s: %s", T(TKEY("debug_water_map"), "Water map"), waterMapState.empty() ? "-" : waterMapState.c_str());
 	if (!waterMap)
@@ -1251,6 +1366,9 @@ void GroundFog::LoadSettings(json& o_json)
 	sanitize(settings.MiddayAmount, defaults.MiddayAmount, 0.0f, kMaxTimeAmount);
 	sanitize(settings.EveningAmount, defaults.EveningAmount, 0.0f, kMaxTimeAmount);
 	sanitize(settings.ReactiveStrength, defaults.ReactiveStrength, 0.0f, kMaxReactiveStrength);
+	sanitize(settings.SettleTime, defaults.SettleTime, kMinSettleTime, kMaxSettleTime);
+	sanitize(settings.DownhillFlow, defaults.DownhillFlow, 0.0f, kMaxDownhillFlow);
+	sanitize(settings.Swirl, defaults.Swirl, 0.0f, kMaxSwirl);
 	sanitize(settings.StepGrowth, defaults.StepGrowth, kMinStepGrowth, kMaxStepGrowth);
 	sanitize(settings.FarAmount, defaults.FarAmount, 0.0f, kMaxAmount);
 	sanitize(settings.FarDensity, defaults.FarDensity, kMinFarDensity, kMaxFarDensity);

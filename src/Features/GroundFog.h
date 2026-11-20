@@ -59,7 +59,9 @@ struct GroundFog : Feature
 		float SurfaceSoftness = 0.5f;       // fog fades over this last stretch of a ray that ends on something not ground
 		float FloorMaxHeight = 4.0f;        // level floors up to this far above the mapped ground carry the near volume
 		// The near volume: a taller, softer body of fog around the camera.
-		float NearDensity = 1.5f;  // extinction at the ground per meter, at Amount 1; 0 = none
+		// Up to 1 m thick it is the pool: drawn on what the screen shows, from the simulation. Thicker, it is the
+		// tall volume of the first versions, marched over the height map.
+		float NearDensity = 0.5f;     // extinction at the ground per meter, at Amount 1; 0 = none
 		float NearThickness = 0.45f;  // height at which it has thinned to nothing
 		float NearFalloff = 1.5f;    // how quickly it thins with height
 		float NearDistance = 40.0f;  // meters from the camera; fades out over the second half
@@ -75,6 +77,10 @@ struct GroundFog : Feature
 		// Reactive fog: things moving through the fog around the camera push it aside.
 		bool Reactive = true;
 		float ReactiveStrength = 1.0f;  // how much of the fog a mover clears; 0 leaves only the displacement
+		// The simulation the pool is drawn from.
+		float SettleTime = 6.0f;    // seconds over which disturbed fog returns to its resting amount
+		float DownhillFlow = 1.0f;  // how strongly the fog runs down slopes and steps into the low places
+		float Swirl = 1.0f;         // eddies in still fog and, more, in fog that is moving
 		bool HalfResolution = true;
 		float StepGrowth = 0.3f;  // size of terrain detail the march follows, as a share of the distance from the camera
 		int MaxSteps = 72;
@@ -150,8 +156,12 @@ struct GroundFog : Feature
 		float WaterPatchiness;
 		float WaterTexel;
 		float4 FlowWindow;
+		float PoolExtinction;
+		float PoolThickness;
+		float PoolEnd;
+		float PoolPad;
 	};
-	static_assert(sizeof(VolumeData) == 288);
+	static_assert(sizeof(VolumeData) == 304);
 	static_assert(offsetof(VolumeData, MapZ) == 16);
 	static_assert(offsetof(VolumeData, Thickness) == 32);
 	static_assert(offsetof(VolumeData, FadeStart) == 48);
@@ -174,6 +184,7 @@ struct GroundFog : Feature
 	static_assert(offsetof(VolumeData, BurnRetention) == 256);
 	static_assert(offsetof(VolumeData, InvShoreDepth) == 260);
 	static_assert(offsetof(VolumeData, FlowWindow) == 272);
+	static_assert(offsetof(VolumeData, PoolExtinction) == 288);
 
 	/** One thing that moves the fog this frame. Mirrors Emitter in GroundFog/FlowSim.cs.hlsl. */
 	struct FlowEmitter
@@ -187,7 +198,7 @@ struct GroundFog : Feature
 	};
 	static constexpr uint32_t kMaxFlowEmitters = 24;
 
-	/** Mirrors FlowCB in GroundFog/FlowSim.cs.hlsl. */
+	/** Mirrors SimCB in GroundFog/FlowSim.cs.hlsl. */
 	struct alignas(16) FlowData
 	{
 		int32_t Shift[2];
@@ -195,15 +206,26 @@ struct GroundFog : Feature
 		float DeltaTime;
 		uint32_t EmitterCount;
 		float VelocityKeep;
-		float DisplacementKeep;
-		float ClearKeep;
-		float MaxDisplacement;
-		float Pad[3];
+		float RefillRate;
+		float ClearStrength;
+		float2 Wind;
+		float Downhill;
+		float Spread;
+		float2 Corner;
+		float Swirl;
+		float SwirlTime;
+		float RestUniform;
+		uint32_t SimFlags;
+		float FloorRise;
+		float SimPad;
 		FlowEmitter Emitters[kMaxFlowEmitters];
 	};
 	static_assert(sizeof(FlowEmitter) == 32);
-	static_assert(sizeof(FlowData) == 48 + 32 * kMaxFlowEmitters);
-	static_assert(offsetof(FlowData, Emitters) == 48);
+	static_assert(sizeof(FlowData) == 80 + 32 * kMaxFlowEmitters);
+	static_assert(offsetof(FlowData, Wind) == 32);
+	static_assert(offsetof(FlowData, Corner) == 48);
+	static_assert(offsetof(FlowData, RestUniform) == 64);
+	static_assert(offsetof(FlowData, Emitters) == 80);
 
 	enum class DebugMode : uint32_t
 	{
@@ -212,6 +234,7 @@ struct GroundFog : Feature
 		kGroundHeight,
 		kLayerMask,
 		kTapCount,
+		kSimulation,
 	};
 
 	enum class Status
@@ -263,6 +286,10 @@ struct GroundFog : Feature
 	static constexpr uint32_t kHeightPyramidSlot = 7;
 	static constexpr uint32_t kFlowMapSlot = 8;
 	static constexpr uint32_t kWaterMapSlot = 9;
+	static constexpr uint32_t kFloorMapSlot = 10;
+	/** The floor's slope, written by the simulation; and the simulation's own input in GroundFog/FlowSim.cs.hlsl: what the pixel pass saw of the floor last frame. */
+	static constexpr uint32_t kFloorSlopeSlot = 11;
+	static constexpr uint32_t kFloorSeenSlot = 12;
 	static constexpr uint32_t kFlowConstantSlot = 3;
 	static constexpr uint32_t kCompositeFogSlot = 42;
 	static constexpr uint32_t kCompositeDepthSlot = 43;
@@ -281,13 +308,21 @@ private:
 	/** Amount by time of day for sunlit ground, from the Morning / Midday / Evening settings. */
 	float TimeOfDayAmount(float& a_daylight) const;
 	/**
-	 * @brief Steps the reactive flow map once per frame: gathers the movers near the camera and runs
-	 * GroundFog/FlowSim.cs.hlsl. Needs no ground source, so it can run for any fog, interiors included.
-	 * @return The window mapping for GroundFogCB::FlowWindow, or zero when there is no map this frame.
+	 * @brief Places the simulation's window for this frame and fills in its constants. Once per frame.
+	 * @param a_pool Whether the near layer is drawn as the pool this frame (which needs the simulation).
+	 * @return The window mapping for GroundFogCB::FlowWindow, or zero when there is no simulation this frame.
 	 */
-	float4 UpdateFlow(ID3D11DeviceContext* a_context);
+	float4 PrepareSim(bool a_pool);
+	/**
+	 * @brief Steps the simulation (GroundFog/FlowSim.cs.hlsl) with what PrepareSim set up. Call with the fog's
+	 * constants, ground textures and the lighting inputs bound to the compute stage. No-op unless PrepareSim
+	 * returned a window this frame.
+	 * @param a_terrain Whether the height map, water and terrain shadow are bound: the resting amount comes from
+	 * them. Without them it is uniform (the hook for interiors).
+	 */
+	void StepSim(ID3D11DeviceContext* a_context, bool a_terrain);
 	/** Fills a_emitters with what moves near the camera, most important first. */
-	uint32_t GatherFlowEmitters(FlowEmitter* a_emitters, double a_originX, double a_originY, float a_deltaTime);
+	uint32_t GatherSimEmitters(FlowEmitter* a_emitters, double a_originX, double a_originY, float a_deltaTime);
 	bool EnsureShaders();
 	/** Builds the coarse copies of the height map when it changes. */
 	bool EnsureHeightPyramid(ID3D11DeviceContext* a_context, ID3D11ShaderResourceView* a_heightMap, ID3D11ShaderResourceView* a_waterMap);
@@ -298,18 +333,27 @@ private:
 	winrt::com_ptr<ID3D11ComputeShader> pyramidFirstCS;
 	winrt::com_ptr<ID3D11ComputeShader> flowCS;
 	bool shadersRequested = false;
-	// Reactive flow map: two states, swapped every frame. flowState: velocity, cleared share. flowShift:
-	// displacement, cleared share (what the pixel pass reads).
+	// The simulation: two states, swapped every frame. simState: velocity, amount, resting amount. simFloor: the
+	// floor level per texel. floorSeen: what the pixel pass saw of the floor this frame, folded in on the next step.
 	eastl::unique_ptr<ConstantBuffer> flowConstants;
-	eastl::unique_ptr<Texture2D> flowState[2];
-	eastl::unique_ptr<Texture2D> flowShift[2];
+	eastl::unique_ptr<Texture2D> simState[2];
+	eastl::unique_ptr<Texture2D> simFloor[2];
+	eastl::unique_ptr<Texture2D> floorSlope;  // slope of simFloor over about a meter, with a validity channel
+	eastl::unique_ptr<Texture2D> floorSeen;
 	uint32_t flowCurrent = 0;
 	bool flowValid = false;
+	bool simPending = false;   // PrepareSim set up a step that StepSim has not run yet
+	std::unique_ptr<FlowData> simData;  // the step PrepareSim set up
+	double simTexel = 0.0;     // game units per texel; changes with Near Distance, which starts the simulation afresh
 	int64_t flowOriginX = 0;  // the window's corner, in texels of the world grid
 	int64_t flowOriginY = 0;
+	int64_t simNextOriginX = 0;
+	int64_t simNextOriginY = 0;
 	uint32_t flowFrame = UINT32_MAX;
 	float4 flowWindow{};
 	uint32_t flowEmitterCount = 0;
+	double swirlTime = 0.0;
+	bool poolActive = false;  // the near layer is drawn as the pool this frame
 	struct FlowProjectile
 	{
 		RE::NiPoint3 position;
@@ -363,4 +407,5 @@ private:
 	float windSpeed = 0.0f;
 	DXGI_FORMAT heightMapFormat = DXGI_FORMAT_UNKNOWN;
 	float2 heightMapSize{};
+	float2 windVelocity{};  // the fog's drift with the wind, game units per second
 };

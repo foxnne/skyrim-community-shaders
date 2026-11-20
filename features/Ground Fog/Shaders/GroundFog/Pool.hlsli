@@ -30,6 +30,13 @@
 //
 // Include after GroundFog/GroundFog.hlsli.
 
+// A debug view of the pool that needs no setting, for harnesses that can only change #defines: 1 floor map,
+// 2 pool optical depth, 3 simulation, 4 placement. Drawn opaque over the scene within the pool's reach (and the scene
+// at half brightness outside it) by GroundFogPixel.cs.hlsl; see there for the colours. 0 = off.
+#ifndef GROUND_FOG_POOL_DEBUG
+#	define GROUND_FOG_POOL_DEBUG 0
+#endif
+
 namespace GroundFog
 {
 	// The most height a slope may account for between a pixel and the lowest floor around it; game units.
@@ -211,6 +218,7 @@ namespace GroundFog
 				floorness = dot(weights * known4, open4) / sum;
 			taps += 2u;
 		}
+
 		const float ground = known ? smoothstep(PoolGroundFacing - 0.05, PoolGroundFacing + 0.1, normal.z) * (1.0 - smoothstep(PoolGroundBand, 2.0 * PoolGroundBand, nearest)) :
 		                             smoothstep(0.88, 0.96, normal.z);
 		pool.ground = ground;

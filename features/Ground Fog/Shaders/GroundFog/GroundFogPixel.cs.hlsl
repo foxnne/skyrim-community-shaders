@@ -629,6 +629,51 @@ namespace GroundFog
 		return;
 	}
 
+#if GROUND_FOG_POOL_DEBUG > 0
+	{
+		// The pool's debug view chosen by #define (see Pool.hlsli), opaque over the scene within the pool's reach.
+		// 1 Floor map. Blue: no floor known under the pixel. Green: ground, the fog lies on it. Red: stands in the
+		//   fog on a known floor, bright at the floor, dark at and above the top of the fog. Magenta: ground on
+		//   the top of a raised thing (a cart bed, a table, a rock), which gets no fog.
+		// 2 Pool optical depth along the ray: black none, then blue 0.05, green 0.5, yellow 1, red 2 (its cap).
+		// 3 Simulation at the pixel. Red: amount of fog (full at 2). Green: the resting amount it settles to (full
+		//   at 2). Blue: how fast it moves (full at 3 m/s).
+		// 4 Placement. Red: what terrain, water, time of day and shade give the place (full at 1.5), before the
+		//   floor's relief and the wisps. Green: the resting amount after them (full at 2). Blue: raised thing
+		//   (no fog rests there).
+		float3 colour = 0.0;
+		float cover = 0.5;
+		if (pool.range > 0.0) {
+			cover = 1.0;
+			const float2 simUv = GroundFog::SimUv(position.xy);
+			// How much the floor here is a floor the fog lies on, not a raised thing's top (FogSlope.z).
+			const float floorness = saturate(GroundFog::FogSlope.SampleLevel(LinearSampler, simUv, 0).z);
+	#	if GROUND_FOG_POOL_DEBUG == 1
+			const float standing = 1.0 - saturate(pool.over / GroundFog::PoolHardTop);
+			if (pool.known <= 0.0)
+				colour = float3(0.0, 0.25 * pool.ground, 1.0);
+			else
+				colour = float3((1.0 - pool.ground) * (0.15 + 0.85 * standing) + pool.ground * (1.0 - floorness), pool.ground * floorness, pool.ground * (1.0 - floorness));
+	#	elif GROUND_FOG_POOL_DEBUG == 2
+			colour = pool.tau > 0.0 ? GroundFog::Hue(0.66 * (1.0 - saturate(log2(pool.tau / 0.05) / log2(40.0)))) : 0.0;
+	#	elif GROUND_FOG_POOL_DEBUG == 3
+			const float4 state = GroundFog::FogSim.SampleLevel(LinearSampler, simUv, 0);
+			colour = float3(saturate(0.5 * state.z), saturate(0.5 * state.w), saturate(length(state.xy) / 210.0));
+	#	else
+			const float4 state = GroundFog::FogSim.SampleLevel(LinearSampler, simUv, 0);
+			const float4 slopeSun = GroundFog::FogSlope.SampleLevel(LinearSampler, simUv, 0);
+			float water, groundZ;
+			const float open = GroundFog::RestingAmountAt(position.xy, GroundFog::StepMin, GroundFog::BurnSunlitNear, 1.0 - saturate(slopeSun.w), water, groundZ);
+			const bool floorKnown = GroundFog::FogFloor.SampleLevel(LinearSampler, simUv, 0) < GroundFog::FloorUnknown;
+			colour = float3(saturate(open / 1.5), saturate(0.5 * state.w), floorKnown ? 1.0 - floorness : 0.0);
+	#	endif
+		}
+		FogOut[pixel] = float4(colour * GroundFog::SkyMean() * 4.0, cover >= 1.0 ? 1e-4 : 0.5);
+		FogAuxOut[pixel] = float4(auxDepths, cover >= 1.0 ? 1e-4 : 0.5, 0.0);
+		return;
+	}
+#endif
+
 	// The whole ray against the highest ground under it: one read settles short rays that end well above the ground.
 	++taps;
 	const bool march = camZ + min(dir.z * tEnd, 0.0) - GroundFog::GroundMaxAlong(0.0, endXY) <= GroundFog::SlabTop(0.0, tEnd, lift, floorLift, valleyLift);

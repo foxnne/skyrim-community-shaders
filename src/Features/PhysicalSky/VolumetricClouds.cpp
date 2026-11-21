@@ -1635,7 +1635,9 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 		context->CSSetShaderResources(13, 1, &ambientShSrv);
 		lightning.QuerySource(csLightningQuery.get());
 		std::array<ID3D11UnorderedAccessView*, 3> uavs = {};
-		if (!state->isMapMenuOpen) {
+		// The world map marches the main view only with its setting (no voxel clouds or lightning there, see above/below)
+		const bool mapClouds = state->isMapMenuOpen && settings.cloudsOnWorldMap;
+		if (!state->isMapMenuOpen || mapClouds) {
 			const CloudBoundaryCB boundaryData = {
 				.gridOriginSpacing = { boundaryOrigin.x, boundaryOrigin.y, boundarySpacing.x, boundarySpacing.y },
 				.fieldFrequencyWind = { cloudData.lowNdfFrequency.x, cloudData.lowNdfFrequency.y, noiseWindOffset.x, noiseWindOffset.y },
@@ -1659,7 +1661,8 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 				terrainShadows.IsShadowMapReady() ? terrainShadows.texShadowHeight->srv.get() : nullptr,
 				cloudShadowLayer ? cloudShadowLayer->srv.get() : nullptr
 			};
-			ID3D11ShaderResourceView* directionalShadowLights = globals::deferred->directionalShadowLights ?
+			// The map camera has no cascades of its own (ApShadow traces only the terrain term there)
+			ID3D11ShaderResourceView* directionalShadowLights = globals::deferred->directionalShadowLights && !state->isMapMenuOpen ?
 			                                                        globals::deferred->directionalShadowLights->srv.get() :
 			                                                        nullptr;
 			auto* volumeShadow = texShadowVolume->srv.get();
@@ -1948,7 +1951,7 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 		volHistoryViewProj = globals::game::frameBufferCached.GetCameraViewProj();
 		volHistoryCamera = { cameraPosition.x, cameraPosition.y, cameraPosition.z };
 		volHistoryCurvatureRadius = cloudCurvatureRadius;
-		volHistoryFrameDim = state->isMapMenuOpen ? float2{} : frameDim;
+		volHistoryFrameDim = state->isMapMenuOpen && !mapClouds ? float2{} : frameDim;
 		++volFrameIndex;
 	}
 

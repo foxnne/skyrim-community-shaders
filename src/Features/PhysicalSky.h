@@ -219,6 +219,8 @@ struct PhysicalSky final : public Feature
 		float shadowVolumeRange = 8.f;  // km
 		float marchStepScale = 0.5f;
 		int cloudBlurRadius = 1;
+		// Ray-march the volumetric clouds on the world map too (with temporal history); off = the map shows none
+		bool cloudsOnWorldMap = false;
 		NdfSettings cloudMap = {};
 		CloudLayer cloudLayer = {};
 		CloudNoiseSettings cloudNoise = {};

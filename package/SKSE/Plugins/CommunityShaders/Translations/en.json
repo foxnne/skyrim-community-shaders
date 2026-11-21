@@ -1,5 +1,7 @@
 {
     "_meta": {
+        "feature.physical_sky.clouds_on_world_map": "Volumetric Clouds on World Map",
+        "feature.physical_sky.clouds_on_world_map_desc": "Ray-march the volumetric clouds over the world map as well, with the same temporal smoothing as in the game, so local cloud layers such as a ring around the coast show there. The map camera flies up to 1.6 km and can sit in the low deck. Voxel clouds and lightning stay off on the map. Off = no volumetric clouds on the map, as before.",
         "feature.physical_sky.horizon_far_scale": "Second Band Distance",
         "feature.physical_sky.horizon_far_scale_desc": "How far out the second band stands, as a multiple of Distance. Higher = it sits lower and hazier behind the first, for more depth.",
         "feature.physical_sky.horizon_shade": "Self-Shading",

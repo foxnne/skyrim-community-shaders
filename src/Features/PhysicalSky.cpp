@@ -222,6 +222,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	shadowVolumeRange,
 	marchStepScale,
 	cloudBlurRadius,
+	cloudsOnWorldMap,
 	cloudMap,
 	cloudLayer,
 	cloudNoise,
@@ -1599,6 +1600,9 @@ void PhysicalSky::DrawCloudQualitySection()
 		ImGui::SliderInt(T(TKEY("cloud_blur_radius"), "Cloud Blur Radius"), &settings.cloudBlurRadius, 0, 2, "%d px", ImGuiSliderFlags_AlwaysClamp);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextWrapped("%s", T(TKEY("cloud_blur_radius_desc"), "Final blur radius in internal rendering pixels, adjusted by cloud distance. 0 skips the blur pass; 1 is the default; 2 gives a wider blur."));
+		ImGui::Checkbox(T(TKEY("clouds_on_world_map"), "Volumetric Clouds on World Map"), &settings.cloudsOnWorldMap);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextWrapped("%s", T(TKEY("clouds_on_world_map_desc"), "Ray-march the volumetric clouds over the world map as well, with the same temporal smoothing as in the game, so local cloud layers such as a ring around the coast show there. The map camera flies up to 1.6 km and can sit in the low deck. Voxel clouds and lightning stay off on the map. Off = no volumetric clouds on the map, as before."));
 	}
 }
 
@@ -2378,7 +2382,9 @@ void PhysicalSky::Prepass()
 				{ "froxel", globals::features::viewAtmosphere.IsPrepared() },
 				{ "planet", settings.planetRadius },
 				{ "bottom", cbData.zBottom },
-				{ "worldspace", GetCurrentWorldspaceEditorID() }
+				{ "worldspace", GetCurrentWorldspaceEditorID() },
+				// Opening or closing the map moves the camera far: no reprojection across it
+				{ "map", globals::state->isMapMenuOpen }
 			}.dump();
 			if (historyKey != volCloudHistoryKey) {
 				volMainHistoryValid = false;

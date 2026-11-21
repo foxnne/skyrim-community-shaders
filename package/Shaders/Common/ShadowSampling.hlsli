@@ -14,6 +14,10 @@
 #	include "CloudShadows/CloudShadows.hlsli"
 #endif
 
+#if defined(LOD_SHADOWS)
+#	include "LODShadows/LODShadows.hlsli"
+#endif
+
 #if defined(IBL)
 #	include "IBL/IBL.hlsli"
 #elif defined(SKYLIGHTING)
@@ -47,7 +51,9 @@ namespace ShadowSampling
 		return SharedData::HasDirectionalShadows;
 	}
 
-	float GetWorldShadow(float3 positionWS, float3 offset, out float cloudScatter)
+	// positionDx / positionDy: screen-space derivatives of positionWS for the receiver plane of the LOD shadow
+	// maps, or 0. Take them outside of flow control.
+	float GetWorldShadow(float3 positionWS, float3 offset, out float cloudScatter, float3 positionDx, float3 positionDy)
 	{
 		cloudScatter = 0.0;
 
@@ -55,9 +61,23 @@ namespace ShadowSampling
 			return 1.0;
 
 		float worldShadow = 1.0;
+		// Share of the terrain shadow that the height map still has to supply
+		float terrainWeight = 1.0;
+#if defined(LOD_SHADOWS)
+		// Cached depth of terrain, object LOD and tree LOD. Off on the world map, whose camera the maps do not follow.
+		[branch] if (!SharedData::InMapMenu && LODShadows::IsActive())
+		{
+			float lodCoverage;
+			worldShadow = LODShadows::GetShadow(positionWS + offset, positionDx, positionDy, LODShadows::GetObjectShadowWeight(positionWS), LinearSampler, lodCoverage);
+			// The height map keeps the terrain shadow outside the maps, and everywhere while they lack the terrain
+			if (LODShadows::CoversTerrain())
+				terrainWeight = 1.0 - lodCoverage;
+		}
+#endif
 #if defined(TERRAIN_SHADOWS)
 		// On the world map too, unless its setting is off (terraOccSettings.EnableTerrainShadow then reads 0)
-		worldShadow = TerrainShadows::GetTerrainShadow(positionWS + offset, LinearSampler);
+		if (terrainWeight > 0.0)
+			worldShadow *= lerp(1.0, TerrainShadows::GetTerrainShadow(positionWS + offset, LinearSampler), terrainWeight);
 #endif
 		// The world map keeps only the terrain term: the cloud shadow layers follow the player, not the map camera
 		if (SharedData::InMapMenu)
@@ -70,6 +90,11 @@ namespace ShadowSampling
 #endif
 
 		return worldShadow;
+	}
+
+	float GetWorldShadow(float3 positionWS, float3 offset, out float cloudScatter)
+	{
+		return GetWorldShadow(positionWS, offset, cloudScatter, 0.0, 0.0);
 	}
 
 	float GetWorldShadow(float3 positionWS, float3 offset)

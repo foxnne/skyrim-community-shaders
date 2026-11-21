@@ -16,6 +16,7 @@ struct IBL;
 struct LightLimitFix;
 struct LinearLighting;
 struct LODBlending;
+struct LODShadows;
 struct InteriorSun;
 struct PhysicalSky;
 struct RainRefraction;
@@ -135,6 +136,7 @@ namespace globals
 		extern LightLimitFix lightLimitFix;
 		extern LinearLighting linearLighting;
 		extern LODBlending lodBlending;
+		extern LODShadows lodShadows;
 		extern InteriorSun interiorSun;
 		extern PhysicalSky physicalSky;
 		extern RainRefraction rainRefraction;

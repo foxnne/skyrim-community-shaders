@@ -286,6 +286,25 @@ cbuffer AlphaTestRefCB : register(b11)
 Texture2D<float> TexDepthSampler : register(t17);
 
 #	if defined(PHYSICAL_SKY)
+#if defined(PHYSICAL_SKY) && defined(TEX)
+// foxnne moon disc: the moon texture is drawn in texture units while its light on the world, sky and clouds is
+// physical, so at night the disc read dimmer than the clouds it lights and could not bloom. Scale the disc so its
+// mean radiance is the moon's illuminance over its solid angle (the same rule as the procedural sun disc).
+// MOON_TEXTURE_MEAN: mean luminance of a lit moon texture; MOON_DISK_GAIN: artistic trim (1 = physical).
+#	define MOON_TEXTURE_MEAN 0.45
+#	define MOON_DISK_GAIN 1.0
+float MoonDiskRadianceScale()
+{
+	if (!SharedData::physSkyData.enabled || !(Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::IsMoon))
+		return 1.0;
+	const bool secunda = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::IsSecunda) != 0;
+	const float radius = secunda ? SharedData::physSkyData.diskAngularRadius.z : SharedData::physSkyData.diskAngularRadius.y;
+	const float3 light = secunda ? SharedData::physSkyData.secundaColor : SharedData::physSkyData.masserColor;
+	const float solidAngle = Math::TAU * (1.0 - cos(radius));
+	return MOON_DISK_GAIN * Color::RGBToLuminance(light) / max(solidAngle * MOON_TEXTURE_MEAN, 1e-6);
+}
+#endif
+
 float GetPhysSkyCloudShadow(float3 viewDir, uint2 pxCoord)
 {
 	if ((Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::InReflection) != 0) {
@@ -561,7 +580,7 @@ PS_OUTPUT main(PS_INPUT input)
 		} else if (enableProceduralSun) {
 			psout.Color = 0.0f;
 		} else {
-			psout.Color.xyz *= PhysSky::SampleViewCelestialTr(normalize(input.WorldPosition.xyz), PhysSky::SampSv);
+			psout.Color.xyz *= PhysSky::SampleViewCelestialTr(normalize(input.WorldPosition.xyz), PhysSky::SampSv) * MoonDiskRadianceScale();
 		}
 		if (SharedData::physSkyData.enableVolumetricClouds && (inReflection || !SharedData::PostWaterComposite)) {
 			float2 physSkyScreenUV = input.Position.xy * SharedData::BufferDim.zw * FrameBuffer::DynamicResolutionParams2.xy;  // adjust for dynamic res
@@ -570,6 +589,9 @@ PS_OUTPUT main(PS_INPUT input)
 #		else
 #			if defined(HORIZFADE) || (defined(TEX) && !defined(MOONMASK))
 		psout.Color.xyz *= PhysSky::SampleViewCelestialTr(normalize(input.WorldPosition.xyz), PhysSky::SampSv);
+#			endif
+#			if defined(TEX) && !defined(MOONMASK) && !defined(HORIZFADE)
+		psout.Color.xyz *= MoonDiskRadianceScale();
 #			endif
 #			ifndef OCCLUSION
 		if (enableProceduralSun) {

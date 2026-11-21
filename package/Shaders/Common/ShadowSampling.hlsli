@@ -51,13 +51,17 @@ namespace ShadowSampling
 	{
 		cloudScatter = 0.0;
 
-		if (SharedData::InInterior || SharedData::HideSky || SharedData::InMapMenu)
+		if (SharedData::InInterior || SharedData::HideSky)
 			return 1.0;
 
 		float worldShadow = 1.0;
 #if defined(TERRAIN_SHADOWS)
+		// On the world map too, unless its setting is off (terraOccSettings.EnableTerrainShadow then reads 0)
 		worldShadow = TerrainShadows::GetTerrainShadow(positionWS + offset, LinearSampler);
 #endif
+		// The world map keeps only the terrain term: the cloud shadow layers follow the player, not the map camera
+		if (SharedData::InMapMenu)
+			return worldShadow;
 
 #if defined(CLOUD_SHADOWS)
 		float cloudShadow = CloudShadows::GetCloudShadowMult(positionWS, LinearSampler);

@@ -2541,14 +2541,17 @@ void PhysicalSky::AccumShadow()
 	auto state = globals::state;
 	auto context = globals::d3d::context;
 
-	if (state->isMapMenuOpen) {
+	auto& terrainShadows = globals::features::terrainShadows;
+	auto& cloudShadows = globals::features::cloudShadows;
+
+	// The world map traces only the terrain shadow: the cascades and cloud shadow volumes belong to the player's
+	// view, not the map camera. Without terrain shadows there is nothing to trace and the air is left unshadowed.
+	const bool inMap = state->isMapMenuOpen;
+	if (inMap && !terrainShadows.IsShadowMapActive()) {
 		constexpr FLOAT clearShadow[4] = {};
 		context->ClearUnorderedAccessViewFloat(texApShadow->uav.get(), clearShadow);
 		return;
 	}
-
-	auto& terrainShadows = globals::features::terrainShadows;
-	auto& cloudShadows = globals::features::cloudShadows;
 
 	uint resolution[2] = { (uint)cbData.frameDim.x, (uint)cbData.frameDim.y };
 	if (settings.halfResApShadow) {
@@ -2563,15 +2566,15 @@ void PhysicalSky::AccumShadow()
 
 		auto sampler = sampTr.get();
 		ID3D11ShaderResourceView* directionalShadowLights = nullptr;
-		if (auto* directionalShadowBuffer = Deferred::GetSingleton()->directionalShadowLights)
+		if (auto* directionalShadowBuffer = Deferred::GetSingleton()->directionalShadowLights; directionalShadowBuffer && !inMap)
 			directionalShadowLights = directionalShadowBuffer->srv.get();
 		auto srvs = std::array{
 			globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY].depthSRV,
-			globals::deferred->GetDirectionalShadowMap(),
+			inMap ? nullptr : globals::deferred->GetDirectionalShadowMap(),
 			static_cast<ID3D11ShaderResourceView*>(nullptr),
-			terrainShadows.IsShadowMapReady() ? terrainShadows.texShadowHeight->srv.get() : nullptr,
-			cloudShadows.loaded ? cloudShadows.texCloudShadowLayers[CloudShadows::kMaxCloudLayers - 1]->srv.get() : nullptr,
-			VolumetricCloudsEnabled() && texShadowVolume ? texShadowVolume->srv.get() : nullptr,
+			terrainShadows.IsShadowMapActive() ? terrainShadows.texShadowHeight->srv.get() : nullptr,
+			cloudShadows.loaded && !inMap ? cloudShadows.texCloudShadowLayers[CloudShadows::kMaxCloudLayers - 1]->srv.get() : nullptr,
+			VolumetricCloudsEnabled() && texShadowVolume && !inMap ? texShadowVolume->srv.get() : nullptr,
 		};
 		auto uav = texApShadow->uav.get();
 

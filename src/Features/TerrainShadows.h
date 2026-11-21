@@ -31,6 +31,8 @@ public:
 	struct Settings
 	{
 		bool EnableTerrainShadow = true;
+		// The world map keeps the terrain term of the world shadow (cast shadows of the mountains from the sun)
+		bool EnableOnWorldMap = true;
 	} settings;
 
 	bool needPrecompute = false;
@@ -84,6 +86,8 @@ public:
 	bool IsHeightMapReady();
 	/** @brief Checks whether shadows are enabled and the shadow height texture is computed for the current heightmap. */
 	bool IsShadowMapReady();
+	/** @brief Terrain shadows are ready and wanted, taking the world map setting into account while the map is open. */
+	bool IsShadowMapActive();
 
 	/** @brief The raw terrain height map of the current worldspace and what a shader needs to read world z from it. */
 	struct HeightMapBinding

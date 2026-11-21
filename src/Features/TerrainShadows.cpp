@@ -146,7 +146,8 @@ namespace
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	TerrainShadows::Settings,
-	EnableTerrainShadow)
+	EnableTerrainShadow,
+	EnableOnWorldMap)
 
 void TerrainShadows::PostPostLoad()
 {
@@ -194,6 +195,11 @@ void TerrainShadows::SaveSettings(json& o_json)
 void TerrainShadows::DrawSettings()
 {
 	ImGui::Checkbox(T(TKEY("enable_terrain_shadow"), "Enable Terrain Shadow"), &settings.EnableTerrainShadow);
+	ImGui::BeginDisabled(!settings.EnableTerrainShadow);
+	ImGui::Checkbox(T(TKEY("enable_on_world_map"), "Terrain Shadows on World Map"), &settings.EnableOnWorldMap);
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("enable_on_world_map_tooltip"), "Mountains cast their shadows from the sun on the world map too, and shadow the air in front of them. Only the terrain shadow is used there: cloud and object shadows stay off on the map."));
+	ImGui::EndDisabled();
 }
 
 void TerrainShadows::DrawDebugSection()
@@ -351,6 +357,11 @@ bool TerrainShadows::IsShadowMapReady()
 	return loaded && settings.EnableTerrainShadow && IsHeightMapReady() && texShadowHeight && !needPrecompute;
 }
 
+bool TerrainShadows::IsShadowMapActive()
+{
+	return IsShadowMapReady() && (settings.EnableOnWorldMap || !globals::state->isMapMenuOpen);
+}
+
 bool TerrainShadows::GetHeightMapBinding(HeightMapBinding& a_binding)
 {
 	if (!IsHeightMapReady() || !texHeightMap->srv)
@@ -372,7 +383,7 @@ TerrainShadows::PerFrame TerrainShadows::GetCommonBufferData()
 	bool isHeightmapReady = IsHeightMapReady();
 
 	PerFrame data = {
-		.EnableTerrainShadow = IsShadowMapReady(),
+		.EnableTerrainShadow = IsShadowMapActive(),
 	};
 
 	if (isHeightmapReady) {

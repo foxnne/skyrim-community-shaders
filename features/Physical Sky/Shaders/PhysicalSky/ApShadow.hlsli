@@ -120,6 +120,8 @@ namespace AtmosphereShadow
 		if (ray.terrainReady)
 			shadow *= TerrainShadows::GetTerrainShadow(posWorldAbs, SampTr);
 		[branch] if (all(shadow < 1e-8)) return 0;
+		// The world map traces only the terrain term (PhysicalSky::AccumShadow binds no cascades or cloud volumes there)
+		[branch] if (SharedData::InMapMenu) return shadow;
 
 		float cloudShadow = 1.0;
 		[branch] if (SharedData::cloudShadowsSettings.Opacity != 0.0)

@@ -636,6 +636,13 @@ struct PhysicalSky final : public Feature
 	winrt::com_ptr<ID3D11ComputeShader> csVolFilter = nullptr, csVolFilterWide = nullptr;
 	winrt::com_ptr<ID3D11ComputeShader> csVolFilterNone = nullptr;  ///< Blur radius 0: only adds the horizon clouds.
 	double horizonCloudDrift = 0.0;                                 ///< Turns the horizon band has travelled round the camera.
+	/** @brief How the current game weather shapes the horizon band (blended across weather transitions). */
+	struct HorizonCloudWeather
+	{
+		float coverage = 0.f;  ///< the setting times the weather class amount and the fog fade; 0 when off
+		float bank = 0.f;      ///< share by which the band type moves toward a flat bank (cloudy weathers)
+	};
+	HorizonCloudWeather GetHorizonCloudWeather() const;
 	/** @brief Horizon cloud coverage for the current weather: the setting times the weather class amount, 0 when off. */
 	float GetHorizonCloudCoverage() const;
 	winrt::com_ptr<ID3D11ComputeShader> csVolReproject = nullptr;

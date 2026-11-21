@@ -449,6 +449,14 @@ struct HorizonCloudSettings
 	float cloudyAmount = 1.4f;
 	float rainyAmount = 0.f;
 	float snowAmount = 0.f;
+	// Fog weathers: the band fades out as the game weather's day fog distance (Fog Far, in metres) drops from
+	// fogFull to fogHide, whatever its class. fogFull 0 turns this off. NAT III: fog 140-360 m, overcast 500-2100 m,
+	// clear 2900-3600 m.
+	float fogHide = 350.f;
+	float fogFull = 860.f;
+	// Cloudy weathers: share by which the band turns from its type into one flat bank, so an overcast sky ends in a
+	// bank that continues the deck instead of separate towers. 0 = the type as set.
+	float cloudyBank = 0.5f;
 };
 
 struct CloudLayer

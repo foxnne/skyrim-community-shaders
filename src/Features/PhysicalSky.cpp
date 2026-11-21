@@ -146,7 +146,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	HorizonCloudSettings,
 	enabled, coverage, baseAltitude, topAltitude, type, density, distance, brightness, seed, farScale, sunlit, shade,
-	pleasantAmount, cloudyAmount, rainyAmount, snowAmount)
+	pleasantAmount, cloudyAmount, rainyAmount, snowAmount, fogHide, fogFull, cloudyBank)
 
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	CloudLayer,
@@ -1408,13 +1408,18 @@ void PhysicalSky::DrawCirrusSection()
 	}
 }
 
-float PhysicalSky::GetHorizonCloudCoverage() const
+PhysicalSky::HorizonCloudWeather PhysicalSky::GetHorizonCloudWeather() const
 {
 	const auto& horizon = settings.cloudLayer.horizon;
 	if (!horizon.enabled || !std::isfinite(horizon.coverage) || horizon.coverage <= 0.f)
-		return 0.f;
-	const auto amount = [&](const RE::TESWeather* weather) {
+		return {};
+	const auto finite = [](float value, float lo, float hi, float fallback) { return std::isfinite(value) ? std::clamp(value, lo, hi) : fallback; };
+	const float fogFull = finite(horizon.fogFull, 0.f, 20000.f, 860.f);
+	const float fogHide = std::min(finite(horizon.fogHide, 0.f, 20000.f, 350.f), fogFull - 1.f);
+	// x: coverage multiplier of the weather class times its fog visibility, y: 1 for a cloudy weather
+	const auto sample = [&](const RE::TESWeather* weather) {
 		float value = horizon.pleasantAmount;
+		float cloudy = 0.f;
 		if (weather) {
 			using Flag = RE::TESWeather::WeatherDataFlag;
 			const auto& flags = weather->data.flags;
@@ -1422,18 +1427,34 @@ float PhysicalSky::GetHorizonCloudCoverage() const
 				value = horizon.snowAmount;
 			else if (flags.any(Flag::kRainy))
 				value = horizon.rainyAmount;
-			else if (flags.any(Flag::kCloudy))
+			else if (flags.any(Flag::kCloudy)) {
 				value = horizon.cloudyAmount;
+				cloudy = 1.f;
+			}
+			// A weather whose fog closes in hides the horizon, whatever its class (fog weathers are mostly "cloudy")
+			const float fogFar = weather->fogData.dayFar * Util::Units::GAME_UNIT_TO_M;
+			if (fogFull > 0.f && std::isfinite(fogFar) && fogFar > 0.f) {
+				const float t = std::clamp((fogFar - fogHide) / (fogFull - fogHide), 0.f, 1.f);
+				value *= t * t * (3.f - 2.f * t);
+			}
 		}
-		return std::isfinite(value) ? std::clamp(value, 0.f, 4.f) : 1.f;
+		return float2{ std::isfinite(value) ? std::clamp(value, 0.f, 4.f) : 1.f, cloudy };
 	};
-	float scale = amount(nullptr);
+	float2 weather = sample(nullptr);
 	if (const auto* sky = globals::game::sky) {
-		scale = amount(sky->currentWeather);
-		if (sky->lastWeather && sky->currentWeatherPct < 1.f)
-			scale = std::lerp(amount(sky->lastWeather), scale, std::clamp(sky->currentWeatherPct, 0.f, 1.f));
+		weather = sample(sky->currentWeather);
+		if (sky->lastWeather && sky->currentWeatherPct < 1.f) {
+			const float2 last = sample(sky->lastWeather);
+			const float t = std::clamp(sky->currentWeatherPct, 0.f, 1.f);
+			weather = { std::lerp(last.x, weather.x, t), std::lerp(last.y, weather.y, t) };
+		}
 	}
-	return std::clamp(horizon.coverage * scale, 0.f, 1.f);
+	return { std::clamp(horizon.coverage * weather.x, 0.f, 1.f), finite(horizon.cloudyBank, 0.f, 1.f, 0.5f) * weather.y };
+}
+
+float PhysicalSky::GetHorizonCloudCoverage() const
+{
+	return GetHorizonCloudWeather().coverage;
 }
 
 void PhysicalSky::DrawHorizonCloudSection()
@@ -1474,12 +1495,23 @@ void PhysicalSky::DrawHorizonCloudSection()
 
 		ImGui::SeparatorText(T(TKEY("horizon_weather_class"), "Amount by Weather Class"));
 		Util::Text::WrappedSecondary("%s", T(TKEY("horizon_weather_class_desc"),
-											   "Multiplies coverage by the class of the current game weather, blended across weather changes. Rain, snow and storms hide the horizon behind their own deck, so they default to none."));
+											   "Multiplies coverage by the class of the current game weather, blended across weather changes. Rain, snow and storms hide the horizon behind their own deck, so they default to none, and fog weathers fade it out by their fog distance."));
 		ImGui::SliderFloat(T(TKEY("horizon_pleasant"), "Pleasant / Unclassified"), &horizon.pleasantAmount, 0.f, 2.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		ImGui::SliderFloat(T(TKEY("horizon_cloudy"), "Cloudy"), &horizon.cloudyAmount, 0.f, 2.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		ImGui::SliderFloat(T(TKEY("horizon_rainy"), "Rainy"), &horizon.rainyAmount, 0.f, 2.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 		ImGui::SliderFloat(T(TKEY("horizon_snow"), "Snow"), &horizon.snowAmount, 0.f, 2.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-		Util::Text::Secondary("%s  %.2f", T(TKEY("horizon_coverage_now"), "Coverage now"), GetHorizonCloudCoverage());
+		ImGui::SliderFloat(T(TKEY("horizon_fog_hide"), "Hidden by Fog Below"), &horizon.fogHide, 0.f, 3000.f, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("horizon_fog_hide_desc"), "Fog weathers hide the band whatever their class: it fades out as the game weather's day fog distance (Fog Far) drops from Full Band in Fog to this. NAT III fog weathers end their fog at 140-360 m, overcast ones at 500-2100 m, clear ones beyond 2.9 km."));
+		ImGui::SliderFloat(T(TKEY("horizon_fog_full"), "Full Band in Fog From"), &horizon.fogFull, 0.f, 5000.f, "%.0f m", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("horizon_fog_full_desc"), "Weathers whose day fog reaches at least this far keep the whole band. 0 = fog never hides it."));
+		ImGui::SliderFloat(T(TKEY("horizon_cloudy_bank"), "Overcast Bank"), &horizon.cloudyBank, 0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("horizon_cloudy_bank_desc"), "In cloudy weathers the band turns by this share from its type into one flat bank, so an overcast sky ends in a bank that continues the deck instead of separate towers. 0 = the type as set."));
+		const auto horizonNow = GetHorizonCloudWeather();
+		Util::Text::Secondary("%s  %.2f", T(TKEY("horizon_coverage_now"), "Coverage now"), horizonNow.coverage);
+		Util::Text::Secondary("%s  %.2f", T(TKEY("horizon_bank_now"), "Bank share now"), horizonNow.bank);
 		ImGui::EndDisabled();
 	}
 }

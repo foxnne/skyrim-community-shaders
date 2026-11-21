@@ -1110,7 +1110,10 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 	const float bandLift = bandValue(middle.bands.displacement, 0.f, .5f, 0.f) * bandValue(middle.thickness, 100.f, 4000.f, 800.f) / Util::Units::GAME_UNIT_TO_M;
 	auto& lighting = settings.cloudLayer.lighting;
 	const auto& horizon = settings.cloudLayer.horizon;
-	const float horizonCoverage = GetHorizonCloudCoverage();
+	const auto horizonWeather = GetHorizonCloudWeather();
+	const float horizonCoverage = horizonWeather.coverage;
+	// Cloudy weathers turn the band toward one flat bank that continues the deck
+	const float horizonType = std::lerp(bandValue(horizon.type, 0.f, 1.f, 0.25f), 1.f, horizonWeather.bank);
 	const float horizonBase = bandValue(horizon.baseAltitude, 0.f, 4000.f, 700.f);
 	const float horizonTop = std::max(bandValue(horizon.topAltitude, 500.f, 12000.f, 3200.f), horizonBase + 200.f);
 
@@ -1264,7 +1267,7 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 		.middleBands = { std::cos(bandAngle) / bandWavelength, std::sin(bandAngle) / bandWavelength,
 			bandValue(middle.bands.warp, 0.f, 1.f, .25f), bandCoverage },
 		.middleBandShape = { bandThickness, bandLift, bandWavelength, bandCoverage + bandThickness + bandLift > 0.f ? 1.f : 0.f },
-		.horizonShape = { horizonCoverage, horizonBase / Util::Units::GAME_UNIT_TO_M, horizonTop / Util::Units::GAME_UNIT_TO_M, bandValue(horizon.type, 0.f, 1.f, 0.25f) },
+		.horizonShape = { horizonCoverage, horizonBase / Util::Units::GAME_UNIT_TO_M, horizonTop / Util::Units::GAME_UNIT_TO_M, horizonType },
 		.horizonLayer = { KilometersToGameUnits(bandValue(horizon.distance, 45.f, 150.f, 60.f)), bandValue(horizon.density, 0.f, 4.f, 1.f),
 			static_cast<float>(horizonCloudDrift), bandValue(horizon.brightness, 0.f, 3.f, 1.f) },
 		.horizonExtra = { std::floor(bandValue(horizon.seed, 0.f, 64.f, 0.f)), bandValue(horizon.farScale, 1.2f, 3.f, 1.8f),

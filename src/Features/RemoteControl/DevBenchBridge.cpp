@@ -1,5 +1,6 @@
 #include "Features/NeuralRendering.h"
 #include "Features/RemoteControl/DevBenchBridge.h"
+#include "Features/LightLimitFix.h"
 #include "Features/PostProcessing.h"
 #include "Features/PostProcessing/HistogramAutoExposure.h"
 
@@ -476,6 +477,24 @@ namespace
 					{ "neuralRendering", globals::features::neuralRendering.loaded && globals::features::neuralRendering.settings.enabled },
 					{ "utility", utility },
 					{ "shaders", types },
+				};
+			});
+		}
+		if (kind == "lights") {
+			return RunOnMainThread([]() -> json {
+				auto& llf = globals::features::lightLimitFix;
+				const auto& t = llf.lightTally;
+				return json{
+					{ "loaded", llf.loaded },
+					{ "localShadowCacheActive", llf.IsLocalShadowCacheActive() },
+					{ "keepShadowlessSpots", llf.settings.KeepShadowlessSpots },
+					{ "frame", t.frame }, { "seen", t.seen }, { "shadowLights", t.shadowLights }, { "spots", t.spots },
+					{ "keptLocalShadow", t.keptLocalShadow }, { "keptShadowMask", t.keptShadowMask },
+					{ "droppedShadowless", t.droppedShadowless }, { "droppedShadowlessSpots", t.droppedShadowlessSpots },
+					{ "keptShadowless", t.keptShadowless }, { "droppedFaded", t.droppedFaded },
+					{ "droppedFadedShadowLights", t.droppedFadedShadowLights }, { "pushed", t.pushed },
+					{ "ignoreLightLODDimmer", llf.settings.IgnoreLightLODDimmer },
+					{ "dropped", [&]() { json a = json::array(); for (const auto& d : llf.droppedLights) a.push_back(json{ { "name", d.name }, { "distance", d.distance }, { "radius", d.radius }, { "colorSum", d.colorSum }, { "niFade", d.niFade }, { "lodDimmer", d.lodDimmer }, { "finalFade", d.finalFade }, { "shadow", d.shadow }, { "spot", d.spot }, { "global", d.global } }); return a; }() },
 				};
 			});
 		}

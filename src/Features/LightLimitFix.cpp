@@ -45,7 +45,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	RealisticFalloffInteriorOnly,
 	RealisticFalloffRefFraction,
 	RealisticFalloffIntensity,
-	RealisticFalloffRadiusScale)
+	RealisticFalloffRadiusScale,
+	KeepShadowlessSpots,
+	IgnoreLightLODDimmer)
 
 static constexpr uint CLUSTER_MAX_LIGHTS = 128;
 
@@ -778,6 +780,9 @@ void LightLimitFix::UpdateLights()
 	static eastl::vector<LightData> lightsData;
 	lightsData.clear();
 	lightsData.reserve(MAX_LIGHTS);
+	lightTally = {};
+	droppedLights.clear();
+	lightTally.frame = globals::state->frameCount;
 
 	// Process point lights
 
@@ -801,11 +806,12 @@ void LightLimitFix::UpdateLights()
 					auto light = ProcessLight(bsLight, niLight);
 
 					light.lightFlags.reset(LightFlags::Shadow, LightFlags::ShadowCaster, LightFlags::LocalShadow);
+					lightTally.seen++;
 					// A shadow light's lodDimmer is zeroed past the shadow distance, which would drop demoted lights; use the light LOD fade instead.
 					if (bsLight->IsShadowLight() && IsLocalShadowCacheActive()) {
 						const float radius = niLight->GetLightRuntimeData().radius.x;
 						light.fade *= GetLightLODDimmer(niLight->world.translate.GetSquaredDistance(eyePositionCached) - radius * radius);
-					} else {
+					} else if (!settings.IgnoreLightLODDimmer) {
 						light.fade *= bsLight->lodDimmer;
 					}
 
@@ -828,6 +834,9 @@ void LightLimitFix::UpdateLights()
 					if (bsLight->IsShadowLight()) {
 						auto* shadowLight = static_cast<RE::BSShadowLight*>(bsLight);
 						light.lightFlags.set(LightFlags::ShadowCaster);
+						lightTally.shadowLights++;
+						if (shadowLight->GetIsFrustumLight())
+							lightTally.spots++;
 						if (!IsLocalShadowCacheActive()) {
 							TryAssignShadowMask(light, shadowLight);
 						} else if (const auto* caster = FindLocalShadowCaster(shadowLight); caster && caster->slice >= 0 && caster->lastRenderedFrame != 0) {
@@ -841,14 +850,44 @@ void LightLimitFix::UpdateLights()
 							TryAssignShadowMask(light, shadowLight);
 						}
 						// Shadowless spots would light their whole radius, so drop them; with the cache, other casters render unshadowed.
-						if (light.lightFlags.none(LightFlags::LocalShadow, LightFlags::Shadow) && (!IsLocalShadowCacheActive() || shadowLight->GetIsFrustumLight()))
-							return;
+						if (light.lightFlags.any(LightFlags::LocalShadow))
+							lightTally.keptLocalShadow++;
+						else if (light.lightFlags.any(LightFlags::Shadow))
+							lightTally.keptShadowMask++;
+						if (light.lightFlags.none(LightFlags::LocalShadow, LightFlags::Shadow) && (!IsLocalShadowCacheActive() || shadowLight->GetIsFrustumLight())) {
+							if (!settings.KeepShadowlessSpots) {
+								lightTally.droppedShadowless++;
+								if (shadowLight->GetIsFrustumLight())
+									lightTally.droppedShadowlessSpots++;
+								return;
+							}
+							lightTally.keptShadowless++;
+						}
 					}
 
 					SetLightPosition(light, niLight->world.translate);
 
 					if ((light.color.x + light.color.y + light.color.z) * light.fade > 1e-4 && light.radius > 1e-4) {
 						lightsData.push_back(light);
+						lightTally.pushed++;
+					} else {
+						lightTally.droppedFaded++;
+						if (bsLight->IsShadowLight())
+							lightTally.droppedFadedShadowLights++;
+						if (droppedLights.size() < 48) {
+							DroppedLightInfo d;
+							d.name = niLight->name.c_str() ? niLight->name.c_str() : "";
+							d.distance = std::sqrt(niLight->world.translate.GetSquaredDistance(eyePositionCached));
+							d.radius = light.radius;
+							d.colorSum = light.color.x + light.color.y + light.color.z;
+							d.niFade = niLight->GetLightRuntimeData().fade;
+							d.lodDimmer = bsLight->lodDimmer;
+							d.finalFade = light.fade;
+							d.shadow = bsLight->IsShadowLight();
+							d.spot = d.shadow && static_cast<RE::BSShadowLight*>(bsLight)->GetIsFrustumLight();
+							d.global = IsGlobalLight(bsLight);
+							droppedLights.push_back(std::move(d));
+						}
 					}
 				}
 			}

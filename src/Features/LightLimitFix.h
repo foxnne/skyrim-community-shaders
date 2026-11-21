@@ -367,6 +367,22 @@ public:
 	virtual void EarlyPrepass() override;
 
 	eastl::vector<LocalShadowCaster> localShadowCasters;
+
+	/** @brief Per-frame tally of what UpdateLights did with each active light (DevBench `inspect kind=lights`). */
+	struct LightTally
+	{
+		uint32_t frame = 0, seen = 0, shadowLights = 0, spots = 0, keptLocalShadow = 0, keptShadowMask = 0,
+				 droppedShadowless = 0, droppedShadowlessSpots = 0, keptShadowless = 0, droppedFaded = 0, droppedFadedShadowLights = 0, pushed = 0;
+	};
+	LightTally lightTally{};
+	/** @brief Lights dropped by the brightness test this frame, for DevBench (first 48). */
+	struct DroppedLightInfo
+	{
+		std::string name;
+		float distance = 0, radius = 0, colorSum = 0, niFade = 0, lodDimmer = 0, finalFade = 0;
+		bool shadow = false, spot = false, global = false;
+	};
+	eastl::vector<DroppedLightInfo> droppedLights;
 	ankerl::unordered_dense::map<RE::BSShadowLight*, uint32_t> localShadowCasterLookup;
 	eastl::vector<RE::BSShadowLight*> localShadowAllowed;
 	eastl::vector<RE::BSShadowLight*> localShadowSliceOwner;
@@ -512,6 +528,11 @@ public:
 		float RealisticFalloffRefFraction = 0.35f;  // fraction of the light radius where brightness matches the original curve
 		float RealisticFalloffIntensity = 1.0f;
 		float RealisticFalloffRadiusScale = 1.0f;
+		// Keep shadow-casting spot lights that got neither a cached local shadow nor an engine shadow mask, lit unshadowed,
+		// instead of dropping them (window and sunbeam spots in interiors with more casters than shadow channels).
+		bool KeepShadowlessSpots = false;
+		// Debug: ignore the engine's light LOD dimmer (lodDimmer) when deciding a light's brightness.
+		bool IgnoreLightLODDimmer = false;
 	};
 
 	uint clusterSize[3] = { 16 };

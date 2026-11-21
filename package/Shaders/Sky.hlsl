@@ -292,7 +292,7 @@ Texture2D<float> TexDepthSampler : register(t17);
 // mean radiance is the moon's illuminance over its solid angle (the same rule as the procedural sun disc).
 // MOON_TEXTURE_MEAN: mean luminance of a lit moon texture; MOON_DISK_GAIN: artistic trim (1 = physical).
 #	define MOON_TEXTURE_MEAN 0.45
-#	define MOON_DISK_GAIN 1.0
+#	define MOON_DISK_GAIN 2.0
 float MoonDiskRadianceScale()
 {
 	if (!SharedData::physSkyData.enabled || !(Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::IsMoon))

@@ -1,4 +1,5 @@
 #include "Common/ColorManagement.hlsli"
+#include "Common/PreExposure.hlsli"
 #include "Common/SharedData.hlsli"
 #include "NRD/NRDReblurSH.hlsli"
 
@@ -45,8 +46,11 @@ float3 SampleSSGIIL(uint2 pixCoord)
 	float3 ssgiIl = SampleSSGIIL(dispatchID.xy);
 	ssgiIl = max(lerp(Color::RGBToLuminance(ssgiIl), ssgiIl, SharedData::ssgiSettings.ILSaturation), 0.0);
 
+	// MainRW holds pre-exposed scene radiance (DeferredCompositeCS encodes it); the traced and fallback
+	// illumination are in scene units. Add them in scene units, or the indirect light ignores exposure
+	// and shows at a fixed display brightness: a flat film outdoors, blown-out dark interiors.
 	float4 mainColor = MainRW[dispatchID.xy];
-	float3 linDiffuseColor = ColorManagement::SceneToLinear(mainColor.xyz);
+	float3 linDiffuseColor = ColorManagement::SceneToLinear(PreExposure::Decode(mainColor.xyz));
 	linDiffuseColor += ssgiIl * linAlbedo;
-	MainRW[dispatchID.xy] = float4(ColorManagement::LinearToScene(linDiffuseColor), mainColor.a);
+	MainRW[dispatchID.xy] = float4(PreExposure::Encode(ColorManagement::LinearToScene(linDiffuseColor)), mainColor.a);
 }

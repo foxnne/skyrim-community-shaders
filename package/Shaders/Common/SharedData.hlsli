@@ -101,7 +101,8 @@ namespace SharedData
 		float2 ZRange;
 		float2 Offset;
 		float ZBlur;
-		float3 pad0;
+		float MapNormalStrength;  // world map LOD land: share of the height map normal (Lighting.hlsl), 0 while the map is closed
+		float2 pad0;
 	};
 
 	struct LightLimitFixSettings

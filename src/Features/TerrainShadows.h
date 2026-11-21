@@ -33,6 +33,8 @@ public:
 		bool EnableTerrainShadow = true;
 		// The world map keeps the terrain term of the world shadow (cast shadows of the mountains from the sun)
 		bool EnableOnWorldMap = true;
+		// World map: lighting normals of LOD land from the height map instead of the coarse LOD normals. 0 = off.
+		float MapNormalStrength = 1.0f;
 	} settings;
 
 	bool needPrecompute = false;
@@ -69,8 +71,9 @@ public:
 		float3 Scale;
 		float2 ZRange;
 		float2 Offset;
-		float ZBlur;  // world-space half-width of the shadow transition
-		float3 pad0;
+		float ZBlur;              // world-space half-width of the shadow transition
+		float MapNormalStrength;  // world map LOD land: share of the height map normal; 0 while the map is closed
+		float2 pad0;
 	};
 	STATIC_ASSERT_ALIGNAS_16(PerFrame);
 

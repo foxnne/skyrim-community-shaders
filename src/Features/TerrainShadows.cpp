@@ -147,7 +147,8 @@ namespace
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	TerrainShadows::Settings,
 	EnableTerrainShadow,
-	EnableOnWorldMap)
+	EnableOnWorldMap,
+	MapNormalStrength)
 
 void TerrainShadows::PostPostLoad()
 {
@@ -185,6 +186,7 @@ void TerrainShadows::GameLoaded()
 void TerrainShadows::LoadSettings(json& o_json)
 {
 	settings = o_json;
+	settings.MapNormalStrength = std::isfinite(settings.MapNormalStrength) ? std::clamp(settings.MapNormalStrength, 0.0f, 1.0f) : 1.0f;
 }
 
 void TerrainShadows::SaveSettings(json& o_json)
@@ -200,6 +202,9 @@ void TerrainShadows::DrawSettings()
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::Text("%s", T(TKEY("enable_on_world_map_tooltip"), "Mountains cast their shadows from the sun on the world map too, and shadow the air in front of them. Only the terrain shadow is used there: cloud and object shadows stay off on the map."));
 	ImGui::EndDisabled();
+	ImGui::SliderFloat(T(TKEY("map_normal_strength"), "World Map Terrain Detail"), &settings.MapNormalStrength, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("map_normal_strength_tooltip"), "Shades the land on the world map with slopes read from the terrain height map (about 2 m per texel) instead of the coarse LOD mesh, so its triangles stop showing in the light. Works with terrain shadows off too; needs a height map for the worldspace. 1 = height map only, 0 = the LOD mesh as before."));
 }
 
 void TerrainShadows::DrawDebugSection()
@@ -397,6 +402,9 @@ TerrainShadows::PerFrame TerrainShadows::GetCommonBufferData()
 		data.ZRange = cachedHeightmap->zRange;
 		const float stepDescent = -0.5f * (shadowUpdateCBData.LightDeltaZ.x + shadowUpdateCBData.LightDeltaZ.y) * (data.ZRange.y - data.ZRange.x);
 		data.ZBlur = stepDescent * zBlurSteps;
+		// Lighting.hlsl (WORLD_MAP LOD land) reads the raw height map at t75, bound by EarlyPrepass while the map is open
+		if (loaded && globals::state->isMapMenuOpen && texHeightMap->srv)
+			data.MapNormalStrength = std::clamp(settings.MapNormalStrength, 0.0f, 1.0f);
 	}
 
 	return data;
@@ -650,6 +658,12 @@ void TerrainShadows::ReflectionsPrepass()
 void TerrainShadows::EarlyPrepass()
 {
 	LoadHeightmap();
+
+	// The world map's LOD land takes its lighting normals from the raw height map (GetCommonBufferData::MapNormalStrength)
+	{
+		ID3D11ShaderResourceView* mapHeight = globals::state->isMapMenuOpen && IsHeightMapReady() ? texHeightMap->srv.get() : nullptr;
+		globals::d3d::context->PSSetShaderResources(75, 1, &mapHeight);
+	}
 
 	const auto requestedRefreshGeneration = Util::GetCompletedCelestialTransitionGeneration();
 	const bool timeJumpRefresh = requestedRefreshGeneration != handledTimeJumpRefreshGeneration;

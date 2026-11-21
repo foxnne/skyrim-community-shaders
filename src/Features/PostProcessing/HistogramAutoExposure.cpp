@@ -438,6 +438,13 @@ void HistogramAutoExposure::Draw(TextureInfo& inout_tex)
 	};
 
 	context->CSSetConstantBuffers(1, 1, &cb);
+	// The histogram decodes pre-exposed scene radiance with SharedData::RcpPreExposure (b5). Nothing else
+	// guarantees b5 holds SharedData on the compute stage here: a stale or null buffer reads as zero, every
+	// sample is discarded, adaptation never moves and the exposure sits at the bright end of its range.
+	{
+		auto* sharedDataBuf = globals::state->sharedDataCB->CB();
+		context->CSSetConstantBuffers(5, 1, &sharedDataBuf);
+	}
 	globals::profiler->BeginPass("PostProcessing::HistogramAutoExposure");
 	state->BeginPerfEvent("Histogram Auto Exposure");
 

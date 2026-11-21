@@ -224,9 +224,11 @@ namespace TreeShapes
 		 *   x, y  horizontal offset from the tree's trunk, 1 = the widest point of that tree's crown
 		 *   z     height inside the tree's crown, 0 lowest crown vertex, 1 top
 		 *   w     0 = no data for this vertex, otherwise (1 + the tree's tint code) / 127 (GetTintCode)
+		 * @param a_weight Receives how much of the data to apply: 1, or less while the data of a shape that was
+		 * drawn without it (its block's trunks not registered yet, or its build waiting for its turn) fades in.
 		 * @return nullptr for shapes without it: billboards, trunks, crowns with no trunk card to follow.
 		 */
-		ID3D11ShaderResourceView* GetCrownData(RE::BSGeometry* a_geometry) const;
+		ID3D11ShaderResourceView* GetCrownData(RE::BSGeometry* a_geometry, uint a_frame, float& a_weight) const;
 
 		/** @brief Frees the bend data of shapes not drawn for a while, and the blocks left without shapes. */
 		void Evict(uint a_frame);
@@ -268,6 +270,8 @@ namespace TreeShapes
 			bool crown = false;
 			winrt::com_ptr<ID3D11Buffer> crownBuffer;
 			winrt::com_ptr<ID3D11ShaderResourceView> crownSrv;  // nullptr without crown data
+			bool crownFade = false;                             // the shape was drawn without crown data before the build
+			uint crownFadeFrame = 0;                            // ... and this is the frame the data arrived
 		};
 
 		// Bend data by shape content. The game re-creates the render data of object LOD shapes (new vertex buffer,
@@ -285,6 +289,7 @@ namespace TreeShapes
 		std::unordered_map<uint64_t, Block> blocks;      // key = the block's world translate
 		std::unordered_map<const void*, Entry> entries;  // key = the shape's vertex buffer
 		std::unordered_map<uint64_t, Shared> shared;     // key = the shape's content signature
+		std::unordered_set<const void*> waiting;         // vertex buffers of crowns drawn without crown data so far
 		uint64_t builtCount = 0, reusedCount = 0, loggedBuilt = 0, loggedReused = 0;
 		// Builds scan every vertex of a merged LOD shape on the render thread. When the LOD grid moves, hundreds of
 		// shapes arrive in one frame, so only a few milliseconds of builds run per frame and the rest wait

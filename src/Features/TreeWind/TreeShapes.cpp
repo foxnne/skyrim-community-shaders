@@ -22,8 +22,15 @@ namespace TreeShapes
 		// Crown vertices sit within this many model units (at LOD4 scale) of their trunk
 		constexpr float kCrownRadius = 100.0f;
 		constexpr float kCellSize = 128.0f;
-		// Bend data of a shape not drawn for this many frames is freed
+		// Bend data of a loaded tree shape not drawn for this many frames is freed
 		constexpr uint kEvictFrames = 600;
+		// The same for tree LOD shapes. A shape is not drawn while it is outside the view or hidden behind terrain,
+		// and data freed then has to be built again when it comes back: the crowns show their plain shading until
+		// their turn. So it is kept for about a minute and a half of looking elsewhere (at 60 frames per second),
+		// at 12 bytes per vertex of the shapes that left in that time.
+		constexpr uint kLodEvictFrames = 5400;
+		// Crown data of a tree LOD shape that was drawn without it fades in over this many frames
+		constexpr uint kCrownFadeFrames = 45;
 		// Render-thread time spent building bend data per frame; a build that has started always finishes
 		constexpr int64_t kBuildBudgetNs = 1500000;
 		// A tree-mod crown waits this many frames after its block last gained trunk cards, so it is built once
@@ -1017,13 +1024,21 @@ namespace TreeShapes
 		}
 	}
 
-	ID3D11ShaderResourceView* BendWeights::GetCrownData(RE::BSGeometry* a_geometry) const
+	ID3D11ShaderResourceView* BendWeights::GetCrownData(RE::BSGeometry* a_geometry, uint a_frame, float& a_weight) const
 	{
+		a_weight = 1.0f;
 		const auto rendererData = a_geometry ? a_geometry->GetGeometryRuntimeData().rendererData : nullptr;
 		if (!rendererData || !rendererData->vertexBuffer)
 			return nullptr;
 		const auto it = entries.find(rendererData->vertexBuffer);
-		return it != entries.end() ? it->second.crownSrv.get() : nullptr;
+		if (it == entries.end())
+			return nullptr;
+		const auto& entry = it->second;
+		if (entry.crownFade && entry.crownSrv) {
+			const float t = std::min(static_cast<float>(a_frame - entry.crownFadeFrame + 1) / kCrownFadeFrames, 1.0f);
+			a_weight = t * t * (3.0f - 2.0f * t);
+		}
+		return entry.crownSrv.get();
 	}
 
 	ID3D11ShaderResourceView* BendWeights::Get(RE::BSGeometry* a_geometry, Kind a_kind, uint a_frame, bool a_treeModSupport)
@@ -1091,9 +1106,18 @@ namespace TreeShapes
 				previous = record.srv.get();
 		}
 
+		// This draw goes out without crown data (no entry of its own to take it from): when the data arrives it
+		// fades in instead of switching the crown's shading from one frame to the next
+		const auto drawnWithoutCrownData = [&] {
+			if (a_kind == Kind::Crown && !staleEntry)
+				waiting.insert(vertices.vertexBuffer);
+		};
+
 		// A crown that follows trunk cards has nothing to build from until its block's trunks are drawn
-		if (a_kind == Kind::Crown && block.cards.empty() && !IsAllQuads(a_geometry) && !IsTreeShapeName(a_geometry) && !(a_treeModSupport && a_geometry->world.scale >= 6.0f))
+		if (a_kind == Kind::Crown && block.cards.empty() && !IsAllQuads(a_geometry) && !IsTreeShapeName(a_geometry) && !(a_treeModSupport && a_geometry->world.scale >= 6.0f)) {
+			drawnWithoutCrownData();
 			return previous;
+		}
 
 		// Out of time this frame, or the block is still gaining trunk cards: draw with the previous data (or still)
 		// and build in a later frame
@@ -1107,6 +1131,7 @@ namespace TreeShapes
 			++deferredCount;
 			if (staleEntry)
 				staleEntry->lastFrame = a_frame;
+			drawnWithoutCrownData();
 			return previous;
 		}
 
@@ -1422,6 +1447,14 @@ namespace TreeShapes
 		if (!vertexTree.empty())
 			BuildCrownData(vertices, vertexTree, block, entry.crownBuffer, entry.crownSrv);
 
+		// Fade the crown data in if the shape has been on screen without it; a rebuild keeps the fade it was in
+		const bool waited = waiting.erase(vertices.vertexBuffer) > 0;
+		entry.crownFade = entry.crownSrv && (waited || (staleEntry && !staleEntry->crownSrv));
+		entry.crownFadeFrame = a_frame;
+		if (staleEntry && staleEntry->crownSrv && entry.crownSrv) {
+			entry.crownFade = staleEntry->crownFade;
+			entry.crownFadeFrame = staleEntry->crownFadeFrame;
+		}
 		entry.generation = block.generation;
 		Shared record{ entry.buffer, entry.srv, block.generation, a_frame };
 		record.crownBuffer = entry.crownBuffer;
@@ -1435,16 +1468,19 @@ namespace TreeShapes
 		entries.clear();
 		blocks.clear();
 		shared.clear();
+		waiting.clear();
 	}
 
 	void BendWeights::Evict(uint a_frame)
 	{
-		std::erase_if(entries, [a_frame](const auto& a_entry) { return a_frame - a_entry.second.lastFrame > kEvictFrames; });
+		std::erase_if(entries, [a_frame](const auto& a_entry) { return a_frame - a_entry.second.lastFrame > kLodEvictFrames; });
+		// A shape still waiting for its data is drawn, and puts itself back, every frame
+		waiting.clear();
 		// A shared record lives while a shape using it is drawn
 		for (const auto& [vertexBuffer, entry] : entries)
 			if (const auto it = shared.find(entry.signature); it != shared.end())
 				it->second.lastFrame = std::max(it->second.lastFrame, entry.lastFrame);
-		std::erase_if(shared, [a_frame](const auto& a_record) { return a_frame - a_record.second.lastFrame > kEvictFrames; });
+		std::erase_if(shared, [a_frame](const auto& a_record) { return a_frame - a_record.second.lastFrame > kLodEvictFrames; });
 		if (builtCount != loggedBuilt || reusedCount != loggedReused) {
 			logger::info("[TreeWind] bend weights: {} built (+{}, {} of them rebuilds, {:.1f} ms, worst frame {:.1f} ms), {} reused (+{}), {} waits (+{}), {} shapes, {} shared, {} blocks",
 				builtCount, builtCount - loggedBuilt, staleBuiltCount - loggedStaleBuilt, (buildNs - loggedBuildNs) / 1e6, worstFrameNs / 1e6,

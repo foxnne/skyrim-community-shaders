@@ -1,5 +1,7 @@
 #include "Features/NeuralRendering.h"
 #include "Features/RemoteControl/DevBenchBridge.h"
+#include "Features/PostProcessing.h"
+#include "Features/PostProcessing/HistogramAutoExposure.h"
 
 // Registers our tools into the devbench test bench over its C-ABI. Gated by
 // DEVBENCH_BRIDGE_ENABLED (set by CMake when the devbench-api port is available);
@@ -477,6 +479,28 @@ namespace
 				};
 			});
 		}
+		if (kind == "exposure") {
+			return RunOnMainThread([]() -> json {
+				auto& post = globals::features::postProcessing;
+				auto* e = post.GetPipelineFeature<HistogramAutoExposure>(PostProcessing::FeaturePipelineIndex::AutoExposure);
+				if (!e)
+					return json{ { "error", "auto exposure unavailable" } };
+				const auto p = e->GetExposureParameters();
+				const float lum = std::max(e->preExposureLuminance, 1e-12f);
+				return json{
+					{ "active", e->IsActive() },
+					{ "pipelineRunning", post.IsPipelineRunning() },
+					{ "meteredLuminance", e->preExposureLuminance },
+					{ "meteredEV100", std::log2(lum) + 3.0f },
+					{ "meteredFrame", e->preExposureCompletedFrame },
+					{ "preExposure", globals::state->preExposure },
+					{ "rangeEV100", json::array({ std::log2(std::max(p.LuminanceRange.x, 1e-12f)) + 3.0f, std::log2(std::max(p.LuminanceRange.y, 1e-12f)) + 3.0f }) },
+					{ "compensationEV", p.CompensationEV },
+					{ "exposureTarget", p.ExposureTarget },
+					{ "frame_count", globals::state->frameCount },
+				};
+			});
+		}
 		if (kind == "shadercache") {
 			// Built from thread-safe ShaderCache accessors. Poll completedTasks against a
 			// pre-deploy snapshot to know a hot-reloaded shader finished; a rising
@@ -493,7 +517,7 @@ namespace
 				{ "frame_count", EnqueuedFrame() },
 			};
 		}
-		return json{ { "error", "unknown kind" }, { "kind", kind }, { "supported", json::array({ "state", "shadercache", "profiler", "drawcalls" }) } };
+		return json{ { "error", "unknown kind" }, { "kind", kind }, { "supported", json::array({ "state", "shadercache", "profiler", "drawcalls", "exposure" }) } };
 	}
 
 	/**

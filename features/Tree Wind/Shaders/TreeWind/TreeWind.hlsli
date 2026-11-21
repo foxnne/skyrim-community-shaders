@@ -12,7 +12,7 @@ namespace TreeWind
 		float4 Params;  // amplitude, near distance, tree LOD draw, loaded tree draw (1) or bespoke tree draw (2)
 		float4 Shape;   // bend exponent, use bend weights, flutter strength, per-tree phase spread
 		float4 Detail;  // flutter share, flutter speed, near scale, near ramp end
-		float4 Gusts;   // gust strength, gust rarity, loaded tree scale, crown data bound (t121)
+		float4 Gusts;   // gust strength, gust rarity, loaded tree scale, crown data bound (t121): 0 no, else its weight (1 in full, less while it fades in)
 	};
 
 	// Tree LOD, per vertex: bend weight, tree random, tree scale, distance from the trunk.
@@ -45,13 +45,13 @@ namespace TreeWind
 		return Params.w > 1.5;
 	}
 
-	// Returns the crown data with w as 1 with data and 0 without, and the tree's tint seeds (brightness, hue; 0-1,
-	// 0.5 = no tint) in a_tint
+	// Returns the crown data with w as its weight (0 without data, 1 in full, in between while the data of a shape
+	// that was drawn without it fades in), and the tree's tint seeds (brightness, hue; 0-1, 0.5 = no tint) in a_tint
 	float4 GetCrownData(uint vertexID, out float2 a_tint)
 	{
 		float4 data = 0.0;
 		a_tint = 0.5;
-		[branch] if (Gusts.w > 0.5)
+		[branch] if (Gusts.w > 0.0)
 		{
 			data = CrownData.Load(vertexID);
 			const uint code = (uint)round(saturate(data.w) * 127.0);
@@ -59,7 +59,7 @@ namespace TreeWind
 				const uint tint = min(code - 1, 120u);
 				a_tint = float2(tint / 11u, tint % 11u) / 10.0;
 			}
-			data.w = code > 0 ? 1.0 : 0.0;
+			data.w = code > 0 ? saturate(Gusts.w) : 0.0;
 		}
 		return data;
 	}

@@ -96,7 +96,7 @@ public:
 		float4 Params;  // amplitude, near distance, tree LOD draw, loaded tree draw (1) or bespoke tree draw (2)
 		float4 Shape;   // bend exponent, use bend weights, flutter strength, per-tree phase spread
 		float4 Detail;  // flutter share, flutter speed, near scale, near ramp end
-		float4 Gusts;   // gust strength, gust rarity, loaded tree scale, crown data bound (t121)
+		float4 Gusts;   // gust strength, gust rarity, loaded tree scale, crown data bound (t121): 0 no, else its weight
 	};
 	static_assert(sizeof(WindCB) == 80);
 
@@ -208,6 +208,9 @@ private:
 	// As on and off, for tree LOD crown draws with crown data bound
 	std::unique_ptr<ConstantBuffer> windOnCrownCB;
 	std::unique_ptr<ConstantBuffer> windOffCrownCB;
+	// For a crown whose data is fading in: written per draw with the weight, only while the fade lasts
+	std::unique_ptr<ConstantBuffer> windFadeCrownCB;
+	float4 crownWindData[5]{};  // this frame's contents of windOnCrownCB (a WindCB, kept unaligned)
 
 	TreeShapes::BendWeights bendWeights;
 	TreeShapes::NearTrees nearTrees;
@@ -218,6 +221,7 @@ private:
 	bool drawBespoke = false;   // ... and that tree has a bespoke profile: other data layout, other shader path
 	// Crown data of the tree LOD crown being drawn (Lighting draws flagged LODTreeCrown only), or nullptr
 	ID3D11ShaderResourceView* drawCrownData = nullptr;
+	float drawCrownWeight = 1.0f;  // share of drawCrownData to apply: below 1 while it fades in
 	bool swayActive = false;    // set once per frame in Reset: sway on and no map menu open
 	bool crownActive = false;   // set once per frame in Reset: crown data is in use and no map menu open
 	bool nearActive = false;    // set once per frame in Reset: loaded trees sway too (outdoors only)

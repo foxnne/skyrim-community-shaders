@@ -1665,6 +1665,19 @@ VolumetricCloudResult RenderVolumetricCloudRay(float3 direction, float3 eye, flo
 
 // Match the largest shadow-volume dimension (kShadowVolW/H in PhysicalSky.h).
 #define NTHREADS 256
+
+// foxnne lod shadow pop: one density sample per voxel point-samples cloud detail far finer than a 31 m voxel, on a
+// grid that stands still while the wind and the turning sun slide the clouds and the light rays across it. A gap or
+// a wisp narrower than two voxels then cannot travel over the ground: it lights up and goes out in place. Each step
+// of a light ray therefore samples the density at its own place inside the voxel's cross-section (the two axes the
+// ray does not step along), the same place for every ray of a step. The optical depth of a column becomes the
+// average over the voxel's footprint, which is the filter the grid needs, with no extra samples and nothing that
+// changes from frame to frame.
+float3 ShadowFootprintOffset(uint step, uint axis)
+{
+	const float2 offset = frac(float(step) * float2(0.7548776662, 0.5698402910) + 0.5) - 0.5;
+	return axis == 0u ? float3(0.0, offset) : (axis == 1u ? float3(offset.x, 0.0, offset.y) : float3(offset, 0.0));
+}
 groupshared float g_density[2 * NTHREADS];
 groupshared uint g_density_segment[NTHREADS];
 
@@ -1724,7 +1737,8 @@ groupshared uint g_density_segment[NTHREADS];
 	float accumulated_density = 0.0;
 	if (is_valid) {
 		const float2 center = CloudShadowVolume::GridCenter(FrameBuffer::CameraPosAdjust.xy, info.shadowVolumeRange, dims.xy);
-		const float3 pos = float3(center + (thread_uv.xy - 0.5) * info.shadowVolumeRange, info.shadowVolumeBottom + shadow_thickness * thread_uv.z);
+		const float3 sample_uv = thread_uv + ShadowFootprintOffset(ray_step, component_mask.x ? 0u : (component_mask.y ? 1u : 2u)) * rcp_dims;
+		const float3 pos = float3(center + (sample_uv.xy - 0.5) * info.shadowVolumeRange, info.shadowVolumeBottom + shadow_thickness * sample_uv.z);
 
 		// Fetch only density represented inside this finite shadow volume. Prefixes
 		// start with zero extinction at the boundary instead of assuming a uniform
@@ -1814,7 +1828,8 @@ groupshared uint g_density_segment[NTHREADS];
 		if (step == 0u || segment != previousSegment)
 			accumulated = 0.0;
 		previousSegment = segment;
-		const float3 position = float3(center + (uv.xy - 0.5) * info.shadowVolumeRange, info.shadowVolumeBottom + thickness * uv.z);
+		const float3 sampleUv = uv + ShadowFootprintOffset(step, axis) * rcpDims;
+		const float3 position = float3(center + (sampleUv.xy - 0.5) * info.shadowVolumeRange, info.shadowVolumeBottom + thickness * sampleUv.z);
 		CloudDensityContext densityContext;
 		float extinction = sampleCloudDensity(position, layer, 2.0, 2000.0, 0.0, densityContext);
 		float4 middleModel;
@@ -1840,70 +1855,104 @@ groupshared uint g_density_segment[NTHREADS];
 	const float rayStep = increment[axis] > 0.0 ? float(pixel[axis]) : float(dims[axis] - 1u - pixel[axis]);
 	float3 offset = frac(0.5 + rayStep * increment) - 0.5;
 	offset = float3(axis == 0u ? 0.0 : offset.x, axis == 1u ? 0.0 : offset.y, axis == 2u ? 0.0 : offset.z);
-	RWShadowVolume[pixel] = TexShadowVolume.SampleLevel(TransmittanceSampler, (float3(pixel) + 0.5 - offset) / float3(dims), 0);
+	// foxnne lod shadow pop: a tent over three voxels in the horizontal plane (four linear taps half a voxel
+	// out) while the slanted columns are put back on the grid. With the footprint average above this leaves no
+	// detail the trilinear lookup of the receivers cannot move smoothly, and the edge of a shadow becomes about
+	// as wide as the sun's penumbra under a cloud 1.5 km up (15 m at noon, 45 m at a 20 degree sun).
+	const float3 coord = float3(pixel) + 0.5 - offset;
+	const float3 rcpDims = 1.0 / float3(dims);
+	RWShadowVolume[pixel] = 0.25 * (TexShadowVolume.SampleLevel(TransmittanceSampler, (coord + float3(-0.5, -0.5, 0.0)) * rcpDims, 0) +
+									   TexShadowVolume.SampleLevel(TransmittanceSampler, (coord + float3(0.5, -0.5, 0.0)) * rcpDims, 0) +
+									   TexShadowVolume.SampleLevel(TransmittanceSampler, (coord + float3(-0.5, 0.5, 0.0)) * rcpDims, 0) +
+									   TexShadowVolume.SampleLevel(TransmittanceSampler, (coord + float3(0.5, 0.5, 0.0)) * rcpDims, 0));
 }
 
 RWTexture2D<float4> RWCloudShadowMean : register(u0);
 groupshared float ShadowMeanSamples[64];
 
-// One 8x8 spatial quadrature per height. Reuse complete local prefixes; where
+// One 16x16 spatial quadrature per height (four columns per lane). Reuse complete local prefixes; where
 // the finite box truncates a ray, integrate the actual curved cloud layer.
 // Averaging exp(-tau), rather than tau, preserves clear gaps between clouds.
+// foxnne lod shadow pop: the columns used to sit at fixed places of the camera-snapped volume, so all of them
+// jumped one voxel (range / 256) together whenever the camera crossed a voxel, and the mean stepped: everything
+// lit by the far field (the ground and the air outside the box, and at a low sun most of the view) changed
+// brightness at once. The columns now stand on a lattice that rides the cloud field (wind offset), under a Hann
+// window centred on the camera itself: a column enters and leaves with zero weight, so the mean is continuous in
+// the camera position and does not change at all while the wind only carries the clouds along. Lattice
+// spacing = window width / 16, so the weights always sum to 64.
 [numthreads(64, 1, 1)] void buildCloudShadowMean(uint lane : SV_GroupIndex, uint3 group : SV_GroupID) {
 	const VolumetricCloudData info = VolumetricCloudBuffer[0];
 	const uint height = CloudShadowVolume::MeanRows;
 	uint3 dims;
 	TexShadowVolume.GetDimensions(dims.x, dims.y, dims.z);
 	const float2 center = CloudShadowVolume::GridCenter(FrameBuffer::CameraPosAdjust.xy, info.shadowVolumeRange, dims.xy);
-	const float2 uv = (float2(lane % 8u, lane / 8u) + 0.5) / 8.0;
+	const float2 camera = FrameBuffer::CameraPosAdjust.xy;
+	const float spacing = info.shadowVolumeRange / 16.0;
+	const float2 anchor = info.noiseWindOffset - floor(info.noiseWindOffset / spacing) * spacing;
+	const float2 firstIndex = floor((camera - 0.5 * info.shadowVolumeRange - anchor) / spacing) + 1.0;
 	const float altitude = lerp(info.shadowVolumeBottom, info.shadowVolumeTop, float(group.y) / (height - 2u));
-	float3 pos = float3(center + (uv - 0.5) * info.shadowVolumeRange, altitude);
-	pos.z -= CloudCurvatureOffset(pos.xy - FrameBuffer::CameraPosAdjust.xy, info.cloudCurvatureRadius);
-	const float3 origin = float3(pos.xy - FrameBuffer::CameraPosAdjust.xy, pos.z);
 	const float3 direction = info.dirlightDir;
-	const float2 outer = IntersectCloudBelow(origin, direction, info.shadowVolumeTop, info.cloudCurvatureRadius);
-	const float2 inner = IntersectCloudBelow(origin, direction, info.shadowVolumeBottom, info.cloudCurvatureRadius);
-	const float start = max(outer.x, 0.0);
-	const float nearEnd = min(outer.y, max(inner.x, 0.0));
-	const float farStart = max(start, inner.y);
-	const float nearLength = max(nearEnd - start, 0.0);
-	const float farLength = max(outer.y - farStart, 0.0);
-	const float pathLength = nearLength + farLength;
-	float transmittance = 1.0;
-	if (pathLength > 0.0) {
-		const float3 exitPosition = pos + direction * (farLength > 0.0 ? outer.y : nearEnd);
-		const float2 exitUv = (exitPosition.xy - center) / info.shadowVolumeRange + 0.5;
-		const float z = (pos.z - info.shadowVolumeBottom) / max(info.shadowVolumeTop - info.shadowVolumeBottom, 1.0);
-		// Keep the linear-filter footprint off incomplete side prefixes too.
-		const float2 margin = 2.0 / float2(dims.xy);
-		if (z >= 0.0 && z <= 1.0 && exitPosition.z >= info.shadowVolumeBottom && exitPosition.z <= info.shadowVolumeTop + 1.0 && all(exitUv >= margin) && all(exitUv <= 1.0 - margin)) {
-			transmittance = TexShadowVolume.SampleLevel(TransmittanceSampler, float3(uv, z), 0);
-		} else {
-			const float stepLength = pathLength / 32.0;
-			float opticalDepth = 0.0;
-			// FXC's loop analysis is expensive for storm/voxel density bodies.
-			// fastopt preserves their DXBC while avoiding speculative loop work.
+	// Keep the linear-filter footprint off incomplete side prefixes too.
+	const float2 margin = 2.0 / float2(dims.xy);
+	float weighted = 0.0;
+	[loop] for (uint column = 0u; column < 4u; ++column)
+	{
+		const float2 index = firstIndex + float2(uint2(lane % 8u, lane / 8u) * 2u + uint2(column & 1u, column >> 1u));
+		const float2 xy = index * spacing + anchor;
+		const float2 window = cos(Math::PI * clamp((xy - camera) / info.shadowVolumeRange, -0.5, 0.5));
+		const float weight = window.x * window.x * window.y * window.y;
+		const float2 uv = saturate((xy - center) / info.shadowVolumeRange + 0.5);
+		float3 pos = float3(xy, altitude);
+		pos.z -= CloudCurvatureOffset(pos.xy - camera, info.cloudCurvatureRadius);
+		const float3 origin = float3(pos.xy - camera, pos.z);
+		const float2 outer = IntersectCloudBelow(origin, direction, info.shadowVolumeTop, info.cloudCurvatureRadius);
+		const float2 inner = IntersectCloudBelow(origin, direction, info.shadowVolumeBottom, info.cloudCurvatureRadius);
+		const float start = max(outer.x, 0.0);
+		const float nearEnd = min(outer.y, max(inner.x, 0.0));
+		const float farStart = max(start, inner.y);
+		const float nearLength = max(nearEnd - start, 0.0);
+		const float farLength = max(outer.y - farStart, 0.0);
+		const float pathLength = nearLength + farLength;
+		float transmittance = 1.0;
+		[branch] if (pathLength > 0.0 && weight > 0.0)
+		{
+			const float3 exitPosition = pos + direction * (farLength > 0.0 ? outer.y : nearEnd);
+			const float2 exitUv = (exitPosition.xy - center) / info.shadowVolumeRange + 0.5;
+			const float z = (pos.z - info.shadowVolumeBottom) / max(info.shadowVolumeTop - info.shadowVolumeBottom, 1.0);
+			if (z >= 0.0 && z <= 1.0 && exitPosition.z >= info.shadowVolumeBottom && exitPosition.z <= info.shadowVolumeTop + 1.0 && all(exitUv >= margin) && all(exitUv <= 1.0 - margin)) {
+				transmittance = TexShadowVolume.SampleLevel(TransmittanceSampler, float3(uv, z), 0);
+			} else {
+				// Four times the columns at half the steps each: the same number of density samples as the
+				// 8x8 quadrature. Each column starts at its own phase (fixed to its lattice point, so it does
+				// not flicker), which spreads the steps of the whole set evenly through the layer.
+				const float stepLength = pathLength / 16.0;
+				const float phase = frac(dot(index, float2(0.7548776662, 0.5698402910)));
+				float opticalDepth = 0.0;
+				// FXC's loop analysis is expensive for storm/voxel density bodies.
+				// fastopt preserves their DXBC while avoiding speculative loop work.
 #ifdef NO_CLOUD_STORMS
-			[loop]
+				[loop]
 #else
-			[fastopt]
+				[fastopt]
 #endif
-				for (uint step = 0u; step < 32u; ++step)
-			{
-				const float distanceInCloud = (step + 0.5) * stepLength;
-				const float distanceAlongRay = distanceInCloud < nearLength ? start + distanceInCloud : farStart + distanceInCloud - nearLength;
-				CloudDensityContext densityContext;
-				float density = sampleCloudDensity(pos + direction * distanceAlongRay, GetCloudLayer(info), 2.0, 2000.0, 0.0, densityContext);
-				float4 middleModel;
-				float2 middleDepth;
-				density += MiddleCloudDensity(pos + direction * distanceAlongRay, middleModel, middleDepth,
-					max(stepLength * length(direction.xy), info.shadowVolumeRange / min(dims.x, dims.y)));
-				opticalDepth += density * stepLength * info.sunExtinction * GAME_UNIT_TO_M;
+					for (uint step = 0u; step < 16u; ++step)
+				{
+					const float distanceInCloud = (step + phase) * stepLength;
+					const float distanceAlongRay = distanceInCloud < nearLength ? start + distanceInCloud : farStart + distanceInCloud - nearLength;
+					CloudDensityContext densityContext;
+					float density = sampleCloudDensity(pos + direction * distanceAlongRay, GetCloudLayer(info), 2.0, 2000.0, 0.0, densityContext);
+					float4 middleModel;
+					float2 middleDepth;
+					density += MiddleCloudDensity(pos + direction * distanceAlongRay, middleModel, middleDepth,
+						max(stepLength * length(direction.xy), info.shadowVolumeRange / min(dims.x, dims.y)));
+					opticalDepth += density * stepLength * info.sunExtinction * GAME_UNIT_TO_M;
+				}
+				transmittance = exp(-max(opticalDepth, 0.0));
 			}
-			transmittance = exp(-max(opticalDepth, 0.0));
 		}
+		weighted += weight * transmittance;
 	}
-	ShadowMeanSamples[lane] = transmittance;
+	ShadowMeanSamples[lane] = weighted;
 	GroupMemoryBarrierWithGroupSync();
 	[unroll] for (uint stride = 32u; stride > 0u; stride >>= 1u)
 	{

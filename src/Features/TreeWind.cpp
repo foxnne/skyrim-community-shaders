@@ -370,6 +370,7 @@ void TreeWind::BeginDraw(RE::BSRenderPass* a_pass, bool a_lighting)
 	drawNearTree = false;
 	drawBespoke = false;
 	drawCrownData = nullptr;
+	drawCrownWeight = 1.0f;
 	auto& extraDescriptor = globals::state->permutationData.ExtraShaderDescriptor;
 	extraDescriptor &= ~(crownFlag | leafFlag);
 	auto& featureDescriptor = globals::state->permutationData.ExtraFeatureDescriptor;
@@ -412,7 +413,7 @@ void TreeWind::BeginDraw(RE::BSRenderPass* a_pass, bool a_lighting)
 			extraDescriptor |= crownFlag;
 	}
 	if (crownActive && (extraDescriptor & crownFlag) != 0)
-		drawCrownData = bendWeights.GetCrownData(a_pass->geometry);
+		drawCrownData = bendWeights.GetCrownData(a_pass->geometry, globals::state->frameCount, drawCrownWeight);
 }
 
 void TreeWind::EndDraw()
@@ -468,6 +469,7 @@ void TreeWind::SetupResources()
 	bespokeProfiles.Load();
 	windOnCrownCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<WindCB>(), "TreeWind::WindOnCrown");
 	windOffCrownCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<WindCB>(), "TreeWind::WindOffCrown");
+	windFadeCrownCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc<WindCB>(), "TreeWind::WindFadeCrown");
 }
 
 float TreeWind::GetStorminess(const RE::TESWeather* a_weather) const
@@ -545,6 +547,8 @@ void TreeWind::Reset()
 	windOnCB->Update(data);
 	data.Gusts.w = 1.0f;
 	windOnCrownCB->Update(data);
+	static_assert(sizeof(crownWindData) == sizeof(WindCB));
+	std::memcpy(crownWindData, &data, sizeof(WindCB));
 
 	data.Params.z = 0.0f;
 	windOffCrownCB->Update(data);
@@ -597,6 +601,16 @@ void TreeWind::SetShaderResources(ID3D11DeviceContext* a_context)
 	ID3D11Buffer* buffer = drawCrownData ? windOffCrownCB->CB() : windOffCB->CB();
 	if (drawBendWeights)
 		buffer = drawNearTree ? (drawBespoke ? windBespokeCB->CB() : windNearCB->CB()) : (drawCrownData ? windOnCrownCB->CB() : windOnCB->CB());
+	// Crown data that is fading in: the weight rides in Gusts.w, where the shader reads "crown data bound"
+	if (drawCrownData && drawCrownWeight < 1.0f && !drawNearTree) {
+		WindCB data;
+		std::memcpy(&data, crownWindData, sizeof(WindCB));
+		if (!drawBendWeights)
+			data.Params.z = 0.0f;
+		data.Gusts.w = std::max(drawCrownWeight, 1e-3f);
+		windFadeCrownCB->Update(data);
+		buffer = windFadeCrownCB->CB();
+	}
 	a_context->VSSetConstantBuffers(3, 1, &buffer);
 	if (drawBendWeights)
 		a_context->VSSetShaderResources(120, 1, &drawBendWeights);

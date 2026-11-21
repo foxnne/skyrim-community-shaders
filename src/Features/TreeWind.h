@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+
 #include "Buffer.h"
 #include "Feature.h"
 #include "TreeWind/TreeShapes.h"
@@ -39,6 +41,8 @@ public:
 	struct Settings
 	{
 		bool Enabled = true;
+		// The world map draws tree LOD too: sway (on a wall clock, as the map pauses the game) and crown lighting there
+		bool SwayOnWorldMap = true;
 		float Amplitude = 80.0f;
 		float BaseSpeed = 0.6f;
 		float WindSpeedGain = 1.4f;
@@ -222,13 +226,15 @@ private:
 	// Crown data of the tree LOD crown being drawn (Lighting draws flagged LODTreeCrown only), or nullptr
 	ID3D11ShaderResourceView* drawCrownData = nullptr;
 	float drawCrownWeight = 1.0f;  // share of drawCrownData to apply: below 1 while it fades in
-	bool swayActive = false;    // set once per frame in Reset: sway on and no map menu open
-	bool crownActive = false;   // set once per frame in Reset: crown data is in use and no map menu open
+	bool swayActive = false;    // set once per frame in Reset: sway on, and no map menu open unless Sway on World Map
+	bool crownActive = false;   // set once per frame in Reset: crown data is in use, map menus as for swayActive
 	bool nearActive = false;    // set once per frame in Reset: loaded trees sway too (outdoors only)
 	bool leafActive = false;    // set once per frame in Reset: the leaves of loaded trees are lit as thin leaves
 
 	double phase = 0.0;
 	double prevPhase = 0.0;
+	// Wall clock of the last Reset: the phase advances on it while the open world map pauses the game
+	std::chrono::steady_clock::time_point lastPhaseClock{};
 
 	// Shown on the settings page
 	float statusWind = 0.0f;

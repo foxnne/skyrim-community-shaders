@@ -11,6 +11,7 @@
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	TreeWind::Settings,
 	Enabled,
+	SwayOnWorldMap,
 	Amplitude,
 	BaseSpeed,
 	WindSpeedGain,
@@ -101,6 +102,10 @@ void TreeWind::DrawSettings()
 	ImGui::Checkbox(T(TKEY("enabled"), "Trees Sway"), &settings.Enabled);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("enabled_tooltip"), "Distant (LOD) trees sway in the wind. Off = still, as without this feature."));
+	}
+	ImGui::Checkbox(T(TKEY("sway_on_world_map"), "Sway on World Map"), &settings.SwayOnWorldMap);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::Text("%s", T(TKEY("sway_on_world_map_tooltip"), "The world map draws the tree LOD too. On = the trees there sway and their crowns get the same lighting as in the game; the sway keeps going although the map pauses the game. Visible when zoomed in. Off = they stand still with the game's own shading, as before."));
 	}
 	SliderWithTooltip(T(TKEY("amplitude"), "Sway"), &settings.Amplitude, 0.0f, 200.0f, "%.0f",
 		T(TKEY("amplitude_tooltip"), "How far the top of a tall tree moves. Shorter trees move less."));
@@ -515,7 +520,14 @@ void TreeWind::Reset()
 
 	// Capped so a hitch or a load does not jump the trees
 	const bool paused = globals::game::ui && globals::game::ui->GameIsPaused();
-	const double deltaTime = paused ? 0.0 : std::min(static_cast<double>(RE::GetSecondsSinceLastFrame()), 0.25);
+	const bool inMap = globals::state->isMapMenuOpen;
+	const bool onMap = inMap && settings.SwayOnWorldMap;
+	// The world map pauses the game, so its trees keep swaying on the wall clock
+	const auto now = std::chrono::steady_clock::now();
+	const double wallDelta = lastPhaseClock.time_since_epoch().count() != 0 ? std::chrono::duration<double>(now - lastPhaseClock).count() : 0.0;
+	lastPhaseClock = now;
+	const double frameDelta = paused ? (onMap ? wallDelta : 0.0) : static_cast<double>(RE::GetSecondsSinceLastFrame());
+	const double deltaTime = std::clamp(frameDelta, 0.0, 0.25);
 	prevPhase = phase;
 	phase += deltaTime * (settings.BaseSpeed + settings.WindSpeedGain * std::clamp(windSpeed, 0.0f, 1.0f));
 	// Wraps at 200 pi, a whole number of cycles for every sway frequency in TreeWind.hlsli, and keeps float
@@ -526,16 +538,16 @@ void TreeWind::Reset()
 		prevPhase -= kPhaseWrap;
 	}
 
-	// The map menus draw the LOD too, and it should stand still there. While off, the draws skip all
+	// The map menus draw the LOD too; it sways there only with Sway on World Map. While off, the draws skip all
 	// per-draw work; both buffers then read as off, whatever is still bound at VS b3.
-	swayActive = settings.Enabled && !globals::state->isMapMenuOpen;
-	// Loaded trees sway only under the open sky: plants in interiors stay still
+	swayActive = settings.Enabled && (!inMap || onMap);
+	// Loaded trees sway only under the open sky: plants in interiors stay still. The map draws none.
 	const auto sky = globals::game::sky;
-	nearActive = swayActive && settings.NearTrees && sky && sky->mode.get() == RE::Sky::Mode::kFull;
+	nearActive = swayActive && !inMap && settings.NearTrees && sky && sky->mode.get() == RE::Sky::Mode::kFull;
 	// The map menus draw no loaded trees worth lighting, and their draws skip the per-draw test
-	leafActive = settings.NearTreeLeafLighting && !globals::state->isMapMenuOpen;
+	leafActive = settings.NearTreeLeafLighting && !inMap;
 	// The crown data only feeds these four; with all of them neutral the crowns are shaded as without it
-	crownActive = settings.LODTreeLighting && !globals::state->isMapMenuOpen &&
+	crownActive = settings.LODTreeLighting && (!inMap || onMap) &&
 	              (settings.LODTreeRoundNormal > 0.0f || settings.LODTreeCrownOcclusion > 0.0f || settings.LODTreeWrapFrontLit < 1.0f || settings.LODTreeVariation > 0.0f);
 
 	WindCB data{};

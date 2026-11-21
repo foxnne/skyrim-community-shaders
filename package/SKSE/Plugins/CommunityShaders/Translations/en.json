@@ -24,6 +24,8 @@
         "feature.tree_wind.near_tree_transmission_saturation_tooltip": "How much deeper in colour the light that comes through a leaf is than the lit side. 0 = the same colour as the lit side.",
         "feature.tree_wind.near_tree_vertex_shade_direct": "Baked Shade on Sunlight",
         "feature.tree_wind.near_tree_vertex_shade_direct_tooltip": "Tree meshes have the shade inside the crown painted in. This is how much of it also darkens the sunlight on leaves, on top of the real shadows. 1 = all of it (darker crowns than the distant trees), 0 = only real shadows shade the sun. Sky light always keeps the painted shade.",
+        "feature.tree_wind.sway_on_world_map": "Sway on World Map",
+        "feature.tree_wind.sway_on_world_map_tooltip": "The world map draws the tree LOD too. On = the trees there sway and their crowns get the same lighting as in the game; the sway keeps going although the map pauses the game. Visible when zoomed in. Off = they stand still with the game's own shading, as before.",
         "feature.tree_wind.tree_leaf_chroma": "Leaf Colour Threshold",
         "feature.tree_wind.tree_leaf_chroma_tooltip": "Tells leaves from twigs and bark by how colourful the texture is. At or below the first value a texel is treated as twig and keeps the ordinary lighting; from the second value up it gets all of the leaf lighting and tint. Lower both if dull leaves or needles are left out, raise them if twigs start to glow. Also used for the tint of distant crowns.",
         "feature.view_atmosphere.cloud_distance_exaggeration": "Distance Haze on Clouds",

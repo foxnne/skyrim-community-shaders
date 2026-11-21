@@ -1665,6 +1665,19 @@ VolumetricCloudResult RenderVolumetricCloudRay(float3 direction, float3 eye, flo
 
 // Match the largest shadow-volume dimension (kShadowVolW/H in PhysicalSky.h).
 #define NTHREADS 256
+
+// foxnne lod shadow pop: one density sample per voxel point-samples cloud detail far finer than a 31 m voxel, on a
+// grid that stands still while the wind and the turning sun slide the clouds and the light rays across it. A gap or
+// a wisp narrower than two voxels then cannot travel over the ground: it lights up and goes out in place. Each step
+// of a light ray therefore samples the density at its own place inside the voxel's cross-section (the two axes the
+// ray does not step along), the same place for every ray of a step. The optical depth of a column becomes the
+// average over the voxel's footprint, which is the filter the grid needs, with no extra samples and nothing that
+// changes from frame to frame.
+float3 ShadowFootprintOffset(uint step, uint axis)
+{
+	const float2 offset = frac(float(step) * float2(0.7548776662, 0.5698402910) + 0.5) - 0.5;
+	return axis == 0u ? float3(0.0, offset) : (axis == 1u ? float3(offset.x, 0.0, offset.y) : float3(offset, 0.0));
+}
 groupshared float g_density[2 * NTHREADS];
 groupshared uint g_density_segment[NTHREADS];
 
@@ -1724,7 +1737,8 @@ groupshared uint g_density_segment[NTHREADS];
 	float accumulated_density = 0.0;
 	if (is_valid) {
 		const float2 center = CloudShadowVolume::GridCenter(FrameBuffer::CameraPosAdjust.xy, info.shadowVolumeRange, dims.xy);
-		const float3 pos = float3(center + (thread_uv.xy - 0.5) * info.shadowVolumeRange, info.shadowVolumeBottom + shadow_thickness * thread_uv.z);
+		const float3 sample_uv = thread_uv + ShadowFootprintOffset(ray_step, component_mask.x ? 0u : (component_mask.y ? 1u : 2u)) * rcp_dims;
+		const float3 pos = float3(center + (sample_uv.xy - 0.5) * info.shadowVolumeRange, info.shadowVolumeBottom + shadow_thickness * sample_uv.z);
 
 		// Fetch only density represented inside this finite shadow volume. Prefixes
 		// start with zero extinction at the boundary instead of assuming a uniform
@@ -1814,7 +1828,8 @@ groupshared uint g_density_segment[NTHREADS];
 		if (step == 0u || segment != previousSegment)
 			accumulated = 0.0;
 		previousSegment = segment;
-		const float3 position = float3(center + (uv.xy - 0.5) * info.shadowVolumeRange, info.shadowVolumeBottom + thickness * uv.z);
+		const float3 sampleUv = uv + ShadowFootprintOffset(step, axis) * rcpDims;
+		const float3 position = float3(center + (sampleUv.xy - 0.5) * info.shadowVolumeRange, info.shadowVolumeBottom + thickness * sampleUv.z);
 		CloudDensityContext densityContext;
 		float extinction = sampleCloudDensity(position, layer, 2.0, 2000.0, 0.0, densityContext);
 		float4 middleModel;
@@ -1840,7 +1855,16 @@ groupshared uint g_density_segment[NTHREADS];
 	const float rayStep = increment[axis] > 0.0 ? float(pixel[axis]) : float(dims[axis] - 1u - pixel[axis]);
 	float3 offset = frac(0.5 + rayStep * increment) - 0.5;
 	offset = float3(axis == 0u ? 0.0 : offset.x, axis == 1u ? 0.0 : offset.y, axis == 2u ? 0.0 : offset.z);
-	RWShadowVolume[pixel] = TexShadowVolume.SampleLevel(TransmittanceSampler, (float3(pixel) + 0.5 - offset) / float3(dims), 0);
+	// foxnne lod shadow pop: a tent over three voxels in the horizontal plane (four linear taps half a voxel
+	// out) while the slanted columns are put back on the grid. With the footprint average above this leaves no
+	// detail the trilinear lookup of the receivers cannot move smoothly, and the edge of a shadow becomes about
+	// as wide as the sun's penumbra under a cloud 1.5 km up (15 m at noon, 45 m at a 20 degree sun).
+	const float3 coord = float3(pixel) + 0.5 - offset;
+	const float3 rcpDims = 1.0 / float3(dims);
+	RWShadowVolume[pixel] = 0.25 * (TexShadowVolume.SampleLevel(TransmittanceSampler, (coord + float3(-0.5, -0.5, 0.0)) * rcpDims, 0) +
+									   TexShadowVolume.SampleLevel(TransmittanceSampler, (coord + float3(0.5, -0.5, 0.0)) * rcpDims, 0) +
+									   TexShadowVolume.SampleLevel(TransmittanceSampler, (coord + float3(-0.5, 0.5, 0.0)) * rcpDims, 0) +
+									   TexShadowVolume.SampleLevel(TransmittanceSampler, (coord + float3(0.5, 0.5, 0.0)) * rcpDims, 0));
 }
 
 RWTexture2D<float4> RWCloudShadowMean : register(u0);

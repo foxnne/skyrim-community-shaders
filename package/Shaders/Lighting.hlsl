@@ -176,7 +176,7 @@ struct VS_OUTPUT
 	float4 FurRoot: TEXCOORD14;
 #endif
 #if defined(LOD_TREE_CROWN_DATA)
-	float4 TreeCrown: TEXCOORD15;  // offset from the trunk in xy, height in the crown, validity (1 with crown data)
+	float4 TreeCrown: TEXCOORD15;  // offset from the trunk in xy, height in the crown, weight of the crown data (0 without, 1 in full)
 	// The tree's brightness and hue seeds, 0-1. Not interpolated: a triangle between two trees takes one tree's tint
 	nointerpolation float2 TreeTint: TEXCOORD16;
 #endif
@@ -1277,6 +1277,10 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// Crown data: only 3D crowns that follow a trunk card have it. Billboards and everything else keep w = 0
 	// and the shading without it.
 	const bool lodTreeCrownData = lodTreeCrown && input.TreeCrown.w > 0.25 / 127.0;
+	// Crown data arrives a few frames after a block of tree LOD is first drawn (its trunks register first and the
+	// builds are budgeted), and Tree Wind then fades it in: every term that reads it is scaled by this, so the
+	// crowns ease from the plain shading into the rounded, self-shadowed one instead of switching.
+	const float lodTreeCrownWeight = lodTreeCrownData ? saturate(input.TreeCrown.w) : 0.0;
 	const float lodTreeRadial = saturate(length(input.TreeCrown.xy));
 	const float lodTreeHeight = saturate(input.TreeCrown.z);
 	LODTreeWrapScale = 1.0;
@@ -1286,10 +1290,10 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	if (lodTreeCrownData) {
 		// 1 with the sun behind the viewer, 0 from side-lit to back-lit
 		const float frontLit = saturate(dot(viewDirection, DirLightDirection.xyz));
-		LODTreeWrapScale = lerp(1.0, SharedData::lodTreeLightingSettings.WrapFrontLit, frontLit);
+		LODTreeWrapScale = lerp(1.0, SharedData::lodTreeLightingSettings.WrapFrontLit, frontLit * lodTreeCrownWeight);
 		const float inner = 1.0 - smoothstep(0.25, 1.0, lodTreeRadial);
 		const float low = 1.0 - lodTreeHeight;
-		lodTreeOcclusion = SharedData::lodTreeLightingSettings.CrownOcclusion * saturate(0.75 * inner * (1.0 - lodTreeHeight * lodTreeHeight) + 0.25 * low * low);
+		lodTreeOcclusion = lodTreeCrownWeight * SharedData::lodTreeLightingSettings.CrownOcclusion * saturate(0.75 * inner * (1.0 - lodTreeHeight * lodTreeHeight) + 0.25 * low * low);
 	}
 #	endif
 #	if defined(NEAR_TREE_LEAF_LIGHTING)
@@ -1922,7 +1926,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	// Grey twig texels of the crown atlas keep their colour (the weight is taken before the brightness, which
 	// does not change it)
 	if (lodTreeCrownData)
-		baseColor.xyz *= lerp(1.0, GetTreeTint(input.TreeTint, SharedData::lodTreeLightingSettings.Variation), GetLeafChromaWeight(baseColor.xyz));
+		baseColor.xyz *= lerp(1.0, GetTreeTint(input.TreeTint, SharedData::lodTreeLightingSettings.Variation), GetLeafChromaWeight(baseColor.xyz) * lodTreeCrownWeight);
 #	endif
 
 #	if defined(NEAR_TREE_LEAF_LIGHTING)
@@ -2431,7 +2435,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		// shape around the trunk, outward and upward, so the tree has a sunlit side and a shaded side
 		if (lodTreeCrownData) {
 			const float3 roundNormal = normalize(float3(input.TreeCrown.xy, 0.25 + 0.75 * saturate(lodTreeHeight * 2.0 - 1.0)));
-			const float3 roundedNormal = lerp(worldNormal, roundNormal, SharedData::lodTreeLightingSettings.RoundNormal);
+			const float3 roundedNormal = lerp(worldNormal, roundNormal, SharedData::lodTreeLightingSettings.RoundNormal * lodTreeCrownWeight);
 			worldNormal = dot(roundedNormal, roundedNormal) > 1e-6 ? normalize(roundedNormal) : roundNormal;
 		}
 		const float3 raisedNormal = worldNormal + float3(0, 0, SharedData::lodTreeLightingSettings.NormalUpBias * LODTreeWrapScale);

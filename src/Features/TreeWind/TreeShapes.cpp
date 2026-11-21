@@ -22,8 +22,13 @@ namespace TreeShapes
 		// Crown vertices sit within this many model units (at LOD4 scale) of their trunk
 		constexpr float kCrownRadius = 100.0f;
 		constexpr float kCellSize = 128.0f;
-		// Bend data of a shape not drawn for this many frames is freed
+		// Bend data of a loaded tree shape not drawn for this many frames is freed
 		constexpr uint kEvictFrames = 600;
+		// The same for tree LOD shapes. A shape is not drawn while it is outside the view or hidden behind terrain,
+		// and data freed then has to be built again when it comes back: the crowns show their plain shading until
+		// their turn. So it is kept for about a minute and a half of looking elsewhere (at 60 frames per second),
+		// at 12 bytes per vertex of the shapes that left in that time.
+		constexpr uint kLodEvictFrames = 5400;
 		// Crown data of a tree LOD shape that was drawn without it fades in over this many frames
 		constexpr uint kCrownFadeFrames = 45;
 		// Render-thread time spent building bend data per frame; a build that has started always finishes
@@ -1468,14 +1473,14 @@ namespace TreeShapes
 
 	void BendWeights::Evict(uint a_frame)
 	{
-		std::erase_if(entries, [a_frame](const auto& a_entry) { return a_frame - a_entry.second.lastFrame > kEvictFrames; });
+		std::erase_if(entries, [a_frame](const auto& a_entry) { return a_frame - a_entry.second.lastFrame > kLodEvictFrames; });
 		// A shape still waiting for its data is drawn, and puts itself back, every frame
 		waiting.clear();
 		// A shared record lives while a shape using it is drawn
 		for (const auto& [vertexBuffer, entry] : entries)
 			if (const auto it = shared.find(entry.signature); it != shared.end())
 				it->second.lastFrame = std::max(it->second.lastFrame, entry.lastFrame);
-		std::erase_if(shared, [a_frame](const auto& a_record) { return a_frame - a_record.second.lastFrame > kEvictFrames; });
+		std::erase_if(shared, [a_frame](const auto& a_record) { return a_frame - a_record.second.lastFrame > kLodEvictFrames; });
 		if (builtCount != loggedBuilt || reusedCount != loggedReused) {
 			logger::info("[TreeWind] bend weights: {} built (+{}, {} of them rebuilds, {:.1f} ms, worst frame {:.1f} ms), {} reused (+{}), {} waits (+{}), {} shapes, {} shared, {} blocks",
 				builtCount, builtCount - loggedBuilt, staleBuiltCount - loggedStaleBuilt, (buildNs - loggedBuildNs) / 1e6, worstFrameNs / 1e6,

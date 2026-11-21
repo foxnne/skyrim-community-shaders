@@ -943,24 +943,26 @@ Texture2D<float> TexWorldMapHeight : register(t75);
 	the coarse LOD mesh stop showing in the light. Keeps the LOD normal outside the height map or with the setting at 0. */
 float3 GetWorldMapHeightNormal(float3 positionWS, float3 lodNormal)
 {
+	float3 result = lodNormal;
 	const float strength = saturate(SharedData::terraOccSettings.MapNormalStrength);
-	[branch] if (strength <= 0.0) return lodNormal;
 	uint width, height;
 	TexWorldMapHeight.GetDimensions(width, height);
-	[branch] if (width < 3u || height < 3u) return lodNormal;
 	const float3 scale = SharedData::terraOccSettings.Scale;
 	const float2 uv = positionWS.xy * scale.xy + SharedData::terraOccSettings.Offset;
-	const float2 texel = 1.0 / float2(width, height);
-	[branch] if (any(uv < texel) || any(uv > 1.0 - texel)) return lodNormal;
-	const float west = TexWorldMapHeight.SampleLevel(SampColorSampler, uv - float2(texel.x, 0.0), 0);
-	const float east = TexWorldMapHeight.SampleLevel(SampColorSampler, uv + float2(texel.x, 0.0), 0);
-	const float south = TexWorldMapHeight.SampleLevel(SampColorSampler, uv - float2(0.0, texel.y), 0);
-	const float north = TexWorldMapHeight.SampleLevel(SampColorSampler, uv + float2(0.0, texel.y), 0);
-	// dz/dxy = dvalue/duv * duv/dxy * dz/dvalue; Scale.y is negative because v grows southward, which this handles
-	const float2 slope = float2(east - west, north - south) / (2.0 * texel) * scale.xy / scale.z;
-	const float3 mapNormal = normalize(float3(-slope, 1.0));
-	const float3 blended = lerp(normalize(lodNormal), mapNormal, strength);
-	return dot(blended, blended) > 1e-6 ? normalize(blended) : mapNormal;
+	const float2 texel = 1.0 / max(float2(width, height), 1.0);
+	[branch] if (strength > 0.0 && width >= 3u && height >= 3u && all(uv >= texel) && all(uv <= 1.0 - texel))
+	{
+		const float west = TexWorldMapHeight.SampleLevel(SampColorSampler, uv - float2(texel.x, 0.0), 0);
+		const float east = TexWorldMapHeight.SampleLevel(SampColorSampler, uv + float2(texel.x, 0.0), 0);
+		const float south = TexWorldMapHeight.SampleLevel(SampColorSampler, uv - float2(0.0, texel.y), 0);
+		const float north = TexWorldMapHeight.SampleLevel(SampColorSampler, uv + float2(0.0, texel.y), 0);
+		// dz/dxy = dvalue/duv * duv/dxy * dz/dvalue; Scale.y is negative because v grows southward, which this handles
+		const float2 slope = float2(east - west, north - south) / (2.0 * texel) * scale.xy / scale.z;
+		const float3 mapNormal = normalize(float3(-slope, 1.0));
+		const float3 blended = lerp(normalize(lodNormal), mapNormal, strength);
+		result = dot(blended, blended) > 1e-6 ? normalize(blended) : mapNormal;
+	}
+	return result;
 }
 #		endif
 

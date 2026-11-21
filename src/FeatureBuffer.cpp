@@ -90,7 +90,7 @@ std::pair<unsigned char*, size_t> GetFeatureBufferData(bool a_inWorld)
 		globals::features::screenSpaceReflections.GetCommonBufferData(),
 		globals::features::postProcessing.GetCommonBufferData(),
 		globals::features::physicalSky.cbData,
-		globals::features::viewAtmosphere.settings,
+		globals::features::viewAtmosphere.GetCommonBufferData(),
 		globals::features::treeWind.GetCommonBufferData(),
 		globals::features::groundCover.GetCommonBufferData(),
 		globals::features::treeWind.GetNearLeafBufferData());

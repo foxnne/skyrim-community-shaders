@@ -489,7 +489,8 @@ namespace SharedData
 		float distanceExaggerationLimit;  // optical depth (strongest channel) at which the added air stops
 		float cloudDistanceExaggeration;  // share of the exaggeration the air in front of clouds takes, 1 = like a surface
 		float heightFogSkyLight;          // weather height fog: 0 = lit by the weather's fog colour, 1 = lit like the air
-		float2 padding;
+		uint mapEnabled;                  // the shared volume also renders on the world map
+		float mapDistanceExaggeration;    // C++ only: distanceExaggeration already holds it while the map is open
 	};
 
 	struct ExponentialHeightFogSettings

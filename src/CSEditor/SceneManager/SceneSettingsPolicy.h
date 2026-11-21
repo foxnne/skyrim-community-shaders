@@ -100,6 +100,7 @@ namespace SceneSettingsPolicy
 		{ "ViewAtmosphere", "historyWeight" },
 		{ "ViewAtmosphere", "localRange" },
 		{ "ViewAtmosphere", "lookupJitter" },
+		{ "ViewAtmosphere", "mapEnabled" },
 		{ "ViewAtmosphere", "middlePixelSize" },
 		{ "ViewAtmosphere", "middleSlices" },
 		{ "ViewAtmosphere", "nearPixelSize" },

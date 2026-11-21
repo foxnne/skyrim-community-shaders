@@ -53,13 +53,20 @@ public:
 		float cloudDistanceExaggeration = 1.0f;    // share of the exaggeration the air in front of clouds takes
 		// Weather (Follow Vanilla Fog) height fog: 0 = lit by the weather's fog colour, 1 = lit by the sun, moons and sky like the air
 		float heightFogSkyLight = 0.0f;
-		float padding[2] = {};
+		// World map: render the shared volume there too (aerial perspective), with its own distance exaggeration.
+		// Map distances are 1-8 km straight down, so the in-game factor would wash the map out.
+		uint mapEnabled = 0;
+		float mapDistanceExaggeration = 2.5f;
 	} settings;
 	STATIC_ASSERT_ALIGNAS_16(Settings);
 	static_assert(sizeof(Settings) == 96);  // ViewAtmosphereSettings in SharedData.hlsli
 	static_assert(offsetof(Settings, distanceExaggerationLimit) == 76 && offsetof(Settings, heightFogSkyLight) == 84);
+	/** @brief The distance exaggeration in effect: the map's own factor while the world map is open. */
+	float EffectiveDistanceExaggeration() const;
 	/** @brief True when surfaces read the exaggerated copy of the integrated medium. */
-	bool DistanceExaggerationActive() const { return settings.distanceExaggeration > 1.0005f; }
+	bool DistanceExaggerationActive() const { return EffectiveDistanceExaggeration() > 1.0005f; }
+	/** @brief The settings as the shaders read them (SharedData viewAtmosphereSettings): the map's factor while it is open. */
+	Settings GetCommonBufferData() const;
 
 	/** @brief Prepares the shared volume before standalone fog selects its path. */
 	bool Prepare();
@@ -135,4 +142,5 @@ private:
 	bool prepared = false;
 	bool ready = false;
 	uint32_t lastFrame = UINT32_MAX;
+	bool lastInMap = false;  // the volume's history belongs to the map camera
 };

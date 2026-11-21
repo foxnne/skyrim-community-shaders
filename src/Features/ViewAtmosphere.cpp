@@ -44,7 +44,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	distanceExaggerationHaze,
 	distanceExaggerationLimit,
 	cloudDistanceExaggeration,
-	heightFogSkyLight)
+	heightFogSkyLight,
+	mapEnabled,
+	mapDistanceExaggeration)
 
 void ViewAtmosphere::LoadSettings(json& value)
 {
@@ -75,7 +77,21 @@ void ViewAtmosphere::LoadSettings(json& value)
 	settings.distanceExaggerationLimit = bounded(settings.distanceExaggerationLimit, defaults.distanceExaggerationLimit, 0.5f, 12.0f);
 	settings.cloudDistanceExaggeration = bounded(settings.cloudDistanceExaggeration, defaults.cloudDistanceExaggeration, 0.0f, 1.0f);
 	settings.heightFogSkyLight = bounded(settings.heightFogSkyLight, defaults.heightFogSkyLight, 0.0f, 1.0f);
+	settings.mapEnabled = settings.mapEnabled != 0;
+	settings.mapDistanceExaggeration = bounded(settings.mapDistanceExaggeration, defaults.mapDistanceExaggeration, 1.0f, 12.0f);
 	lastFrame = UINT32_MAX;
+}
+
+float ViewAtmosphere::EffectiveDistanceExaggeration() const
+{
+	return globals::state->isMapMenuOpen ? settings.mapDistanceExaggeration : settings.distanceExaggeration;
+}
+
+ViewAtmosphere::Settings ViewAtmosphere::GetCommonBufferData() const
+{
+	Settings buffer = settings;
+	buffer.distanceExaggeration = EffectiveDistanceExaggeration();
+	return buffer;
 }
 
 void ViewAtmosphere::SaveSettings(json& value)
@@ -146,6 +162,19 @@ void ViewAtmosphere::DrawSettings()
 	ImGui::SliderFloat(T(TKEY("cloud_distance_exaggeration"), "Distance Haze on Clouds"), &settings.cloudDistanceExaggeration, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::Text("%s", T(TKEY("cloud_distance_exaggeration_tooltip"), "How much of the exaggerated air also lies in front of clouds. 1 = a cloud behind a mountain is as hazy as the mountain. 0 = clouds keep physical air and look crisper than the land in front of them. Values in between cost one extra lookup per pixel. The clear sky, sun, moons and stars are never changed."));
+	ImGui::SeparatorText(T(TKEY("world_map_header"), "World Map"));
+	bool mapEnabled = settings.mapEnabled != 0;
+	if (ImGui::Checkbox(T(TKEY("map_enabled"), "Atmosphere on World Map"), &mapEnabled)) {
+		settings.mapEnabled = mapEnabled;
+		lastFrame = UINT32_MAX;
+	}
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("map_enabled_tooltip"), "Render the shared atmosphere volume on the world map too, so the land there gets aerial perspective, haze toward the horizon and terrain shadows in the air. Off = the map uses the simpler sky lookup, as before. Height fog stays off on the map either way."));
+	ImGui::BeginDisabled(!mapEnabled);
+	ImGui::SliderFloat(T(TKEY("map_distance_exaggeration"), "Map Distance Exaggeration"), &settings.mapDistanceExaggeration, 1.0f, 12.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("map_distance_exaggeration_tooltip"), "Distance Exaggeration used while the world map is open, in place of the one above. The map looks down on the land from 0.2 to 1.6 km, so the in-game factor would wash it out. 1 is physical."));
+	ImGui::EndDisabled();
 	ImGui::SeparatorText(T(TKEY("height_fog_header"), "Height Fog Light"));
 	ImGui::SliderFloat(T(TKEY("height_fog_sky_light"), "Fog Lit by Sky"), &settings.heightFogSkyLight, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	if (auto _tt = Util::HoverTooltipWrapper())
@@ -178,8 +207,9 @@ bool ViewAtmosphere::Prepare()
 	prepared = ready = false;
 	Unbind();
 	auto& sky = globals::features::physicalSky;
+	const bool inMap = globals::state->isMapMenuOpen;
 	if (!sky.loaded || !sky.cbData.enabled || !loaded || !settings.enabled || !sky.texTrLut || !sky.texMsLut || !sky.texSkyTail || !sky.csSkyTailGen ||
-		globals::state->isMapMenuOpen || !CompositeEnabled()) {
+		(inMap && !settings.mapEnabled) || !CompositeEnabled()) {
 		lastFrame = UINT32_MAX;
 		return false;
 	}
@@ -260,7 +290,9 @@ bool ViewAtmosphere::Prepare()
 	}
 
 	const bool resized = !source || std::memcmp(&data.atlas, &next.atlas, sizeof(next.atlas)) != 0;
-	const bool changed = resized || std::memcmp(data.grids, next.grids, sizeof(next.grids)) != 0 || data.flags.y != uint32_t(useFog);
+	// Opening or closing the map moves the camera far: no history across it
+	const bool changed = resized || std::memcmp(data.grids, next.grids, sizeof(next.grids)) != 0 || data.flags.y != uint32_t(useFog) || inMap != lastInMap;
+	lastInMap = inMap;
 	if (resized) {
 		// The integrated volumes hold two copies stacked in depth: the physical medium, and above it the copy with
 		// distance exaggeration that surfaces read. Shaders address them through ViewAtmosphere::IntegratedUvw.
@@ -323,21 +355,25 @@ void ViewAtmosphere::Render()
 	auto& skylighting = globals::features::skylighting;
 	auto& lights = globals::features::lightLimitFix;
 	auto& cubemaps = globals::features::dynamicCubemaps;
+	// The world map keeps only what belongs to the map camera: no cascades, local lights, skylighting probes or
+	// cloud shadow layers (they follow the player); terrain shadows only with their map setting
+	const bool inMap = globals::state->isMapMenuOpen;
 	auto* environment = cubemaps.loaded && cubemaps.cubemapValid[0] && cubemaps.envTextureBC6H ? cubemaps.envTextureBC6H->srv.get() : nullptr;
-	const bool localLights = data.flags.y && fog.settings.volumetricFogEnabled && lights.loaded && lights.lights && lights.lightGrid && lights.lightIndexList;
+	const bool localLights = !inMap && data.flags.y && fog.settings.volumetricFogEnabled && lights.loaded && lights.lights && lights.lightGrid && lights.lightIndexList;
 	const bool localShadows = localLights && lights.IsLocalShadowCacheActive() && lights.localShadowBuffer && lights.localShadowCache;
 	auto [engineShadows, engineShadowCB] = PrepareLocalShadows(localLights);
 	const bool useIBL = data.flags.y && ibl.loaded && ibl.settings.EnableIBL && !ibl.IsDisabledForCurrentScene() && ibl.envIBLTexture && ibl.skyIBLTexture;
-	auto* shadowView = globals::deferred->GetDirectionalShadowMap();
-	auto* shadowData = globals::deferred->directionalShadowLights ? globals::deferred->directionalShadowLights->srv.get() : nullptr;
-	const bool terrainReady = terrain.IsShadowMapReady();
-	auto* cloudLayer = clouds.loaded ? clouds.texCloudShadowLayers[CloudShadows::kMaxCloudLayers - 1] : nullptr;
+	auto* shadowView = inMap ? nullptr : globals::deferred->GetDirectionalShadowMap();
+	auto* shadowData = globals::deferred->directionalShadowLights && !inMap ? globals::deferred->directionalShadowLights->srv.get() : nullptr;
+	const bool terrainReady = terrain.IsShadowMapActive();
+	auto* cloudLayer = clouds.loaded && !inMap ? clouds.texCloudShadowLayers[CloudShadows::kMaxCloudLayers - 1] : nullptr;
+	const bool useSkylighting = !inMap && skylighting.loaded && skylighting.texProbeArray;
 	// Ground fog: its constants and the terrain height map stay bound for the injection dispatches only.
 	auto& groundFog = globals::features::groundFog;
 	const bool groundFogActive = groundFog.BindForVolume(context);
 	const auto previousShadowFlags = data.flags.z & (1u | 256u | 512u | 2048u);
 	data.flags.z = (shadowView && shadowData ? 1u : 0u) | (useIBL ? 4u : 0u) |
-	               (skylighting.loaded && skylighting.texProbeArray ? 8u : 0u) | (localLights ? 32u : 0u) |
+	               (useSkylighting ? 8u : 0u) | (localLights ? 32u : 0u) |
 	               (localShadows ? 64u : 0u) | (engineShadows ? 128u : 0u) | (terrainReady ? 256u : 0u) | (cloudLayer ? 512u : 0u) | (environment ? 1024u : 0u) |
 	               (groundFogActive ? 2048u : 0u);
 	if ((data.flags.z & (1u | 256u | 512u | 2048u)) != previousShadowFlags)
@@ -368,7 +404,7 @@ void ViewAtmosphere::Render()
 	bind(35, localLights ? lights.lights->srv.get() : nullptr);
 	bind(36, localLights ? lights.lightIndexList->srv.get() : nullptr);
 	bind(37, localLights ? lights.lightGrid->srv.get() : nullptr);
-	bind(50, skylighting.loaded && skylighting.texProbeArray ? skylighting.texProbeArray->srv.get() : nullptr);
+	bind(50, useSkylighting ? skylighting.texProbeArray->srv.get() : nullptr);
 	bind(60, terrainReady ? terrain.texShadowHeight->srv.get() : nullptr);
 	bind(61, sky.texTrLut->srv.get());
 	bind(76, useIBL ? ibl.envIBLTexture->srv.get() : nullptr);
@@ -451,7 +487,8 @@ void ViewAtmosphere::RenderReflection()
 	Unbind();
 	auto& sky = globals::features::physicalSky;
 	auto& fog = globals::features::exponentialHeightFog;
-	if (!loaded || !settings.enabled || !ready || !sky.loaded || !sky.cbData.enabled || globals::state->isMapMenuOpen ||
+	const bool inMap = globals::state->isMapMenuOpen;
+	if (!loaded || !settings.enabled || !ready || !sky.loaded || !sky.cbData.enabled || (inMap && !settings.mapEnabled) ||
 		!sky.texTrLut || !sky.texMsLut || !sky.texSvLut || !sky.texApLut || !sky.texSkyTail || !sky.csSkyTailGen || !CompositeEnabled())
 		return;
 	if (!reflectionShadersRequested) {
@@ -529,15 +566,16 @@ void ViewAtmosphere::RenderReflection()
 	auto& ibl = globals::features::ibl;
 	const bool useFog = fog.IsActive();
 	const bool useIBL = useFog && ibl.loaded && ibl.settings.EnableIBL && !ibl.IsDisabledForCurrentScene() && ibl.envIBLTexture;
-	const bool terrainReady = terrain.IsShadowMapReady();
-	auto* cloudLayer = clouds.loaded ? clouds.texCloudShadowLayers[CloudShadows::kMaxCloudLayers - 1] : nullptr;
+	const bool terrainReady = terrain.IsShadowMapActive();
+	auto* cloudLayer = clouds.loaded && !inMap ? clouds.texCloudShadowLayers[CloudShadows::kMaxCloudLayers - 1] : nullptr;
+	const bool useSkylighting = !inMap && skylighting.loaded && skylighting.texProbeArray;
 	Parameters reflection{};
 	reflection.grids[0].size = { 32, 32, 32, 0 };
 	const float offset = 10.0f / Util::Units::GAME_UNIT_TO_M;
 	const float distance = 40000.0f / Util::Units::GAME_UNIT_TO_M;
 	reflection.grids[0].depth = { 0, distance, offset, std::log2(1.0f + distance / offset) };
 	reflection.atlas = { 32, 32, 32, 0 };
-	reflection.flags = { 1u, uint32_t(useFog), (useIBL ? 4u : 0u) | (skylighting.loaded && skylighting.texProbeArray ? 8u : 0u) | (terrainReady ? 256u : 0u) | (cloudLayer ? 512u : 0u), 1u };
+	reflection.flags = { 1u, uint32_t(useFog), (useIBL ? 4u : 0u) | (useSkylighting ? 8u : 0u) | (terrainReady ? 256u : 0u) | (cloudLayer ? 512u : 0u), 1u };
 	const bool exaggerate = DistanceExaggerationActive() && dispatchCB;
 	reflection.history = { 0.0f, 0.0f, 0.0f, exaggerate ? 1.0f : 0.0f };
 	reflectionParameters->Update(&reflection, sizeof(reflection));
@@ -550,7 +588,7 @@ void ViewAtmosphere::RenderReflection()
 	context->CSSetSamplers(0, 1, &sampler);
 	bind(2, sky.texMsLut->srv.get());
 	bind(25, cloudLayer ? cloudLayer->srv.get() : nullptr);
-	bind(50, skylighting.loaded && skylighting.texProbeArray ? skylighting.texProbeArray->srv.get() : nullptr);
+	bind(50, useSkylighting ? skylighting.texProbeArray->srv.get() : nullptr);
 	bind(60, terrainReady ? terrain.texShadowHeight->srv.get() : nullptr);
 	bind(61, sky.texTrLut->srv.get());
 	bind(62, sky.texSvLut->srv.get());

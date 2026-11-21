@@ -860,10 +860,23 @@ Texture2D<float4> TexSkyTail : register(t66);
 	// grass. With the default range [0, 1] this returns the transmittance unchanged. An upper bound below 1 lets
 	// thin cloud and the far-field mean pass the full beam (clear days keep their sun); the lower bound keeps
 	// thick cloud dark.
+	// foxnne lod shadow pop: with an upper bound below 1 the straight remap has a corner there, and a far-field mean
+	// that hovers around the bound switches between following the clouds at 1 / (hi - lo) times their slope and
+	// sitting at full sun. The line now leaves at a knee and bends over to reach 1 with no slope, half a range
+	// later where there is room below a transmittance of 1 ([0, 0.5]: unchanged up to 0.25, 0.875 instead of 1
+	// at 0.5, full sun from 0.75). The slope never exceeds the straight remap's. [0, 1] has no room: unchanged.
 	float3 RemapSurfaceCloudShadow(float3 cloudTransmittance)
 	{
 		const float2 range = SharedData::physSkyData.cloudShadowRemapRange;
-		return Remap(cloudTransmittance.x, range.x, range.y, 0.0, 1.0).xxx;
+		const float width = range.y - range.x;
+		if (width <= 0.0)
+			return 0.0;
+		const float t = max((cloudTransmittance.x - range.x) / width, 0.0);
+		const float knee = clamp(2.0 - (1.0 - range.x) / width, 0.5, 1.0);
+		const float past = min(t, 2.0 - knee) - knee;
+		if (past <= 0.0 || knee >= 1.0)
+			return saturate(t).xxx;
+		return saturate(knee + past - past * past / (4.0 * (1.0 - knee))).xxx;
 	}
 #endif
 

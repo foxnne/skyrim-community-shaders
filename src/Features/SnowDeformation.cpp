@@ -27,6 +27,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	IncludeNPCs,
 	IncludeObjects,
 	WeightResponse,
+	SnowSlowsMovers,
+	SnowSlowStrength,
 	UseSnowCover,
 	DisplaceShadows,
 	SinkActors,
@@ -64,6 +66,13 @@ namespace
 	constexpr float kLightPressure = 0.001f;
 	constexpr float kHeavyPressure = 0.03f;
 	constexpr float kMinWeightScale = 0.05f;
+	constexpr float kSlowLegFraction = 0.35f;
+	constexpr float kSlowMinLeg = 16.0f;
+	constexpr float kMaxSlowStrength = 0.9f;
+	constexpr float kSlowResponse = 0.3f;
+	constexpr float kSlowMinCut = 0.05f;
+	constexpr float kSlowMinCoverage = 0.5f;
+	constexpr float kSlowSnowHold = 1.0f;
 	constexpr float kHeatMelt = 0.85f;
 	constexpr float kHeatDepthScale = 0.8f;
 	constexpr float kTorchRadius = 40.0f;
@@ -1314,11 +1323,13 @@ void SnowDeformation::GatherStamps()
 		shapeMotion.clear();
 		actorShapes.clear();
 		RestoreActorSinks();
+		ClearMoverSlow();
 	}
 	if (!gatherEnabled.load(std::memory_order_relaxed)) {
 		shapeMotion.clear();
 		actorShapes.clear();
 		RestoreActorSinks();
+		ClearMoverSlow();
 		std::scoped_lock lock(stampLock);
 		pendingStamps.clear();
 		measuredSinks.clear();
@@ -1370,6 +1381,7 @@ void SnowDeformation::GatherStamps()
 		AppendHeatStamps(gatherStamps);
 	}
 	UpdateActorSinks(actors);
+	UpdateMoverSlow(actors);
 	MeasureBlanket();
 	dirtyScratch.clear();
 	for (auto it = actorShapes.begin(); it != actorShapes.end();)
@@ -1788,6 +1800,8 @@ const SnowDeformation::RaceTraits& SnowDeformation::TraitsOf(const RE::TESRace* 
 	if (found == raceTraits.end()) {
 		RaceTraits traits;
 		traits.ghost = a_race->HasKeywordString("ActorTypeGhost");
+		const char* name = a_race->GetName();
+		traits.coldAdapted = traits.ghost || (name && SnowDeformationMath::IsColdAdaptedName(name));
 		found = raceTraits.emplace(a_race->GetFormID(), traits).first;
 	}
 	return found->second;
@@ -1797,6 +1811,95 @@ bool SnowDeformation::IsGhost(RE::Actor* a_actor)
 {
 	auto race = a_actor->GetRace();
 	return race && TraitsOf(race).ghost;
+}
+
+bool SnowDeformation::IsColdAdapted(RE::Actor* a_actor)
+{
+	auto base = a_actor->GetActorBase();
+	if (!base)
+		return false;
+	auto found = coldBases.find(base->GetFormID());
+	if (found == coldBases.end()) {
+		auto race = a_actor->GetRace();
+		const char* name = base->GetName();
+		const bool cold = (race && TraitsOf(race).coldAdapted) || (name && SnowDeformationMath::IsColdAdaptedName(name));
+		found = coldBases.emplace(base->GetFormID(), cold).first;
+	}
+	return found->second;
+}
+
+void SnowDeformation::ClearMoverSlow()
+{
+	if (actorSlows.empty() && slowedMovers.load(std::memory_order_relaxed) == 0)
+		return;
+	std::scoped_lock lock(slowMutex);
+	actorSlows.clear();
+	slowedMovers.store(0, std::memory_order_relaxed);
+	playerSlowCut.store(0.0f, std::memory_order_relaxed);
+}
+
+void SnowDeformation::UpdateMoverSlow(const std::vector<RE::ActorPtr>& a_actors)
+{
+	auto tes = globals::game::tes;
+	const float blanket = std::clamp(settings.BlanketHeight, 0.0f, kMaxBlanketHeight);
+	if (!gatherOnUpdate || !tes || !settings.SnowSlowsMovers || blanket <= 0.0f || Util::IsInterior()) {
+		ClearMoverSlow();
+		return;
+	}
+
+	++slowFrame;
+	{
+		std::scoped_lock lock(stampLock);
+		gatherOwnerSnow = ownerSnow;
+	}
+	const float deltaTime = std::clamp(RE::GetSecondsSinceLastFrame(), 0.0f, kMaxDeltaTime);
+	const float response = 1.0f - std::exp(-deltaTime / kSlowResponse);
+	const auto player = globals::game::player;
+
+	for (const auto& actor : a_actors) {
+		const RE::FormID id = actor->GetFormID();
+		float buried = 0.0f;
+		float legHeight = kSlowMinLeg;
+		auto controller = actor->GetCharController();
+		if (controller && !IsColdAdapted(actor.get()) && controller->context.currentState == RE::hkpCharacterStateType::kOnGround && !actor->IsDead() && !actor->IsInRagdollState() && !actor->IsOnMount()) {
+			const RE::NiPoint3 position = actor->GetPosition();
+			float landZ = 0.0f;
+			if (tes->GetLandHeight(position, landZ)) {
+				buried = blanket - (position.z - landZ);
+				legHeight = std::max(kSlowLegFraction * (actor->GetBoundMax().z - actor->GetBoundMin().z), kSlowMinLeg);
+			}
+		}
+		const auto snow = gatherOwnerSnow.find(id);
+		const bool printsOnSnow = snow != gatherOwnerSnow.end() && snow->second >= kSlowMinCoverage;
+
+		std::scoped_lock lock(slowMutex);
+		auto found = actorSlows.find(id);
+		bool onSnow = printsOnSnow;
+		if (found != actorSlows.end()) {
+			auto& state = found->second;
+			state.sinceSnow = printsOnSnow ? 0.0f : state.sinceSnow + deltaTime;
+			onSnow = state.sinceSnow <= kSlowSnowHold;
+		}
+		const float cut = onSnow && buried > 0.0f ? SnowDeformationMath::WadeSlowdown(buried, legHeight, settings.SnowSlowStrength) : 0.0f;
+		if (found == actorSlows.end()) {
+			if (cut <= kSlowMinCut)
+				continue;
+			found = actorSlows.emplace(id, ActorSlow{}).first;
+		}
+		auto& state = found->second;
+		state.frame = slowFrame;
+		state.target = cut;
+		state.cut += (cut - state.cut) * response;
+		if (actor.get() == player)
+			playerSlowCut.store(state.cut, std::memory_order_relaxed);
+	}
+
+	std::scoped_lock lock(slowMutex);
+	for (auto it = actorSlows.begin(); it != actorSlows.end();)
+		it = (it->second.frame != slowFrame || (it->second.cut <= kSlowMinCut && it->second.target <= kSlowMinCut)) ? actorSlows.erase(it) : std::next(it);
+	slowedMovers.store(static_cast<uint32_t>(actorSlows.size()), std::memory_order_relaxed);
+	if (player && !actorSlows.contains(player->GetFormID()))
+		playerSlowCut.store(0.0f, std::memory_order_relaxed);
 }
 
 void SnowDeformation::RebuildActivity(Level& a_level)
@@ -2129,6 +2232,7 @@ void SnowDeformation::UpdateField()
 			ClearField();
 		std::scoped_lock lock(stampLock);
 		pendingStamps.clear();
+		ownerSnow.clear();
 		return;
 	}
 	if (globals::state->isMapMenuOpen || !EnsureShaders() || !beforeTexture || !globals::state->sharedDataCB || !globals::state->featureDataCB)
@@ -2170,6 +2274,8 @@ void SnowDeformation::UpdateField()
 	probeOwners.clear();
 	stampSnow.clear();
 	stampReach.clear();
+	frameOwnerSnow.clear();
+	const bool trackOwnerSnow = settings.SnowSlowsMovers && gatherOnUpdate;
 	std::vector<std::pair<RE::FormID, float>> offSnow;
 	uint32_t kept = 0;
 	for (size_t s = 0; s < frameStamps.size() && kept < kMaxStamps; ++s) {
@@ -2191,12 +2297,20 @@ void SnowDeformation::UpdateField()
 		stampSnow.push_back(snow);
 		stampReach.push_back(reach);
 		probeOwners.push_back(stamp.owner);
+		if (trackOwnerSnow && stamp.owner != 0 && stamp.kind != kKindMelt) {
+			float& ownerAmount = frameOwnerSnow[stamp.owner];
+			ownerAmount = std::max(ownerAmount, snow);
+		}
 		if (stamp.kind == kKindWade)
 			wadeEmitters.push_back({ static_cast<float>(stamp.x), static_cast<float>(stamp.y), stamp.landZ, stamp.clearance, stamp.radius, stamp.halfWidth,
 				stamp.forwardX, stamp.forwardY, stamp.motionX, stamp.motionY, stamp.owner, stamp.trail });
 	}
 	frameStampCount = kept;
 	debug.stamps = kept;
+	if (trackOwnerSnow || !ownerSnow.empty()) {
+		std::scoped_lock lock(stampLock);
+		ownerSnow.swap(frameOwnerSnow);
+	}
 
 	const bool sinking = settings.SinkActors && settings.BlanketHeight <= 0.0f;
 	if (sinking) {
@@ -3105,6 +3219,19 @@ RE::BSEventNotifyControl SnowDeformation::SpellCastSink::ProcessEvent(const RE::
 	return RE::BSEventNotifyControl::kContinue;
 }
 
+template <class T>
+float SnowDeformation::Hooks::Actor_GetActorValue<T>::thunk(RE::ActorValueOwner* a_owner, RE::ActorValue a_value)
+{
+	const float value = func(a_owner, a_value);
+	auto& singleton = globals::features::snowDeformation;
+	if (a_value != RE::ActorValue::kSpeedMult || singleton.slowedMovers.load(std::memory_order_relaxed) == 0)
+		return value;
+	const auto* actor = reinterpret_cast<const RE::Actor*>(reinterpret_cast<const std::byte*>(a_owner) - singleton.actorValueOwnerOffset);
+	std::scoped_lock lock(singleton.slowMutex);
+	const auto found = singleton.actorSlows.find(actor->GetFormID());
+	return found == singleton.actorSlows.end() ? value : value * (1.0f - found->second.cut);
+}
+
 void SnowDeformation::Hooks::Install()
 {
 	stl::write_vfunc<0x6, BSLightingShader_SetupGeometry>(RE::VTABLE_BSLightingShader[0]);
@@ -3120,8 +3247,16 @@ void SnowDeformation::Hooks::Install()
 	stl::write_vfunc<0xA2, Explosion_Initialize>(RE::VTABLE_Explosion[0]);
 	stl::write_vfunc<0x25, BSTempEffectGeometryDecal_Initialize>(RE::VTABLE_BSTempEffectGeometryDecal[0]);
 
-	constexpr std::size_t kTrampolineHeadroom = 3 * 14;
+	// ActorValueOwner is the sixth base vtable of Actor; GetActorValue is its slot 1. The owner sits at a runtime-dependent offset inside the actor.
+	constexpr std::size_t kActorValueOwnerVtable = 5;
+	constexpr std::uintptr_t kProbeAddress = 0x1000;
 	auto& singleton = globals::features::snowDeformation;
+	singleton.actorValueOwnerOffset = static_cast<std::ptrdiff_t>(reinterpret_cast<std::uintptr_t>(reinterpret_cast<RE::Actor*>(kProbeAddress)->AsActorValueOwner()) - kProbeAddress);
+	stl::write_vfunc<0x1, Actor_GetActorValue<RE::Actor>>(RE::VTABLE_Actor[kActorValueOwnerVtable]);
+	stl::write_vfunc<0x1, Actor_GetActorValue<RE::Character>>(RE::VTABLE_Character[kActorValueOwnerVtable]);
+	stl::write_vfunc<0x1, Actor_GetActorValue<RE::PlayerCharacter>>(RE::VTABLE_PlayerCharacter[kActorValueOwnerVtable]);
+
+	constexpr std::size_t kTrampolineHeadroom = 3 * 14;
 	if (SKSE::GetTrampoline().free_size() >= kTrampolineHeadroom) {
 		stl::write_thunk_call<Main_Update>(REL::RelocationID(35565, 36564).address() + Util::VersionedRelocation::Select(0x748, 0xC26, 0xC38));
 		singleton.gatherOnUpdate = true;
@@ -3185,6 +3320,14 @@ void SnowDeformation::DrawSettings()
 	ImGui::Checkbox(T(TKEY("weight_response"), "Light Items Press Less"), &settings.WeightResponse);
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::TextWrapped("%s", T(TKEY("weight_response_tooltip"), "Heavier items press deeper into the snow and very light ones, such as feathers, leave no print."));
+	{
+		Util::DisableGuard slowDisable(!gatherOnUpdate);
+		ImGui::Checkbox(T(TKEY("snow_slows_movers"), "Snow Slows Movement"), &settings.SnowSlowsMovers);
+	}
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::TextWrapped("%s", T(TKEY("snow_slows_movers_tooltip"), "The player, NPCs and creatures wading through a snow drift walk slower the deeper it is. Ghosts and cold-adapted creatures are not slowed. Needs a snow blanket height above zero."));
+	if (settings.SnowSlowsMovers)
+		ImGui::SliderFloat(T(TKEY("snow_slow_strength"), "Slowdown Strength"), &settings.SnowSlowStrength, 0.0f, kMaxSlowStrength, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 
 	{
 		Util::DisableGuard disable(!globals::features::snowCover.loaded);
@@ -3235,6 +3378,7 @@ void SnowDeformation::DrawSettings()
 			lightingLayoutSeen ? T(TKEY("debug_layout_valid"), "Valid") : T(TKEY("debug_layout_unknown"), "Not seen yet"));
 		ImGui::Text("%s: %zu", T(TKEY("debug_blocked"), "Landscape pieces recently blocked after a mismatch"), lightingRejected.size());
 		ImGui::Text("%s: %u (%.1f)", T(TKEY("debug_sunk"), "Actors sunk into prints (deepest)"), sunkActors, deepestSink);
+		ImGui::Text("%s: %u (%.2f)", T(TKEY("debug_slowed"), "Movers slowed by snow (player speed cut)"), slowedMovers.load(std::memory_order_relaxed), playerSlowCut.load(std::memory_order_relaxed));
 		ImGui::Text("%s: %s (%u / %d)", T(TKEY("debug_blanket"), "Snow blanket (land texels ready)"), blanketActive ? T("common.yes", "Yes") : T("common.no", "No"), blanketReady,
 			kBlanketTexels * kBlanketTexels);
 		if (ImGui::Button(T(TKEY("clear_prints"), "Clear Prints")))
@@ -3252,6 +3396,7 @@ void SnowDeformation::LoadSettings(json& o_json)
 	};
 	sanitize(settings.BlanketHeight, defaults.BlanketHeight, 0.0f, kMaxBlanketHeight);
 	sanitize(settings.Depth, defaults.Depth, 1.0f, 20.0f);
+	sanitize(settings.SnowSlowStrength, defaults.SnowSlowStrength, 0.0f, kMaxSlowStrength);
 	sanitize(settings.Lifetime, defaults.Lifetime, 10.0f, 1800.0f);
 	sanitize(settings.TrianglePixels, defaults.TrianglePixels, 2.0f, 32.0f);
 }

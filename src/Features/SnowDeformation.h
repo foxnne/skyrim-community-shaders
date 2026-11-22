@@ -47,6 +47,8 @@ struct SnowDeformation : Feature
 		bool IncludeNPCs = true;
 		bool IncludeObjects = true;
 		bool WeightResponse = true;
+		bool SnowSlowsMovers = false;
+		float SnowSlowStrength = 0.4f;
 		bool UseSnowCover = true;
 		bool DisplaceShadows = true;
 		bool SinkActors = true;
@@ -194,6 +196,13 @@ struct SnowDeformation : Feature
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		template <class T>
+		struct Actor_GetActorValue
+		{
+			static float thunk(RE::ActorValueOwner* a_owner, RE::ActorValue a_value);
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		static void Install();
 	};
 
@@ -254,6 +263,14 @@ private:
 		bool applied = false;
 	};
 
+	struct ActorSlow
+	{
+		float cut = 0.0f;
+		float target = 0.0f;
+		float sinceSnow = 0.0f;
+		uint64_t frame = 0;
+	};
+
 	struct ProbeFrame
 	{
 		std::vector<RE::FormID> owners;
@@ -273,6 +290,7 @@ private:
 	struct RaceTraits
 	{
 		bool ghost = false;
+		bool coldAdapted = false;
 	};
 
 	struct CachedShape
@@ -400,6 +418,9 @@ private:
 	bool IsSinkBlocked(RE::Actor* a_actor) const;
 	const RaceTraits& TraitsOf(const RE::TESRace* a_race);
 	bool IsGhost(RE::Actor* a_actor);
+	bool IsColdAdapted(RE::Actor* a_actor);
+	void UpdateMoverSlow(const std::vector<RE::ActorPtr>& a_actors);
+	void ClearMoverSlow();
 	void DispatchProbes(uint32_t a_stampCount);
 	void ReadProbes();
 	void PublishMeasurements(const std::vector<std::pair<RE::FormID, float>>& a_measurements);
@@ -484,6 +505,12 @@ private:
 	std::unordered_map<const void*, TrackedShape> shapeMotion;
 	std::unordered_map<RE::FormID, bool> bootedRaces;
 	std::unordered_map<RE::FormID, RaceTraits> raceTraits;
+	std::unordered_map<RE::FormID, bool> coldBases;
+	std::unordered_map<RE::FormID, ActorSlow> actorSlows;
+	std::unordered_map<RE::FormID, float> ownerSnow;
+	std::unordered_map<RE::FormID, float> frameOwnerSnow;
+	std::unordered_map<RE::FormID, float> gatherOwnerSnow;
+	uint64_t slowFrame = 0;
 	std::unordered_map<RE::FormID, float> measuredSinks;
 	std::unordered_map<RE::FormID, float> gatherMeasured;
 	std::unordered_map<RE::FormID, ActorSink> actorSinks;
@@ -508,6 +535,10 @@ private:
 	std::atomic<bool> loadClearField = false;
 	std::atomic<bool> loadClearMotion = false;
 	bool gatherOnUpdate = false;
+	std::atomic<uint32_t> slowedMovers = 0;
+	std::atomic<float> playerSlowCut = 0.0f;
+	std::mutex slowMutex;
+	std::ptrdiff_t actorValueOwnerOffset = 0;
 
 	bool inZPrepass = false;
 	CameraKey mainCamera;

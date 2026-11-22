@@ -32,6 +32,7 @@
 #include "Features/IBL.h"
 #include "Features/InteriorSun.h"
 #include "Features/LODBlending.h"
+#include "Features/LODShadows.h"
 #include "Features/LandscapeSeams.h"
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
@@ -99,6 +100,7 @@ namespace globals
 		LightLimitFix lightLimitFix{};
 		LinearLighting linearLighting{};
 		LODBlending lodBlending{};
+		LODShadows lodShadows{};
 		HairSpecular hairSpecular{};
 		HiZOcclusion hiZOcclusion{};
 		HorizonFix horizonFix{};

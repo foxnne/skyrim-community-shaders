@@ -15,6 +15,7 @@
 #include "Features/HorizonFix.h"
 #include "Features/IBL.h"
 #include "Features/LODBlending.h"
+#include "Features/LODShadows.h"
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
 #include "Features/NightEye.h"
@@ -93,5 +94,6 @@ std::pair<unsigned char*, size_t> GetFeatureBufferData(bool a_inWorld)
 		globals::features::viewAtmosphere.GetCommonBufferData(),
 		globals::features::treeWind.GetCommonBufferData(),
 		globals::features::groundCover.GetCommonBufferData(),
-		globals::features::treeWind.GetNearLeafBufferData());
+		globals::features::treeWind.GetNearLeafBufferData(),
+		globals::features::lodShadows.GetCommonBufferData());
 }

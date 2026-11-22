@@ -869,6 +869,21 @@ namespace SharedData
 		float2 pad0;
 	};
 
+	// LOD Shadows: one cached directional depth map (LODShadows::MapData in LODShadows.h)
+	struct LODShadowMapData
+	{
+		row_major float4x4 WorldToClip;         // world space to the clip space of the map
+		float4 Parameters;                      // x: depth slice, y: valid, z: depth bias, w: [0] valid map count, [1] maps hold the terrain, [2] end of the native cascades
+		float4 Filter;                          // x: texel size in UV, y: texel size in world units, z: depth bias of the previous map
+		row_major float4x4 HistoryWorldToClip;  // same for the previous map of this level
+		float4 History;                         // x: depth slice, y: blend towards the current map, z: valid
+	};
+
+	struct LODShadowsSettings
+	{
+		LODShadowMapData Maps[3];
+	};
+
 	cbuffer FeatureData : register(b6)
 	{
 		GrassLightingSettings grassLightingSettings;
@@ -906,6 +921,7 @@ namespace SharedData
 		LODTreeLightingSettings lodTreeLightingSettings;
 		GroundCoverSettings groundCoverSettings;
 		NearTreeLeafSettings nearTreeLeafSettings;
+		LODShadowsSettings lodShadowsSettings;
 	};
 
 	Texture2D<float4> DepthTexture : register(t17);

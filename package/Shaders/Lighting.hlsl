@@ -3187,9 +3187,18 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		dirLightColor *= WaterEffects::ComputeCaustics(waterData, input.WorldPosition.xyz, input.Position.xy);
 #	endif
 
-	// Apply world shadow (terrain shadows, cloud shadows) directly to light color
+	// Receiver plane of the LOD shadow maps, taken outside of flow control
+#	if defined(LOD_SHADOWS)
+	float3 worldShadowDx = ddx(input.WorldPosition.xyz);
+	float3 worldShadowDy = ddy(input.WorldPosition.xyz);
+#	else
+	float3 worldShadowDx = 0.0;
+	float3 worldShadowDy = 0.0;
+#	endif
+
+	// Apply world shadow (LOD shadows, terrain shadows, cloud shadows) directly to light color
 	if (inWorld || inReflection)
-		dirLightColor *= ShadowSampling::GetWorldShadow(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz, cloudScatter);
+		dirLightColor *= ShadowSampling::GetWorldShadow(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz, cloudScatter, worldShadowDx, worldShadowDy);
 
 	float dirLightAngle = dot(worldNormal.xyz, DirLightDirection.xyz);
 

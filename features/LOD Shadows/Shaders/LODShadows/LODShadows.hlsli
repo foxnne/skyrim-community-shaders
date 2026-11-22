@@ -40,6 +40,13 @@ namespace LODShadows
 		return endDistance > 0.0 ? smoothstep(endDistance * NativeFadeStartFraction, endDistance, depth) : 1.0;
 	}
 
+	// Distance toward the light at which the crowns of trees in object LOD look up the maps, so that a crown,
+	// a few texels wide in the far maps, is shaded by the terrain and by other trees but not by itself
+	float GetCrownBias()
+	{
+		return SharedData::lodShadowsSettings.Maps[0].Filter.w;
+	}
+
 	float CompareBilinear(float2 uv, float slice, float depth, float2 depthGradient, float texelSize, SamplerState linearSampler)
 	{
 		float4 depths = DepthMaps.GatherRed(linearSampler, float3(uv, slice));
@@ -114,6 +121,8 @@ namespace LODShadows
 			bool blendObjects = objectWeight > 0.0 && objectWeight < 1.0;
 			float2 visibilityPair = SampleMapHistory(worldPosition, positionDx, positionDy, map, linearSampler, mapCoverage, blendObjects);
 			float visibility = blendObjects ? lerp(visibilityPair.y, visibilityPair.x, objectWeight) : visibilityPair.x;
+			// Fade of the level: a new map fades in, one drawn for a light direction that no longer holds fades out
+			mapCoverage *= map.Parameters.y;
 			float occlusion = (1.0 - visibility) * mapCoverage;
 			shadow -= occlusion * remaining;
 			remaining *= 1.0 - mapCoverage;

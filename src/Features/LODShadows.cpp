@@ -30,8 +30,27 @@ namespace
 	constexpr uint64_t kHashSeed = 14695981039346656037ull;
 	constexpr uint64_t kHashPrime = 1099511628211ull;
 
-	constexpr float kDefaultTimeScale = 20.0f;
 	constexpr uint32_t kMeshLODLevels = 3;
+
+	// Held light direction: share of the direction step each map uses (near maps follow the light more closely),
+	// how far past half a step the light has to move before a map takes a new direction, and the change of
+	// direction that counts as a jump (wait, sleep, set gamehour) rather than as the light moving.
+	constexpr std::array<float, LODShadows::kMapCount> kDirectionStepScales{ 0.25f, 0.5f, 1.0f };
+	constexpr float kMaximumDirectionStepDegrees = 2.0f;
+	constexpr float kDirectionHysteresis = 0.25f;
+	constexpr float kStaleDirection = 0.07f;
+	constexpr float kStaleDirectionSteps = 3.0f;
+	constexpr double kDirectionSpeedWindowMs = 2000.0;
+	constexpr double kFadeDurationMs = 500.0;
+	// D16 steps added to the depth bias: the stored depth is rounded to the nearest step
+	constexpr float kDepthQuantizationBias = 1.5f / 65535.0f;
+	constexpr float kMaximumTexelBias = 4.0f;
+	constexpr float kMaximumCrownBias = 1024.0f;
+	constexpr float kMaximumFarMapLimit = 1048576.0f;
+	// The far map keeps its size while the casters need up to this much less
+	constexpr float kExtentSlack = 4 * kCellSize;
+	// Frames between scene scans while a map is being drawn: the scan only feeds the next map
+	constexpr uint32_t kPendingCollectIntervalFrames = 16;
 
 	// Engine globals and members that this fork's CommonLib revision does not name yet. The ids and
 	// offsets are those of CommonLibSSE-NG 15.2 (BGSTerrainManager, BGSDistantTreeBlock, NiAVObject,
@@ -102,16 +121,9 @@ namespace
 		return globals::state->isMapMenuOpen || (manager && IsTerrainMapMode(manager));
 	}
 
-	float ShadowClockRate()
-	{
-		const auto* calendar = globals::game::calendar;
-		const float timeScale = calendar ? calendar->GetTimescale() : kDefaultTimeScale;
-		return std::isfinite(timeScale) ? std::max(1.0f, timeScale / kDefaultTimeScale) : 1.0f;
-	}
-
 	uint32_t BatchTriangleBudget(uint32_t a_triangleBudget)
 	{
-		return uint32_t(std::min(double(a_triangleBudget) * ShadowClockRate(), double(std::numeric_limits<uint32_t>::max() / kIndicesPerTriangle)));
+		return std::min(a_triangleBudget, std::numeric_limits<uint32_t>::max() / kIndicesPerTriangle);
 	}
 
 	void HashBytes(uint64_t& a_hash, const void* a_data, size_t a_size)
@@ -249,23 +261,6 @@ namespace
 		UINT indexOffset = 0;
 		D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
 	};
-
-	template <class F>
-	void ForEachCasterBound(RE::BSGeometry* a_geometry, F&& a_callback)
-	{
-		if (a_geometry->GetType() == RE::BSGeometry::Type::kMultiStreamInstanceTriShape) {
-			const auto& instances = static_cast<RE::BSMultiStreamInstanceTriShape*>(a_geometry)->GetMultiStreamTrishapeRuntimeData();
-			for (auto* group : instances.instanceGroups) {
-				if (!group || !group->vertexBuffer || !group->vertexBuffer->buffer || !group->instanceCount)
-					continue;
-				RE::NiBound bound;
-				group->GetNiBound(&bound);
-				a_callback(bound);
-			}
-		} else {
-			a_callback(a_geometry->worldBound);
-		}
-	}
 }
 
 std::pair<std::string, std::vector<std::string>> LODShadows::GetFeatureSummary()
@@ -283,6 +278,14 @@ void LODShadows::LoadSettings(json& a_json)
 		settings.DepthBias = Settings{}.DepthBias;
 	settings.UpdateBudgetMs = std::clamp(settings.UpdateBudgetMs, kMinimumUpdateBudgetMs, kMaximumUpdateBudgetMs);
 	settings.DepthBias = std::clamp(settings.DepthBias, 0.0f, 64.0f);
+	const Settings defaults;
+	const auto clampSetting = [](float& a_value, float a_default, float a_maximum) {
+		a_value = std::isfinite(a_value) ? std::clamp(a_value, 0.0f, a_maximum) : a_default;
+	};
+	clampSetting(settings.DirectionStepDegrees, defaults.DirectionStepDegrees, kMaximumDirectionStepDegrees);
+	clampSetting(settings.TexelBias, defaults.TexelBias, kMaximumTexelBias);
+	clampSetting(settings.CrownBias, defaults.CrownBias, kMaximumCrownBias);
+	clampSetting(settings.FarMapLimit, defaults.FarMapLimit, kMaximumFarMapLimit);
 	if (wasSettingsEnabled != settings.Enabled)
 		resetRequested = true;
 }
@@ -309,6 +312,18 @@ void LODShadows::DrawSettings()
 	ImGui::SliderFloat(T(TKEY("depth_bias"), "Depth bias"), &settings.DepthBias, 0.0f, 64.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::Text("%s", T(TKEY("depth_bias_tooltip"), "Distance in game units a surface has to be behind a caster to count as shadowed. Raise it against speckled self shadowing, lower it if shadows detach from their casters."));
+	ImGui::SliderFloat(T(TKEY("texel_bias"), "Texel bias"), &settings.TexelBias, 0.0f, kMaximumTexelBias, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("texel_bias_tooltip"), "Extra depth bias in texels of each map, so the far maps, whose texels are as wide as a tree crown, get more of it than the near one. Raise it if distant objects flip between lit and dark."));
+	ImGui::SliderFloat(T(TKEY("crown_bias"), "Tree crown bias"), &settings.CrownBias, 0.0f, kMaximumCrownBias, "%.0f", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("crown_bias_tooltip"), "Distance in game units toward the light at which tree crowns in object LOD look up the maps. About the radius of a crown keeps a crown from shading itself, which Tree Wind's crown occlusion already does; terrain and other trees still shade it."));
+	ImGui::SliderFloat(T(TKEY("direction_step"), "Light direction step (degrees)"), &settings.DirectionStepDegrees, 0.0f, kMaximumDirectionStepDegrees, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("direction_step_tooltip"), "The far map keeps its light direction until the sun or moon has moved this far, then fades to a new one; the middle map uses half and the near map a quarter of it. Between steps the maps stay still, so distant shadows do not crawl and are not redrawn. The step grows by itself when time runs fast. 0 follows every movement."));
+	ImGui::SliderFloat(T(TKEY("far_map_limit"), "Far map limit (units)"), &settings.FarMapLimit, 0.0f, kMaximumFarMapLimit, "%.0f", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::Text("%s", T(TKEY("far_map_limit_tooltip"), "Largest half size of the far map. 0 lets it grow to hold every distant caster, which makes its texels coarser; a limit keeps them finer and leaves what lies beyond to the terrain shadows. The Debug section shows the current half extent."));
 }
 
 void LODShadows::DrawDebugSection()
@@ -322,11 +337,15 @@ void LODShadows::DrawDebugSection()
 		geometryCounts[0], loadedTerrainGeometryCount, geometryCounts[1], geometryCounts[2], geometryCounts[3]);
 	ImGui::Text(T(TKEY("debug_casters"), "Pending map: %d, pending casters: %u, unsupported casters: %u, completed maps: %u"),
 		pendingIndex, uint32_t(pendingIndex >= 0 ? casters.size() - casterIndex : 0), unsupportedCasters, completedMaps);
+	ImGui::Text(T(TKEY("debug_direction"), "Light direction offset (degrees): %.2f / %.2f / %.2f, steps %.2f / %.2f / %.2f, direction changes: %u, scene casters: %u, caster list builds: %u"),
+		DirectionOffsetDegrees(0), DirectionOffsetDegrees(1), DirectionOffsetDegrees(2),
+		DirectX::XMConvertToDegrees(DirectionStep(0)), DirectX::XMConvertToDegrees(DirectionStep(1)), DirectX::XMConvertToDegrees(DirectionStep(2)),
+		directionChanges, uint32_t(sceneCasters.casters.size()), sceneCasterBuilds);
 	ImGui::Text(T(TKEY("debug_update"), "Last update: %u draws, %u triangles, budget %u triangles"), lastDraws, lastTriangles, updateBudget.Triangles());
 	ImGui::Text(T(TKEY("debug_timing"), "GPU update: last %.3f ms, max %.3f ms; full refresh: last %.3f ms, max %.3f ms"), lastUpdateMs, maxUpdateMs, lastRefreshMs, maxRefreshMs);
 	for (uint32_t i = 0; i < kMapCount; ++i)
-		ImGui::Text(T(TKEY("debug_map"), "Map %u: valid %d, terrain %d, half extent %.0f, depth range %.0f, triangles %llu, history blend %.2f"),
-			i, maps[i].valid ? 1 : 0, maps[i].terrainValid ? 1 : 0, maps[i].halfExtent, maps[i].depthRange, maps[i].triangleCount, GetHistoryBlend(i));
+		ImGui::Text(T(TKEY("debug_map"), "Map %u: valid %d, terrain %d, half extent %.0f, depth range %.0f, triangles %llu, history blend %.2f, fade %.2f"),
+			i, maps[i].valid ? 1 : 0, maps[i].terrainValid ? 1 : 0, maps[i].halfExtent, maps[i].depthRange, maps[i].triangleCount, GetHistoryBlend(i), mapFades[i]);
 	ImGui::Checkbox(T(TKEY("debug_refresh_every_frame"), "Redraw all maps every frame"), &refreshEveryFrame);
 	ImGui::Checkbox(T(TKEY("debug_history"), "Blend from the previous map"), &interpolateHistory);
 	ImGui::Checkbox(T(TKEY("debug_throttle"), "Throttle the loaded object scan"), &throttleCollect);
@@ -448,6 +467,9 @@ void LODShadows::Invalidate()
 	for (auto& map : completedDepthMaps)
 		map.valid = false;
 	casters.clear();
+	sceneCasters = {};
+	heldDirections = {};
+	mapFades = {};
 	visibleGeometry.clear();
 	loadedRefCache.clear();
 	terrainGeometryCount = 0;
@@ -670,8 +692,8 @@ void LODShadows::AddCaster(RE::BSGeometry* a_geometry)
 			caster.instances.copy_from(reinterpret_cast<ID3D11Buffer*>(group->vertexBuffer->buffer));
 			caster.instanceCount = uint32_t(std::min(size_t(group->instanceCount), group->vertexBuffer->byteWidth / caster.instanceStride));
 			group->GetNiBound(&caster.bound);
-			if (caster.instanceCount && Intersects(caster))
-				casters.push_back(caster);
+			if (caster.instanceCount)
+				sceneCasters.casters.push_back(caster);
 		}
 	} else if (auto segmented = a_geometry->AsSubIndexTriShape()) {
 		auto& segments = segmented->GetSubIndexedTrishapeRuntimeData();
@@ -689,12 +711,34 @@ void LODShadows::AddCaster(RE::BSGeometry* a_geometry)
 				++unsupportedCasters;
 				continue;
 			}
-			if (caster.indexCount && Intersects(caster))
-				casters.push_back(caster);
+			if (caster.indexCount)
+				sceneCasters.casters.push_back(caster);
 		}
-	} else if (Intersects(caster)) {
-		casters.push_back(std::move(caster));
+	} else {
+		sceneCasters.casters.push_back(std::move(caster));
 	}
+}
+
+void LODShadows::BuildSceneCasters()
+{
+	sceneCasters.casters.clear();
+	sceneCasters.terrainSupported = true;
+	unsupportedCasters = 0;
+	const auto loadedObjectStart = visibleGeometry.size() - std::min(size_t(geometryCounts[3]), visibleGeometry.size());
+	for (size_t i = 0; i < visibleGeometry.size(); ++i) {
+		if (i == loadedObjectStart)
+			sceneCasters.loadedStart = uint32_t(sceneCasters.casters.size());
+		const auto unsupported = unsupportedCasters;
+		AddCaster(visibleGeometry[i].get());
+		if (i < terrainGeometryCount && unsupportedCasters != unsupported)
+			sceneCasters.terrainSupported = false;
+	}
+	if (loadedObjectStart == visibleGeometry.size())
+		sceneCasters.loadedStart = uint32_t(sceneCasters.casters.size());
+	sceneCasters.scene = sceneHash;
+	sceneCasters.frame = uint32_t(globals::state->frameCount);
+	sceneCasters.valid = true;
+	++sceneCasterBuilds;
 }
 
 bool LODShadows::Intersects(const Caster& a_caster) const
@@ -726,7 +770,10 @@ void LODShadows::BeginMap(uint32_t a_index, const RE::NiPoint3& a_center, const 
 	pendingMap.scene = sceneHash;
 	pendingMap.frame = uint32_t(globals::state->frameCount);
 	pendingMap.transitionGeneration = transitionGeneration;
-	pendingMap.terrainValid = terrainAvailable;
+	// The caster list is kept while the scene is the same: a new map only filters it
+	if (!sceneCasters.valid || sceneCasters.scene != sceneHash || pendingMap.frame - sceneCasters.frame > kMaximumCacheFrames)
+		BuildSceneCasters();
+	pendingMap.terrainValid = terrainAvailable && sceneCasters.terrainSupported;
 	pendingLandBounds = landBounds;
 	const auto direction = XMVectorSet(a_direction.x, a_direction.y, a_direction.z, 0);
 	const auto up = std::abs(a_direction.z) > 0.99f ? XMVectorSet(0, 1, 0, 0) : XMVectorSet(0, 0, 1, 0);
@@ -734,59 +781,58 @@ void LODShadows::BeginMap(uint32_t a_index, const RE::NiPoint3& a_center, const 
 	const auto center = XMVector3TransformCoord(XMVectorSet(a_center.x, a_center.y, a_center.z, 1), rotation);
 	float extent = kMinimumHalfExtents[a_index];
 	if (a_index == kMapCount - 1) {
-		for (const auto& geometry : visibleGeometry) {
-			ForEachCasterBound(geometry.get(), [&](const RE::NiBound& bound) {
-				const auto offset = bound.center - a_center;
-				const auto point = XMVector3TransformNormal(XMVectorSet(offset.x, offset.y, offset.z, 0), rotation);
-				const float requiredExtent = std::max(std::abs(XMVectorGetX(point)), std::abs(XMVectorGetY(point))) + bound.radius;
-				if (std::isfinite(requiredExtent))
-					extent = std::max(extent, std::ceil(requiredExtent / ((1.0f - kCenterMargin) * kCellSize)) * kCellSize);
-			});
+		for (const auto& caster : sceneCasters.casters) {
+			const auto offset = caster.bound.center - a_center;
+			const auto point = XMVector3TransformNormal(XMVectorSet(offset.x, offset.y, offset.z, 0), rotation);
+			const float requiredExtent = std::max(std::abs(XMVectorGetX(point)), std::abs(XMVectorGetY(point))) + caster.bound.radius;
+			if (std::isfinite(requiredExtent))
+				extent = std::max(extent, std::ceil(requiredExtent / ((1.0f - kCenterMargin) * kCellSize)) * kCellSize);
 		}
+		const float limit = settings.FarMapLimit > 0.0f ? std::max(kMinimumHalfExtents[a_index], settings.FarMapLimit) : std::numeric_limits<float>::max();
+		extent = std::min(extent, limit);
+		// Same size as the map in use while that still fits: its texel grid, and so its shadow edges, stay put
+		const auto& current = maps[a_index];
+		if (current.valid && current.halfExtent >= extent && current.halfExtent - extent <= kExtentSlack && current.halfExtent <= limit)
+			extent = current.halfExtent;
 	}
 	const float texel = extent * 2 / kResolution;
 	const float centerX = std::round(XMVectorGetX(center) / texel) * texel;
 	const float centerY = std::round(XMVectorGetY(center) / texel) * texel;
 	float depthNear = -kCellSize;
 	float depthFar = kCellSize;
-	for (const auto& geometry : visibleGeometry) {
-		ForEachCasterBound(geometry.get(), [&](const RE::NiBound& bound) {
-			const auto offset = bound.center - a_center;
-			const auto point = XMVector3TransformNormal(XMVectorSet(offset.x, offset.y, offset.z, 0), rotation);
-			const float x = XMVectorGetX(point) + XMVectorGetX(center) - centerX;
-			const float y = XMVectorGetY(point) + XMVectorGetY(center) - centerY;
-			const float z = XMVectorGetZ(point);
-			if (std::abs(x) <= extent + bound.radius && std::abs(y) <= extent + bound.radius &&
-				std::isfinite(z) && std::isfinite(bound.radius)) {
-				depthNear = std::min(depthNear, z - bound.radius);
-				depthFar = std::max(depthFar, z + bound.radius);
-			}
-		});
+	for (const auto& caster : sceneCasters.casters) {
+		const auto& bound = caster.bound;
+		const auto offset = bound.center - a_center;
+		const auto point = XMVector3TransformNormal(XMVectorSet(offset.x, offset.y, offset.z, 0), rotation);
+		const float x = XMVectorGetX(point) + XMVectorGetX(center) - centerX;
+		const float y = XMVectorGetY(point) + XMVectorGetY(center) - centerY;
+		const float z = XMVectorGetZ(point);
+		if (std::abs(x) <= extent + bound.radius && std::abs(y) <= extent + bound.radius &&
+			std::isfinite(z) && std::isfinite(bound.radius)) {
+			depthNear = std::min(depthNear, z - bound.radius);
+			depthFar = std::max(depthFar, z + bound.radius);
+		}
 	}
+	// Depth planes on a fixed grid along the light, like the texels across it: a map redrawn for the same
+	// light direction rounds its depths the same way
 	const float padding = std::max(kMinimumDepthPadding, settings.DepthBias);
-	depthNear -= padding;
-	depthFar += padding;
+	const float nearPlane = std::floor((XMVectorGetZ(center) + depthNear - padding) / kCellSize) * kCellSize;
+	const float farPlane = std::ceil((XMVectorGetZ(center) + depthFar + padding) / kCellSize) * kCellSize;
 	pendingMap.halfExtent = extent;
-	pendingMap.depthRange = depthFar - depthNear;
-	const auto translation = XMMatrixTranslation(-centerX, -centerY, -XMVectorGetZ(center) - depthNear);
+	pendingMap.depthRange = farPlane - nearPlane;
+	const auto translation = XMMatrixTranslation(-centerX, -centerY, -nearPlane);
 	XMStoreFloat4x4(&pendingMap.data.worldToClip, rotation * translation * XMMatrixOrthographicLH(extent * 2, extent * 2, 0, pendingMap.depthRange));
 	casters.clear();
-	unsupportedCasters = 0;
 	const auto* scene = globals::game::smState->shadowSceneNode[0];
 	const auto* nativeLight = scene ? scene->GetRuntimeData().sunShadowDirLight : nullptr;
 	const float nativeDistance = nativeLight ? nativeLight->GetShadowDirectionalLightRuntimeData().endSplitDistances[1] : 0.0f;
-	const auto loadedObjectStart = visibleGeometry.size() - geometryCounts[3];
-	for (uint32_t i = 0; i < visibleGeometry.size(); ++i) {
-		const auto unsupported = unsupportedCasters;
-		const auto firstCaster = casters.size();
-		AddCaster(visibleGeometry[i].get());
-		for (size_t caster = firstCaster; caster < casters.size(); ++caster) {
-			const auto& bound = casters[caster].bound;
-			casters[caster].nativeShadowCaster = i >= loadedObjectStart && nativeDistance > 0.0f &&
-			                                     (bound.center - a_center).Length() - bound.radius < nativeDistance;
-		}
-		if (i < terrainGeometryCount && unsupportedCasters != unsupported)
-			pendingMap.terrainValid = false;
+	for (uint32_t i = 0; i < sceneCasters.casters.size(); ++i) {
+		const auto& source = sceneCasters.casters[i];
+		if (!Intersects(source))
+			continue;
+		auto& caster = casters.emplace_back(source);
+		caster.nativeShadowCaster = i >= sceneCasters.loadedStart && nativeDistance > 0.0f &&
+		                            (caster.bound.center - a_center).Length() - caster.bound.radius < nativeDistance;
 	}
 	std::ranges::sort(casters, {}, [](const Caster& caster) { return std::tuple{ caster.nativeShadowCaster, caster.alphaThreshold > 0 }; });
 	casterIndex = 0;
@@ -842,7 +888,7 @@ void LODShadows::ResolveTimings()
 	}
 }
 
-void LODShadows::UpdateMaps(const RE::NiPoint3& a_center, const RE::NiPoint3& a_direction, bool a_refreshImmediately)
+void LODShadows::UpdateMaps(const RE::NiPoint3& a_center, bool a_refreshImmediately)
 {
 	if (a_refreshImmediately) {
 		for (auto& map : completedDepthMaps)
@@ -864,9 +910,10 @@ void LODShadows::UpdateMaps(const RE::NiPoint3& a_center, const RE::NiPoint3& a_
 				continue;
 			const auto& map = maps[index];
 			const bool blending = interpolateHistory && previousMaps[index].valid;
-			if (!NeedsUpdate(index, a_center, a_direction) && (!blending || map.direction == a_direction))
+			if (!NeedsUpdate(index, a_center, heldDirections[index]) && (!blending || map.direction == heldDirections[index]))
 				continue;
-			deadlines[index] = map.valid ? map.completedTimeMs + (blending ? map.blendDurationMs : 0.0) : 0.0;
+			// A map from before a jump of the light is replaced as soon as possible, the others once their fade is over
+			deadlines[index] = map.valid && !IsStale(map, index) ? map.completedTimeMs + (blending ? map.blendDurationMs : 0.0) : 0.0;
 			candidates[candidateCount++] = index;
 		}
 		std::sort(candidates.begin(), candidates.begin() + candidateCount, [&](uint32_t left, uint32_t right) {
@@ -880,7 +927,7 @@ void LODShadows::UpdateMaps(const RE::NiPoint3& a_center, const RE::NiPoint3& a_
 			const double workloadTimeMs = std::ceil(double(map.triangleCount) / batchTriangles) * frameDurationMs;
 			buildTimeMs += std::max(map.buildDurationMs, workloadTimeMs) + frameDurationMs;
 			if (frameTimeMs + buildTimeMs >= deadlines[index]) {
-				BeginMap(candidates[0], a_center, a_direction);
+				BeginMap(candidates[0], a_center, heldDirections[candidates[0]]);
 				break;
 			}
 		}
@@ -909,7 +956,7 @@ void LODShadows::UpdateMaps(const RE::NiPoint3& a_center, const RE::NiPoint3& a_
 		for (uint32_t i = 0; i < kMapCount; ++i) {
 			{
 				RE::BSSpinLockGuard lock(CameraTerrainLock());
-				BeginMap(i, a_center, a_direction);
+				BeginMap(i, a_center, heldDirections[i]);
 			}
 			RenderBatch(true);
 		}
@@ -1026,12 +1073,14 @@ void LODShadows::PublishCompletedMaps(bool a_refreshImmediately)
 {
 	for (uint32_t i = 0; i < kMapCount; ++i) {
 		auto& completed = completedDepthMaps[i];
-		if (!completed.valid || (!a_refreshImmediately && GetHistoryBlend(i) < 1.0f))
+		// A map from before a jump of the light is not faded from: it fades out by itself (mapFades)
+		const bool stale = maps[i].valid && IsStale(maps[i], i);
+		if (!completed.valid || (!a_refreshImmediately && !stale && GetHistoryBlend(i) < 1.0f))
 			continue;
 		previousMaps[i] = maps[i];
-		previousMaps[i].valid &= !a_refreshImmediately;
+		previousMaps[i].valid &= !a_refreshImmediately && !stale;
 		completed.completedTimeMs = frameTimeMs;
-		completed.blendDurationMs = kHistoryIntervalsMs[i] / ShadowClockRate();
+		completed.blendDurationMs = kHistoryIntervalsMs[i];
 		maps[i] = completed;
 		completed.valid = false;
 		++completedMaps;
@@ -1044,6 +1093,64 @@ float LODShadows::GetHistoryBlend(uint32_t a_index) const
 	if (!interpolateHistory || !previousMaps[a_index].valid || map.blendDurationMs <= 0)
 		return 1.0f;
 	return float(std::clamp((frameTimeMs - map.completedTimeMs) / map.blendDurationMs, 0.0, 1.0));
+}
+
+float LODShadows::DirectionStep(uint32_t a_index) const
+{
+	// No more than one new direction per round of redraws plus fade, however fast the light moves
+	double roundMs = kHistoryIntervalsMs[a_index];
+	for (const auto& map : maps)
+		roundMs += map.valid ? map.buildDurationMs : 0.0;
+	const float base = DirectX::XMConvertToRadians(settings.DirectionStepDegrees) * kDirectionStepScales[a_index];
+	return base > 0.0f ? std::max(base, float(directionSpeed * roundMs / 1000.0)) : 0.0f;
+}
+
+float LODShadows::DirectionOffsetDegrees(uint32_t a_index) const
+{
+	return maps[a_index].valid ? DirectX::XMConvertToDegrees((maps[a_index].direction - lightDirection).Length()) : 0.0f;
+}
+
+bool LODShadows::IsStale(const Map& a_map, uint32_t a_index) const
+{
+	return (a_map.direction - lightDirection).Length() > std::max(kStaleDirection, kStaleDirectionSteps * DirectionStep(a_index));
+}
+
+void LODShadows::HoldDirections(const RE::NiPoint3& a_direction, bool a_follow)
+{
+	// Angular speed of the light over a window, without the jumps
+	const float moved = lightDirection.SqrLength() > 0.5f ? (a_direction - lightDirection).Length() : 0.0f;
+	if (moved < kStaleDirection)
+		directionWindowAngle += moved;
+	directionWindowMs += frameDurationMs;
+	if (directionWindowMs >= kDirectionSpeedWindowMs) {
+		directionSpeed = directionWindowAngle * 1000.0 / directionWindowMs;
+		directionWindowAngle = directionWindowMs = 0;
+	}
+	lightDirection = a_direction;
+	for (uint32_t i = 0; i < kMapCount; ++i) {
+		auto& held = heldDirections[i];
+		const float step = DirectionStep(i);
+		const auto offset = a_direction - held;
+		const float deviation = offset.Length();
+		if (a_follow || step <= kDirectionThreshold || held.SqrLength() < 0.5f || deviation > std::max(kStaleDirection, kStaleDirectionSteps * step)) {
+			// No step, the first direction, or a jump: take the light as it is
+			if (deviation > kDirectionThreshold)
+				++directionChanges;
+			held = a_direction;
+		} else if (deviation > step * 0.5f * (1.0f + kDirectionHysteresis)) {
+			// Half a step ahead of the light, so the held direction is at most half a step off either way
+			held = a_direction + offset * (step * 0.5f / deviation);
+			held /= held.Length();
+			++directionChanges;
+		}
+	}
+	// Work for a direction the light has jumped away from is dropped: its slice was never shown
+	if (pendingIndex >= 0 && IsStale(pendingMap, pendingIndex)) {
+		pendingIndex = -1;
+		casters.clear();
+	}
+	for (uint32_t i = 0; i < kMapCount; ++i)
+		completedDepthMaps[i].valid &= !IsStale(completedDepthMaps[i], i);
 }
 
 bool LODShadows::NeedsUpdate(uint32_t a_index, const RE::NiPoint3& a_position, const RE::NiPoint3& a_direction) const
@@ -1070,16 +1177,24 @@ void LODShadows::Publish()
 	const bool active = ready && settings.Enabled && !IsMapView();
 	for (uint32_t i = 0; i < kMapCount; ++i) {
 		data.maps[i] = maps[i].data;
-		const bool valid = active && maps[i].valid;
-		const float bias = settings.DepthBias / std::max(kMinimumDepthPadding, maps[i].depthRange);
-		const float historyBias = settings.DepthBias / std::max(kMinimumDepthPadding, previousMaps[i].depthRange);
-		data.maps[i].parameters = float4{ float(maps[i].slice), valid ? 1.0f : 0.0f, bias, 0 };
-		data.maps[i].filter = float4{ 1.0f / kResolution, maps[i].halfExtent * 2 / kResolution, historyBias, 0 };
+		// A new map fades in, and one left behind by a jump of the light fades out
+		const float fadeStep = float(std::clamp(frameDurationMs / kFadeDurationMs, 0.0, 1.0));
+		const bool shown = maps[i].valid && !IsStale(maps[i], i);
+		mapFades[i] = maps[i].valid ? std::clamp(mapFades[i] + (shown ? fadeStep : -fadeStep), 0.0f, 1.0f) : 0.0f;
+		const bool valid = active && maps[i].valid && mapFades[i] > 0.0f;
+		// Depth bias in map depth: the fixed distance, a share of the texel width, and the rounding of D16
+		const auto depthBias = [&](const Map& a_map) {
+			const float distance = settings.DepthBias + settings.TexelBias * a_map.halfExtent * 2 / kResolution;
+			return distance / std::max(kMinimumDepthPadding, a_map.depthRange) + kDepthQuantizationBias;
+		};
+		data.maps[i].parameters = float4{ float(maps[i].slice), valid ? mapFades[i] : 0.0f, depthBias(maps[i]), 0 };
+		data.maps[i].filter = float4{ 1.0f / kResolution, maps[i].halfExtent * 2 / kResolution, depthBias(previousMaps[i]), 0 };
 		data.maps[i].historyWorldToClip = previousMaps[i].data.worldToClip;
 		data.maps[i].history = float4{ float(previousMaps[i].slice), GetHistoryBlend(i), previousMaps[i].valid ? 1.0f : 0.0f, 0 };
 		validMaps += valid;
 	}
 	data.maps[0].parameters.w = float(validMaps);
+	data.maps[0].filter.w = settings.CrownBias;
 	data.maps[1].parameters.w = CoversTerrain() ? 1.0f : 0.0f;
 	const auto* shadowScene = globals::game::smState->shadowSceneNode[0];
 	const auto* nativeLight = shadowScene ? shadowScene->GetRuntimeData().sunShadowDirLight : nullptr;
@@ -1176,30 +1291,43 @@ void LODShadows::EarlyPrepass()
 		}
 		direction /= directionLength;
 		const auto generation = Util::GetCompletedCelestialTransitionGeneration();
-		const float clockRate = ShadowClockRate();
-		const bool subframeUpdates = clockRate > 1.0f && frameDurationMs * clockRate >= kHistoryIntervalsMs[0];
-		const bool refreshImmediately = refreshEveryFrame || subframeUpdates || generation != transitionGeneration;
+		// Time jumps and fast time go through the held directions (HoldDirections): the maps are redrawn within
+		// the budget and fade. Only the debug switch redraws them all in one frame.
+		const bool refreshImmediately = refreshEveryFrame;
 		const auto worldID = manager->worldSpace->GetFormID();
 		if (worldID != worldSpaceID)
 			Invalidate();
 		worldSpaceID = worldID;
+		// A map in progress from before a completed time jump would be redrawn at once: drop it
+		if (generation != transitionGeneration && pendingIndex >= 0) {
+			pendingIndex = -1;
+			casters.clear();
+		}
 		transitionGeneration = generation;
 		const auto* tes = globals::game::tes;
 		const int32_t gridX = tes ? tes->currentGridX : 0;
 		const int32_t gridY = tes ? tes->currentGridY : 0;
-		const bool refreshLoaded = !throttleCollect || refreshImmediately || visibleGeometry.empty() || gridX != collectedGridX ||
-		                           gridY != collectedGridY || ++framesSinceCollect >= kCollectIntervalFrames;
-		const bool fullWalk = !throttleCollect || refreshImmediately || visibleGeometry.empty() || gridX != collectedGridX ||
-		                      gridY != collectedGridY || (refreshLoaded && ++scansSinceFullWalk >= kFullWalkIntervalScans);
-		CollectScene(refreshLoaded, fullWalk);
-		if (fullWalk)
-			scansSinceFullWalk = 0;
-		if (refreshLoaded) {
+		HoldDirections(direction, refreshImmediately);
+		// The scene is scanned every few frames, and less often while a map is being drawn from the last scan
+		const bool wasPending = pendingIndex >= 0;
+		const bool gridChanged = gridX != collectedGridX || gridY != collectedGridY;
+		const uint32_t collectInterval = wasPending ? kPendingCollectIntervalFrames : kCollectIntervalFrames;
+		const bool refreshScene = !throttleCollect || refreshImmediately || visibleGeometry.empty() || gridChanged ||
+		                          ++framesSinceCollect >= collectInterval;
+		const bool fullWalk = !throttleCollect || refreshImmediately || visibleGeometry.empty() || gridChanged ||
+		                      (refreshScene && ++scansSinceFullWalk >= kFullWalkIntervalScans);
+		if (refreshScene) {
+			CollectScene(true, fullWalk);
 			framesSinceCollect = 0;
 			collectedGridX = gridX;
 			collectedGridY = gridY;
 		}
-		UpdateMaps(Util::GetEyePosition(), direction, refreshImmediately);
+		if (fullWalk)
+			scansSinceFullWalk = 0;
+		UpdateMaps(Util::GetEyePosition(), refreshImmediately);
+		// A finished map is followed by a fresh scan, so the next map starts from the current scene
+		if (wasPending && pendingIndex < 0)
+			framesSinceCollect = kCollectIntervalFrames;
 	} catch (const std::exception& error) {
 		logger::error("LOD Shadows disabled after rendering failure: {}", error.what());
 		ready = false;

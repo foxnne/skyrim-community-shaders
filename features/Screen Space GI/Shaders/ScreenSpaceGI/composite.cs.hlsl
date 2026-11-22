@@ -16,6 +16,7 @@ Texture2D<float4> SsgiTexture : register(t3);
 #if defined(SSGI_SH)
 Texture2D<float4> SsgiSH1Texture : register(t4);
 #endif
+Texture2D<float3> MasksTexture : register(t5);
 
 RWTexture2D<float4> MainRW : register(u0);
 
@@ -45,6 +46,8 @@ float3 SampleSSGIIL(uint2 pixCoord)
 	float3 linAlbedo = ColorManagement::SceneToLinear(AlbedoTexture[dispatchID.xy] / Color::PBRLightingScale);
 	float3 ssgiIl = SampleSSGIIL(dispatchID.xy);
 	ssgiIl = max(lerp(Color::RGBToLuminance(ssgiIl), ssgiIl, SharedData::ssgiSettings.ILSaturation), 0.0);
+	if (SharedData::ssgiSettings.ReplaceAmbient != 0)
+		ssgiIl *= 1.0 + saturate(MasksTexture[dispatchID.xy].z);
 
 	// MainRW holds pre-exposed scene radiance (DeferredCompositeCS encodes it); the traced and fallback
 	// illumination are in scene units. Add them in scene units, or the indirect light ignores exposure

@@ -34,9 +34,9 @@ public:
 
 	struct Settings
 	{
-		uint EnableCharacterLighting = false;
-		float CharacterLightingStrength = 1.0f;
-		int SSMode = 1;
+		uint EnableCharacterLighting = true;
+		uint CharacterLightingHumanoidOnly = true;
+		int SSMode = 0;
 		int ScatterMode = kPreAndPostScatter;
 		DiffusionProfile BaseProfile{ 1.0f, 1.0f, { 0.48f, 0.41f, 0.28f }, { 0.56f, 0.56f, 0.56f } };
 		DiffusionProfile HumanProfile{ 1.0f, 1.0f, { 0.48f, 0.41f, 0.28f }, { 1.0f, 0.37f, 0.3f } };
@@ -52,8 +52,6 @@ public:
 	};
 
 	Settings settings;
-
-	float CharacterLightingStrengthOriginal = -1.0f;
 
 	struct alignas(16) Kernel
 	{
@@ -174,6 +172,13 @@ public:
 	 */
 	void BSLightingShader_SetupSkin(RE::BSRenderPass* Pass);
 
+	/**
+	 * @brief Whether the vanilla character light should be withheld from this geometry.
+	 * @param a_geometry Geometry whose owning actor is checked.
+	 * @return True when "Humanoid Races Only" is on and the owning actor's race has no FaceGen head (creatures, Falmer, draugr).
+	 */
+	bool SuppressCharacterLight(RE::BSGeometry* a_geometry) const;
+
 	struct Hooks
 	{
 		struct BSLightingShader_SetupGeometry
@@ -182,9 +187,16 @@ public:
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		struct BSLightingShaderProperty_GetRenderPasses
+		{
+			static RE::BSShaderProperty::RenderPassArray* thunk(RE::BSLightingShaderProperty* a_property, RE::BSGeometry* a_geometry, std::uint32_t a_renderFlags, RE::BSShaderAccumulator* a_accumulator);
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		static void Install()
 		{
 			stl::write_vfunc<0x6, BSLightingShader_SetupGeometry>(RE::VTABLE_BSLightingShader[0]);
+			stl::write_vfunc<0x2A, BSLightingShaderProperty_GetRenderPasses>(RE::VTABLE_BSLightingShaderProperty[0]);
 			logger::info("[SSS] Installed hooks");
 		}
 	};

@@ -13,6 +13,7 @@
 #include "HiZPyramid.h"
 #include "State.h"
 #include "Utils/D3D.h"
+#include "Utils/ShaderCompileFlags.h"
 
 #include "Features/DetailMaps.h"
 #include "Features/DynamicCubemaps.h"
@@ -125,6 +126,13 @@ namespace SIE
 		std::atomic<ULONG> refCount{ 1 };
 		std::vector<uint8_t> bytes;
 	};
+
+	// Capacity of the preprocessor-define arrays handed to the per-type GetXShaderDefines writers, none of which
+	// bounds-check. A Lighting permutation with every feature loaded already uses about 50 entries, so 64 left
+	// room for only a handful of user "Shader Defines" before the writers ran off the end of the stack array.
+	constexpr size_t kMaxShaderDefines = 128;
+	// User defines sit in front of the generated ones; cap them so the generated set always fits behind.
+	constexpr size_t kMaxUserShaderDefines = 32;
 
 	namespace SShaderCache
 	{
@@ -1268,7 +1276,7 @@ namespace SIE
 			return -1;
 		}
 
-		static std::string MergeDefinesString(std::array<D3D_SHADER_MACRO, 64>& defines, bool a_sort = false)
+		static std::string MergeDefinesString(std::array<D3D_SHADER_MACRO, kMaxShaderDefines>& defines, bool a_sort = false)
 		{
 			std::string result;
 			if (a_sort)
@@ -1476,7 +1484,7 @@ namespace SIE
 		static std::string GetShaderString(ShaderClass shaderClass, const RE::BSShader& shader, uint32_t descriptor, bool hashkey)
 		{
 			auto sourceShaderFile = shader.fxpFilename;
-			std::array<D3D_SHADER_MACRO, 64> defines{};
+			std::array<D3D_SHADER_MACRO, kMaxShaderDefines> defines{};
 			SIE::SShaderCache::GetShaderDefines(shader, descriptor, std::span{ defines });
 			std::string result;
 			if (hashkey)  // generate hashkey so don't include descriptor
@@ -1540,7 +1548,7 @@ namespace SIE
 			const bool debugCompile = ShaderCache::IsDebugCompile();
 
 			// prepare preprocessor defines
-			std::array<D3D_SHADER_MACRO, 64> defines{};
+			std::array<D3D_SHADER_MACRO, kMaxShaderDefines> defines{};
 			auto lastIndex = 0;
 			if (shaderClass == ShaderClass::Vertex) {
 				defines[lastIndex++] = { "VSHADER", nullptr };
@@ -1555,7 +1563,12 @@ namespace SIE
 			}
 			auto shaderDefines = globals::state->GetDefines();
 			if (!shaderDefines->empty()) {
-				for (unsigned int i = 0; i < shaderDefines->size(); i++)
+				const size_t userDefineCount = std::min(shaderDefines->size(), kMaxUserShaderDefines);
+				if (userDefineCount < shaderDefines->size()) {
+					static std::once_flag warned;
+					std::call_once(warned, [&] { logger::warn("Shader Defines lists {} entries; only the first {} are used", shaderDefines->size(), kMaxUserShaderDefines); });
+				}
+				for (size_t i = 0; i < userDefineCount; i++)
 					defines[lastIndex++] = { shaderDefines->at(i).first.c_str(), shaderDefines->at(i).second.c_str() };
 			}
 			defines[lastIndex] = { nullptr, nullptr };  // do final entry
@@ -1580,6 +1593,11 @@ namespace SIE
 			}
 			if (globals::state->enableAvoidFlowControl.load(std::memory_order_relaxed)) {
 				flags |= D3DCOMPILE_AVOID_FLOW_CONTROL;
+			}
+			if (Util::ShaderCompileFlags::SkipsOptimization(
+					shaderClass == ShaderClass::Pixel && type == RE::BSShader::Type::Lighting, debugCompile,
+					(flags & D3DCOMPILE_PARTIAL_PRECISION) != 0, (flags & D3DCOMPILE_AVOID_FLOW_CONTROL) != 0)) {
+				flags = (flags & ~D3DCOMPILE_OPTIMIZATION_LEVEL3) | D3DCOMPILE_SKIP_OPTIMIZATION;
 			}
 			if (useDiskCache) {
 				flags |= D3DCOMPILE_SKIP_VALIDATION;
@@ -2600,9 +2618,15 @@ namespace SIE
 					defines.emplace_back(name.data(), value.empty() ? nullptr : value.data());
 			}
 		}
+		standalonePending.fetch_add(1, std::memory_order_relaxed);
 		compilationSet.EnqueueAux(
 			[this, sourcePath = std::move(sourcePath), entryPoint = std::move(entryPoint),
 				defines = std::move(defines), shaderClass, onReady = std::move(onReady)]() mutable {
+				struct PendingGuard
+				{
+					std::atomic<uint32_t>& count;
+					~PendingGuard() { count.fetch_sub(1, std::memory_order_relaxed); }
+				} pendingGuard{ standalonePending };
 				auto device = globals::d3d::device;
 				auto* state = globals::state;
 				if (!device || !state) {
@@ -3137,7 +3161,7 @@ namespace SIE
 
 	std::string ShaderCache::GetDefinesString(const RE::BSShader& shader, uint32_t descriptor)
 	{
-		std::array<D3D_SHADER_MACRO, 64> defines{};
+		std::array<D3D_SHADER_MACRO, kMaxShaderDefines> defines{};
 		SIE::SShaderCache::GetShaderDefines(shader, descriptor, std::span{ defines });
 
 		return SIE::SShaderCache::MergeDefinesString(defines, true);
@@ -3932,7 +3956,8 @@ namespace SIE
 		std::scoped_lock lock(compilationMutex);
 		availableTasks.clear();
 		demandedTasks.clear();
-		pendingAuxTasks.clear();
+		// Aux closures are kept: their owners are promised exactly one callback and discard stale results themselves.
+		// Dropping them here left standalone compiles (Physical Sky, Post Processing) pending for the whole session.
 		tasksInProgress.clear();
 		processedTasks.clear();
 		totalTasks = 0;

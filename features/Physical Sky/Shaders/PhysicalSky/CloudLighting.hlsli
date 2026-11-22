@@ -26,7 +26,7 @@ float GetCloudLightScreenVisibility()
 	[unroll] for (uint i = 0; i < FlareOcclusion::SampleCount; i++)
 	{
 		const float2 sampleUV = lightUV + FlareOcclusion::GetSampleOffset(i);
-		visibleSamples += FrameBuffer::IsOutsideFrame(sampleUV) || TexDepth.Load(SharedData::ConvertUVToSampleCoord(sampleUV)) >= 1.0;
+		visibleSamples += FrameBuffer::IsOutsideFrame(sampleUV) || FrameBuffer::ToStandardDepth(TexDepth.Load(SharedData::ConvertUVToSampleCoord(sampleUV))) >= 1.0;
 	}
 	return FlareOcclusion::GetVisibility(visibleSamples);
 }
@@ -386,7 +386,7 @@ float3 ShadeCloudLighting(float3 pos, NDFInfo ndf, float extinction, float viewD
 		// Cloud-space z is relative to bottomZ; the heightmap is in world z.
 		const float3 worldPos = pos + float3(0, 0, VolumetricCloudBuffer[0].bottomZ);
 		sunTransmission *= CloudTerrainShadow(worldPos);
-		[branch] if (sunTransmission > 0.0)
+		[branch] if (CloudCascadeShadows != 0u && sunTransmission > 0.0)
 			sunTransmission *= AtmosphereShadow::SampleCascadeShadow(worldPos - FrameBuffer::CameraPosAdjust.xyz);
 	}
 #endif

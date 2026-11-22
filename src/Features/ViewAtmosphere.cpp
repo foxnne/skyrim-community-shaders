@@ -660,7 +660,6 @@ void ViewAtmosphere::ClearShaderCache()
 	lightingInputs = {};
 	prepared = ready = false;
 	lastFrame = UINT32_MAX;
-	Unbind();
 }
 
 bool ViewAtmosphere::CompositeEnabled()

@@ -220,6 +220,7 @@ public:
 	nrd::ReblurSettings reblurSettings{};
 	bool resetReblurHistory = true;
 	bool nrdReblurUsesSH = false;
+	bool reblurInitAttempted = false;
 	// Prevent downstream passes from sampling stale GI when this frame could not
 	// produce a complete SSGI output (disabled feature, shader failure, etc.).
 	bool outputReady = false;

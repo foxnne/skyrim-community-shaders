@@ -1148,7 +1148,8 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float3 dirDiffuseColor = lightsDiffuseColor;
 	float3 dirSpecularColor = 0;
 #				ifdef GRASS_OPTIMIZATIONS
-	if (complexDetail)
+	// Far (simple-shaded) complex grass keeps a sun highlight from the blade normal, without the normal map.
+	if (complex)
 #				else
 	if (complex)
 #				endif
@@ -1277,7 +1278,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	diffuseColor += transmissionRadiance;
 
 	specularColor += lightsSpecularColor;
+#				ifdef GRASS_OPTIMIZATIONS
+	specularColor *= (complexDetail ? specColor.w : 0.16) * SharedData::grassLightingSettings.SpecularStrength;
+#				else
 	specularColor *= specColor.w * SharedData::grassLightingSettings.SpecularStrength;
+#				endif
 #				if defined(WETNESS_EFFECTS)
 	specularColor += wetnessDirectSpecularColor;
 #				endif

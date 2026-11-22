@@ -5,6 +5,7 @@
 #include "Features/TerrainBlending.h"
 #include "Globals.h"
 #include "ShaderCache.h"
+#include "SnowDeformationMath.h"
 #include "State.h"
 #include "Utils/ActorUtils.h"
 #include "Utils/D3D.h"
@@ -57,7 +58,6 @@ namespace
 	constexpr uint64_t kObjectScanFrames = 12;
 	constexpr size_t kMaxObjectRefs = 256;
 	constexpr size_t kMaxObjectShapes = 3;
-	constexpr float kObjectContact = 48.0f;
 	constexpr float kHeatMelt = 0.85f;
 	constexpr float kHeatDepthScale = 0.8f;
 	constexpr float kTorchRadius = 40.0f;
@@ -848,7 +848,7 @@ bool SnowDeformation::EnsureShaders()
 {
 	if (shaderCompileFailed)
 		return false;
-	if (updateCS && copyCS && lightingHS && lightingDS && depthHS && depthDS)
+	if (updateCS && copyCS && lightingHS && lightingDS && depthHS && depthDS && probeCS && blanketCS)
 		return true;
 
 	const std::vector<std::pair<const char*, const char*>> lightingDefines;
@@ -875,7 +875,7 @@ bool SnowDeformation::EnsureShaders()
 	if (!blanketCS)
 		blanketCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\SnowDeformation\\SnowDeformationBlanketCS.hlsl", updateDefines, "cs_5_0")));
 
-	shaderCompileFailed = !(updateCS && copyCS && lightingHS && lightingDS && depthHS && depthDS);
+	shaderCompileFailed = !(updateCS && copyCS && lightingHS && lightingDS && depthHS && depthDS && probeCS && blanketCS);
 	if (shaderCompileFailed)
 		logger::error("[SnowDeformation] Shader compilation failed, prints are disabled until the shader cache is cleared");
 	return !shaderCompileFailed;
@@ -1283,7 +1283,7 @@ void SnowDeformation::GatherStamps()
 			if (auto lists = RE::ProcessLists::GetSingleton()) {
 				for (auto& handle : lists->highActorHandles) {
 					auto actor = handle.get();
-					if (actor && actor.get() != player && actor != mount && actor->Is3DLoaded())
+					if (actor && actor.get() != player && actor != mount && actor->Is3DLoaded() && !IsGhost(actor.get()))
 						actors.push_back(actor);
 				}
 			}
@@ -1415,8 +1415,10 @@ void SnowDeformation::AppendObjectStamps(std::vector<Stamp>& a_stamps)
 		if (!tes->GetLandHeight(probe, landZ))
 			continue;
 		const float drop = bottom - landZ;
-		if (drop > kObjectContact || drop < -(carve + kBelowGroundLimit))
+		const float pressReach = std::max(kGroundClearance, carve);
+		if (drop > pressReach || drop < -(carve + kBelowGroundLimit))
 			continue;
+		const float pressFactor = SnowDeformationMath::ObjectPressFactor(drop, pressReach);
 
 		const float normalZ = LandNormalZ(tes, probe, landZ);
 		const float vanillaSnow = IsVanillaSnow(tes->GetLandMaterialType(probe)) ? 1.0f : 0.0f;
@@ -1428,8 +1430,8 @@ void SnowDeformation::AppendObjectStamps(std::vector<Stamp>& a_stamps)
 			stamp.x = contact.centre.x;
 			stamp.y = contact.centre.y;
 			stamp.radius = contact.radius;
-			stamp.depth = depth;
-			stamp.rim = rim;
+			stamp.depth = depth * pressFactor;
+			stamp.rim = rim * pressFactor;
 			TrackShapeMotion(contact.key, contact.centre, false, stamp.motionX, stamp.motionY);
 			stamp.vanillaSnow = vanillaSnow;
 			stamp.road = road;
@@ -1598,7 +1600,10 @@ bool SnowDeformation::IsSinkBlocked(RE::Actor* a_actor) const
 	if (!controller)
 		return true;
 	const auto support = controller->supportBody.get();
-	return support && support->collidable.GetCollisionLayer() != RE::COL_LAYER::kTerrain;
+	if (!support)
+		return false;
+	const auto layer = support->collidable.GetCollisionLayer();
+	return layer != RE::COL_LAYER::kTerrain && layer != RE::COL_LAYER::kGround;
 }
 
 void SnowDeformation::ApplySink(RE::TESObjectREFR* a_ref, ActorSink& a_state, float a_sink)
@@ -1697,6 +1702,23 @@ void SnowDeformation::UpdateActorSinks(const std::vector<RE::ActorPtr>& a_actors
 		}
 		it = actorSinks.erase(it);
 	}
+}
+
+const SnowDeformation::RaceTraits& SnowDeformation::TraitsOf(const RE::TESRace* a_race)
+{
+	auto found = raceTraits.find(a_race->GetFormID());
+	if (found == raceTraits.end()) {
+		RaceTraits traits;
+		traits.ghost = a_race->HasKeywordString("ActorTypeGhost");
+		found = raceTraits.emplace(a_race->GetFormID(), traits).first;
+	}
+	return found->second;
+}
+
+bool SnowDeformation::IsGhost(RE::Actor* a_actor)
+{
+	auto race = a_actor->GetRace();
+	return race && TraitsOf(race).ghost;
 }
 
 void SnowDeformation::RebuildActivity(Level& a_level)

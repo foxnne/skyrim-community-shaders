@@ -267,6 +267,11 @@ private:
 		RE::bhkNiCollisionObject* object = nullptr;
 	};
 
+	struct RaceTraits
+	{
+		bool ghost = false;
+	};
+
 	struct CachedShape
 	{
 		RE::NiPointer<RE::bhkNiCollisionObject> object;
@@ -390,6 +395,8 @@ private:
 	void ApplySink(RE::TESObjectREFR* a_ref, ActorSink& a_state, float a_sink);
 	void RestoreActorSinks();
 	bool IsSinkBlocked(RE::Actor* a_actor) const;
+	const RaceTraits& TraitsOf(const RE::TESRace* a_race);
+	bool IsGhost(RE::Actor* a_actor);
 	void DispatchProbes(uint32_t a_stampCount);
 	void ReadProbes();
 	void PublishMeasurements(const std::vector<std::pair<RE::FormID, float>>& a_measurements);
@@ -473,6 +480,7 @@ private:
 	std::vector<Stamp> frameStamps;
 	std::unordered_map<const void*, TrackedShape> shapeMotion;
 	std::unordered_map<RE::FormID, bool> bootedRaces;
+	std::unordered_map<RE::FormID, RaceTraits> raceTraits;
 	std::unordered_map<RE::FormID, float> measuredSinks;
 	std::unordered_map<RE::FormID, float> gatherMeasured;
 	std::unordered_map<RE::FormID, ActorSink> actorSinks;

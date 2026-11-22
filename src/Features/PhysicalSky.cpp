@@ -166,6 +166,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	strokeCount, strokeDuration, strokeInterval, strokeDecay,
 	groundChance, cloudBaseChance, color)
 
+// PhysicalSky::Settings has 65 members, one more than the nlohmann macro takes. The macro below is the canonical list and is
+// what cmake/generate_scene_settings_catalog.py reads; it is not compiled. The two halves after it must list the same members.
+#if 0
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	PhysicalSky::Settings,
 	enabled,
@@ -189,7 +192,6 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	secundaDiskRad,
 	masserDiscBrightnessEV,
 	secundaDiscBrightnessEV,
-
 	worldspaceWhitelist,
 	groundAlbedo,
 	oceanHorizon,
@@ -234,6 +236,22 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	cloudLayer,
 	cloudNoise,
 	voxelClouds)
+#endif
+#define PSKY_SETTINGS_A enabled, enableAllExteriorCells, forceEnableAllInteriorCells, overrideDirLight, lightSkyStatics, skyStaticsBrightness, halfResApShadow, vanillaMix, trMix, apLumMix, apTrMix, cloudShadowRemapRange, sunlightColor, masserColor, secundaColor, proceduralSun, sunDiskRad, masserDiskRad, secundaDiskRad, masserDiscBrightnessEV, secundaDiscBrightnessEV, worldspaceWhitelist, groundAlbedo, oceanHorizon, oceanColor, oceanRoughness, oceanGlitter, planetRadius, atmosphereRadius, rayleighFalloff, rayleighScatter, rayleighScatterAP1
+#define PSKY_SETTINGS_B aerosolType, aerosolLoading, aerosolHumidity, aerosolFalloff, aerosolPhaseG, aerosolScatter, aerosolAbsorption, ozoneAltitude, ozoneThickness, ozoneAbsorption, ozoneAbsorptionAP1, fallbackZBottom, enableVanillaClouds, cloudRelightMix, cloudOriginalMix, silverLiningMix, silverLiningSpread, enableVolumetricClouds, lightningIntensity, lightning, rayMarchRange, shadowVolumeRange, marchStepScale, cloudBlurRadius, cloudsOnWorldMap, cloudAmbientSHOnly, cloudHalfResTrace, cloudFastReconstruction, cloudCascadeShadows, cloudMap, cloudLayer, cloudNoise, voxelClouds
+void to_json(nlohmann::json& nlohmann_json_j, const PhysicalSky::Settings& nlohmann_json_t)
+{
+	NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(NLOHMANN_JSON_TO, PSKY_SETTINGS_A))
+	NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(NLOHMANN_JSON_TO, PSKY_SETTINGS_B))
+}
+void from_json(const nlohmann::json& nlohmann_json_j, PhysicalSky::Settings& nlohmann_json_t)
+{
+	const PhysicalSky::Settings nlohmann_json_default_obj{};
+	NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(NLOHMANN_JSON_FROM_WITH_DEFAULT, PSKY_SETTINGS_A))
+	NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(NLOHMANN_JSON_FROM_WITH_DEFAULT, PSKY_SETTINGS_B))
+}
+#undef PSKY_SETTINGS_A
+#undef PSKY_SETTINGS_B
 
 namespace
 {

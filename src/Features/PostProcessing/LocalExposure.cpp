@@ -352,6 +352,14 @@ void LocalExposure::Draw(TextureInfo& inout_tex)
 	ID3D11Buffer* cb = localExposureCB->CB();
 	context->CSSetConstantBuffers(1, 1, &cb);
 
+	// The analysis pass decodes pre-exposed scene radiance with SharedData::RcpPreExposure (b5). Nothing else
+	// guarantees b5 holds SharedData on the compute stage here (same defect as the auto exposure histogram):
+	// a stale or null buffer reads as zero and Local Exposure degenerates into a uniform gain.
+	{
+		auto* sharedDataBuf = globals::state->sharedDataCB->CB();
+		context->CSSetConstantBuffers(5, 1, &sharedDataBuf);
+	}
+
 	std::array<ID3D11SamplerState*, 2> samplers = { linearSampler.get(), mirrorSampler.get() };
 	context->CSSetSamplers(0, (uint)samplers.size(), samplers.data());
 

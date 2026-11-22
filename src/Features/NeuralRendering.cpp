@@ -728,7 +728,7 @@ NeuralRendering::ProxyCurve NeuralRendering::ResolveProxyCurve() const
 
 bool NeuralRendering::IsLinearLightingActive()
 {
-	return globals::features::linearLighting.settings.enableLinearLighting && !globals::state->IsFlatWorldMapOpen();
+	return globals::features::linearLighting.IsLinearLightingActive() && !globals::state->IsFlatWorldMapOpen();
 }
 
 NeuralRendering::ColorDomain NeuralRendering::SceneColorDomain(ProxyCurve a_curve) const

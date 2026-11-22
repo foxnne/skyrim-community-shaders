@@ -40,6 +40,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 
 void ScreenSpaceReflections::RestoreDefaultSettings()
 {
+	const bool wasEnabled = settings.Enabled;
 	settings = {};
 	userSettings = settings;
 	appliedE11Overlay = GetE11Overlay();
@@ -50,6 +51,9 @@ void ScreenSpaceReflections::RestoreDefaultSettings()
 	recompileFlag = true;
 	resetReblurHistory = true;
 	outputReady = false;
+	// The SSR define is baked into the deferred composite; DrawSSR rebuilds it on the render thread.
+	if (settings.Enabled != wasEnabled)
+		queuedEnabledChange = true;
 }
 
 void ScreenSpaceReflections::DrawSettings()
@@ -124,7 +128,7 @@ void ScreenSpaceReflections::DrawSettings()
 
 		if (showAdvanced) {
 			ImGui::Separator();
-			ImGui::SliderInt(T(TKEY("max_steps"), "Max Steps"), (int*)&settings.SpecMaxSteps, 1, 256);
+			ImGui::SliderInt(T(TKEY("max_steps"), "Max Steps"), (int*)&settings.SpecMaxSteps, 1, 256, "%d", ImGuiSliderFlags_AlwaysClamp);
 			ImGui::SliderFloat(T(TKEY("thickness"), "Thickness"), &settings.SpecThickness, 0.0f, 50.0f, "%.2f");
 			ImGui::SliderFloat(T(TKEY("normal_bias"), "Normal Bias"), &settings.NormalBias, 0.0f, 1.0f, "%.2f");
 			if (auto _tt = Util::HoverTooltipWrapper()) {
@@ -407,7 +411,14 @@ void ScreenSpaceReflections::SetupNRDResources(uint32_t a_width, uint32_t a_heig
 	texNRDSpecOutput->CreateUAV(uavDesc);
 
 	nrdReblurSpecular.Shutdown();
-	nrdReblurSpecular.Init(a_width, a_height, nrd::Denoiser::REBLUR_SPECULAR, 0);
+	reblurInitAttempted = WantsReblur();
+	if (reblurInitAttempted)
+		nrdReblurSpecular.Init(a_width, a_height, nrd::Denoiser::REBLUR_SPECULAR, 0);
+}
+
+bool ScreenSpaceReflections::WantsReblur() const
+{
+	return settings.Enabled && settings.EnableREBLUR && globals::features::dynamicCubemaps.loaded;
 }
 
 void ScreenSpaceReflections::ClearShaderCache()
@@ -510,6 +521,16 @@ void ScreenSpaceReflections::DrawSSR()
 		if (nrdSvc.loaded && nrdSvc.GetResourceExtent(nrdWidth, nrdHeight) &&
 			(texNRDSpecInput->desc.Width != nrdWidth || texNRDSpecInput->desc.Height != nrdHeight))
 			SetupNRDResources(nrdWidth, nrdHeight);
+
+		if (!WantsReblur()) {
+			if (nrdReblurSpecular.IsValid()) {
+				nrdReblurSpecular.Shutdown();
+				resetReblurHistory = true;
+			}
+			reblurInitAttempted = false;
+		} else if (!reblurInitAttempted) {
+			SetupNRDResources(texNRDSpecInput->desc.Width, texNRDSpecInput->desc.Height);
+		}
 	}
 
 	if ((settings.HalfRes && CanDenoise()) != tracedHalfRes) {
@@ -521,6 +542,9 @@ void ScreenSpaceReflections::DrawSSR()
 		ClearShaderCache();
 
 	if (!(settings.Enabled && globals::features::dynamicCubemaps.loaded && ShadersOK() && texHiZDepth && texNRDSpecInput))
+		return;
+
+	if (globals::state->isMapMenuOpen)
 		return;
 
 	ZoneScoped;
@@ -601,8 +625,12 @@ void ScreenSpaceReflections::DrawSSR()
 
 		// Min-Z downsample mip chain
 		for (uint i = firstDownsampleMip; i < numHiZMips - 1; ++i) {
-			uint outW = std::max(1u, (uint)size.x >> (i + 1));
-			uint outH = std::max(1u, (uint)size.y >> (i + 1));
+			// Round up: the ray march addresses cell floor(dynamicSize / 2^mip), which is a partial cell whenever the
+			// dynamic size is not a multiple of the mip's texel size. Rounding down left that cell holding depth from
+			// whatever render scale last covered it. The shader bounds writes by the mip's real dimensions.
+			const uint shift = i + 1;
+			uint outW = std::max(1u, ((uint)size.x + (1u << shift) - 1) >> shift);
+			uint outH = std::max(1u, ((uint)size.y + (1u << shift) - 1) >> shift);
 
 			resetViews();
 			ID3D11ShaderResourceView* inSrv = hiZDepthSRVs[i].get();
@@ -733,7 +761,7 @@ ID3D11ShaderResourceView* ScreenSpaceReflections::GetOutputTexture()
 ScreenSpaceReflections::SharedData ScreenSpaceReflections::GetCommonBufferData()
 {
 	SharedData data;
-	data.Enabled = (loaded && settings.Enabled && globals::features::dynamicCubemaps.loaded && !recompileFlag && ShadersOK() && texHiZDepth && texNRDSpecInput) ? 1u : 0u;
+	data.Enabled = (loaded && settings.Enabled && globals::features::dynamicCubemaps.loaded && !recompileFlag && ShadersOK() && texHiZDepth && texNRDSpecInput && !globals::state->isMapMenuOpen) ? 1u : 0u;
 	data.SpecularMult = settings.SpecularMult;
 	data.SpecCubemapMult = settings.UseDynamicCubemapsAsFallback && globals::features::dynamicCubemaps.loaded ? settings.SpecCubemapMult : 0.0f;
 	data.pad0 = 0;

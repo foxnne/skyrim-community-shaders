@@ -8,7 +8,7 @@ struct SnowDeformation : Feature
 	virtual inline std::string GetName() override { return "Snow Deformation"; }
 	virtual std::string GetDisplayName() override { return T("feature.snow_deformation.name", "Snow Deformation"); }
 	virtual inline std::string GetShortName() override { return "SnowDeformation"; }
-	virtual std::string_view GetCategory() const override { return FeatureCategories::kLandscapeAndTextures; }
+	virtual std::string_view GetCategory() const override { return FeatureCategories::kSkyAndWeather; }
 
 	virtual std::pair<std::string, std::vector<std::string>> GetFeatureSummary() override
 	{
@@ -16,7 +16,8 @@ struct SnowDeformation : Feature
 			{ T("feature.snow_deformation.key_feature_1", "Footprints and body impressions from the player, NPCs and creatures"),
 				T("feature.snow_deformation.key_feature_2", "Works on vanilla snow textures and on Snow Cover snow"),
 				T("feature.snow_deformation.key_feature_3", "Prints fill back in over time, faster while it snows"),
-				T("feature.snow_deformation.key_feature_4", "Optional snow blanket raises snowy ground so prints become trenches down to the ground") } };
+				T("feature.snow_deformation.key_feature_4", "Optional snow blanket raises snowy ground so prints become trenches down to the ground"),
+				T("feature.snow_deformation.key_feature_5", "Mud, sand and ash take prints too, each with its own depth, shape and fade time") } };
 	}
 
 	static constexpr uint32_t kTexels = 2048;
@@ -46,13 +47,12 @@ struct SnowDeformation : Feature
 		bool Enabled = true;
 		bool IncludeNPCs = true;
 		bool IncludeObjects = true;
-		bool WeightResponse = true;
-		bool SnowSlowsMovers = false;
-		float SnowSlowStrength = 0.4f;
 		bool UseSnowCover = true;
 		bool DisplaceShadows = true;
 		bool SinkActors = true;
 		bool FirmRoads = true;
+		bool SoftGround = true;
+		bool SnowHeightVariable = true;
 		float BlanketHeight = 20.0f;
 		float Depth = 6.0f;
 		float Lifetime = 240.0f;
@@ -196,13 +196,6 @@ struct SnowDeformation : Feature
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		template <class T>
-		struct Actor_GetActorValue
-		{
-			static float thunk(RE::ActorValueOwner* a_owner, RE::ActorValue a_value);
-			static inline REL::Relocation<decltype(thunk)> func;
-		};
-
 		static void Install();
 	};
 
@@ -247,8 +240,15 @@ private:
 		float clearance = 0.0f;
 		RE::FormID owner = 0;
 		uint8_t kind = 0;
+		uint8_t ground = 0;
 		bool trail = false;
 		bool road = false;
+	};
+
+	struct SnowHeight
+	{
+		float value = 0.0f;
+		float sinceMeasure = 0.0f;
 	};
 
 	struct ActorSink
@@ -263,14 +263,6 @@ private:
 		bool applied = false;
 	};
 
-	struct ActorSlow
-	{
-		float cut = 0.0f;
-		float target = 0.0f;
-		float sinceSnow = 0.0f;
-		uint64_t frame = 0;
-	};
-
 	struct ProbeFrame
 	{
 		std::vector<RE::FormID> owners;
@@ -283,14 +275,6 @@ private:
 		RE::NiPoint3 centre;
 		float radius = 0.0f;
 		RE::bhkNiCollisionObject* object = nullptr;
-		float weight = 0.0f;
-		float area = 0.0f;
-	};
-
-	struct RaceTraits
-	{
-		bool ghost = false;
-		bool coldAdapted = false;
 	};
 
 	struct CachedShape
@@ -391,6 +375,7 @@ private:
 		uint32_t decalDraws = 0;
 		uint32_t skippedDraws = 0;
 		uint32_t layoutRejects = 0;
+		uint32_t groundStamps = 0;
 		bool snowCover = false;
 	};
 
@@ -416,15 +401,13 @@ private:
 	void ApplySink(RE::TESObjectREFR* a_ref, ActorSink& a_state, float a_sink);
 	void RestoreActorSinks();
 	bool IsSinkBlocked(RE::Actor* a_actor) const;
-	const RaceTraits& TraitsOf(const RE::TESRace* a_race);
-	bool IsGhost(RE::Actor* a_actor);
-	bool IsColdAdapted(RE::Actor* a_actor);
-	void UpdateMoverSlow(const std::vector<RE::ActorPtr>& a_actors);
-	void ClearMoverSlow();
 	void DispatchProbes(uint32_t a_stampCount);
 	void ReadProbes();
 	void PublishMeasurements(const std::vector<std::pair<RE::FormID, float>>& a_measurements);
-	void UpdateLevel(uint32_t a_index, const RE::NiPoint3& a_position, float a_decay, float a_deltaTime, float a_snowfall, bool a_sinking, bool a_gateSnowCover, bool a_skylightingReady);
+	void UpdateSnowHeights(const std::vector<RE::ActorPtr>& a_actors, float a_deltaTime);
+	uint8_t GroundKind(RE::TES* a_tes, const RE::NiPoint3& a_position);
+	void ApplyGround(Stamp& a_stamp, RE::TES* a_tes, const RE::NiPoint3& a_position);
+	void UpdateLevel(uint32_t a_index, const RE::NiPoint3& a_position, float a_decay, const float4& a_surfaceKeep, float a_deltaTime, float a_snowfall, bool a_sinking, bool a_gateSnowCover, bool a_skylightingReady);
 	void LoadRoadTextures();
 	bool IsRoad(RE::TES* a_tes, const RE::NiPoint3& a_position) const;
 	void RebuildActivity(Level& a_level);
@@ -504,15 +487,15 @@ private:
 	std::vector<Stamp> frameStamps;
 	std::unordered_map<const void*, TrackedShape> shapeMotion;
 	std::unordered_map<RE::FormID, bool> bootedRaces;
-	std::unordered_map<RE::FormID, RaceTraits> raceTraits;
-	std::unordered_map<RE::FormID, bool> coldBases;
-	std::unordered_map<RE::FormID, ActorSlow> actorSlows;
-	std::unordered_map<RE::FormID, float> ownerSnow;
-	std::unordered_map<RE::FormID, float> frameOwnerSnow;
-	std::unordered_map<RE::FormID, float> gatherOwnerSnow;
-	uint64_t slowFrame = 0;
 	std::unordered_map<RE::FormID, float> measuredSinks;
 	std::unordered_map<RE::FormID, float> gatherMeasured;
+	std::unordered_map<RE::FormID, float> measuredRaise;
+	std::unordered_map<RE::FormID, float> gatherRaise;
+	std::unordered_map<RE::FormID, SnowHeight> snowHeights;
+	std::unordered_map<const RE::TESLandTexture*, uint8_t> groundKinds;
+	float gatherRainfall = 0.0f;
+	uint32_t snowHeightActors = 0;
+	float playerSnowHeight = 0.0f;
 	std::unordered_map<RE::FormID, ActorSink> actorSinks;
 	std::vector<Contact> contactScratch;
 	std::vector<RE::ObjectRefHandle> objectRefs;
@@ -535,10 +518,6 @@ private:
 	std::atomic<bool> loadClearField = false;
 	std::atomic<bool> loadClearMotion = false;
 	bool gatherOnUpdate = false;
-	std::atomic<uint32_t> slowedMovers = 0;
-	std::atomic<float> playerSlowCut = 0.0f;
-	std::mutex slowMutex;
-	std::ptrdiff_t actorValueOwnerOffset = 0;
 
 	bool inZPrepass = false;
 	CameraKey mainCamera;

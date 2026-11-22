@@ -79,7 +79,7 @@ HistogramAutoExposure::ExposureParameters HistogramAutoExposure::GetExposurePara
 	float2 range = mix(mix(settings.AdaptationRange, settings.NightAdaptationRange, night), settings.InteriorAdaptationRange, interior);
 	float compensation = std::lerp(std::lerp(settings.ExposureCompensation, settings.NightExposureCompensation, night), settings.InteriorExposureCompensation, interior);
 	ExposureParameters parameters{
-		.LuminanceRange = { exp2(range.x - 3.0f), exp2(range.y - 3.0f) },
+		.LuminanceRange = { exp2(std::min(range.x, range.y) - 3.0f), exp2(std::max(range.x, range.y) - 3.0f) },
 		.CompensationEV = compensation,
 	};
 	if (const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr) {

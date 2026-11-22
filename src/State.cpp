@@ -257,7 +257,7 @@ void State::Draw()
 			}
 		}
 
-		if ((globals::menu->overlayVisible && globals::features::performanceOverlay.loaded && globals::features::performanceOverlay.IsOverlayVisible()) ||
+		if ((globals::features::performanceOverlay.loaded && globals::features::performanceOverlay.IsOverlayVisible()) ||
 			frameCount < drawStatsUntilFrame.load(std::memory_order_relaxed))
 			Debug();
 
@@ -352,6 +352,17 @@ State::TonemapOwner State::GetTonemapOwner()
 	return *tonemapOwner;
 }
 
+void State::SetPostProcessingFallback(bool fallback)
+{
+	postProcessingFallback = fallback;
+	const auto owner = static_cast<uint>(fallback ? TonemapOwner::kPostProcessingFallback : GetTonemapOwner());
+	if (sharedData.TonemapOwner == owner)
+		return;
+
+	sharedData.TonemapOwner = owner;
+	sharedDataCB->Update(sharedData);
+}
+
 bool State::HandlePostProcessing(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_output)
 {
 	if (GetTonemapOwner() != TonemapOwner::kEffects11)
@@ -427,6 +438,7 @@ void State::Reset()
 	worldRenderedThisFrame = false;
 	globals::CheckD3DHooks();
 	tonemapOwner.reset();
+	postProcessingFallback = false;
 	// Publish for off-thread readers (e.g. the MCP listener thread).
 	frameCountAtomic.store(frameCount, std::memory_order_relaxed);
 
@@ -546,7 +558,7 @@ namespace
 	{
 		json data = json::object();
 		for (const auto* info : BaselineManager::GetSingleton()->GetFeatureFiles(featureShortName))
-			if ((packId.empty() || info->packId == packId) && info->unknownKeys.empty())
+			if (packId.empty() || info->packId == packId)
 				Util::Settings::MergeSettings(data, info->values);
 		return data;
 	}
@@ -627,8 +639,10 @@ void State::Load(bool a_allowReload)
 		}
 		json merged = BuildFeatureBase(feature);
 		// A value whose type changed between versions would make LoadSettings throw and lose every edit.
+		// Checked against the defaults: a Baseline may hold a boolean where the feature stores a number.
 		std::vector<std::string> mismatched;
-		Util::Settings::EraseMismatchedSettings(edits, merged, "", mismatched);
+		if (const auto defaults = defaultSettings.find(name); defaults != defaultSettings.end())
+			Util::Settings::EraseMismatchedSettings(edits, *defaults, "", mismatched);
 		for (const auto& path : mismatched)
 			logger::warn("Dropped {} setting '{}': its saved type no longer matches", name, path);
 		featureBases[name] = merged;
@@ -1606,7 +1620,8 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		}
 	}
 	{
-		SharedDataCB data{};
+		auto& data = sharedData;
+		data = {};
 		data.PreExposure = preExposure;
 		data.RcpPreExposure = 1.0f / preExposure;
 		data.PreviousPreExposure = previousPreExposure;
@@ -1743,7 +1758,7 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		data.SunColor = lighting.sun.GetColor();
 		data.MasserColor = lighting.masser.GetColor();
 		data.SecundaColor = lighting.secunda.GetColor();
-		data.TonemapOwner = static_cast<uint>(GetTonemapOwner());
+		data.TonemapOwner = static_cast<uint>(postProcessingFallback ? TonemapOwner::kPostProcessingFallback : GetTonemapOwner());
 		sharedDataCB->Update(data);
 	}
 

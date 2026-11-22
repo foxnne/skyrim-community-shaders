@@ -19,7 +19,7 @@
         "LightLimitFix": 3,
         "LinearLighting": 16,
         "NeuralRendering": 60,
-        "PerformanceOverlay": 12,
+        "PerformanceOverlay": 11,
         "PhysicalSky": 163,
         "PostProcessing": 319,
         "RainRefraction": 3,

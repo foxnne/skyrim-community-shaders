@@ -17,6 +17,7 @@
 #include "I18n/I18n.h"
 #include "LinearLighting.h"
 #include "PostProcessing/ColorSpace.h"
+#include "PostProcessingMode.h"
 #include "SkySync.h"
 #include "TerrainShadows.h"
 
@@ -186,6 +187,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	sunDiskRad,
 	masserDiskRad,
 	secundaDiskRad,
+	masserDiscBrightnessEV,
+	secundaDiscBrightnessEV,
 
 	worldspaceWhitelist,
 	groundAlbedo,
@@ -223,6 +226,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	marchStepScale,
 	cloudBlurRadius,
 	cloudsOnWorldMap,
+	cloudAmbientSHOnly,
+	cloudHalfResTrace,
+	cloudFastReconstruction,
+	cloudCascadeShadows,
 	cloudMap,
 	cloudLayer,
 	cloudNoise,
@@ -295,6 +302,8 @@ namespace
 
 	constexpr float kSunIlluminanceSpeed = 0.1f;
 	constexpr float kMoonIlluminanceSpeed = 0.001f;
+	constexpr float kMoonDiscBrightnessMinEV = -4.f;
+	constexpr float kMoonDiscBrightnessMaxEV = 20.f;
 
 	/** @brief Zeroes negative or non-finite channels of a light color, since light cannot be negative. */
 	void ClampLightColor(float3& color)
@@ -550,6 +559,14 @@ void PhysicalSky::RestoreDefaultSettings()
 	sceneAerosolPicker = {};
 }
 
+void PhysicalSky::Settings::SanitizePlanet()
+{
+	const Settings defaults{};
+	planetRadius = std::isfinite(planetRadius) ? std::clamp(planetRadius, 100.f, 1.0e5f) : defaults.planetRadius;
+	atmosphereRadius = std::max(std::isfinite(atmosphereRadius) ? atmosphereRadius : defaults.atmosphereRadius, planetRadius + 1.f);
+	shadowVolumeRange = std::isfinite(shadowVolumeRange) ? std::clamp(shadowVolumeRange, 1.f, 16.f) : defaults.shadowVolumeRange;
+}
+
 void PhysicalSky::LoadSettings(json& o_json)
 {
 	// The aerosol mixture, loading and humidity are authoring inputs: the value the shader reads and
@@ -563,6 +580,7 @@ void PhysicalSky::LoadSettings(json& o_json)
 	settings = o_json;
 	settings.cloudBlurRadius = std::clamp(settings.cloudBlurRadius, 0, 2);
 	settings.SanitizeLightning();
+	settings.SanitizePlanet();
 	for (auto* color : { &settings.sunlightColor, &settings.masserColor, &settings.secundaColor })
 		ClampLightColor(*color);
 	if (settings.aerosolType != loadedType ||
@@ -594,13 +612,16 @@ void PhysicalSky::Settings::ApplyAerosolOptics()
 
 bool PhysicalSky::IsActive() const
 {
-	return loaded && settings.enabled && !globals::features::effects11.OwnsFeature(E11Handoff::Feature::PhysicalSky);
+	// Needs Linear Lighting, which only Post Processing mode runs.
+	return loaded && settings.enabled && PostProcessingMode::Get() == PostProcessingMode::Mode::PostProcessing;
 }
 
 void PhysicalSky::DrawSettings()
 {
-	const Util::LockedSection enbLock(globals::features::effects11.OwnsFeature(E11Handoff::Feature::PhysicalSky),
-		T("common.settings_managed_by_enb", "This setting is managed by Effects 11."));
+	const Util::LockedSection modeLock(PostProcessingMode::Get() != PostProcessingMode::Mode::PostProcessing,
+		globals::features::effects11.OwnsFeature(E11Handoff::Feature::PhysicalSky) ?
+			T("common.settings_managed_by_enb", "This setting is managed by Effects 11.") :
+			T(TKEY("requires_post_processing"), "Physical Sky requires Post Processing mode, which runs Linear Lighting. Select Post Processing on the Post Processing page."));
 
 	if (SceneWidgetInterceptor::IsArmed())
 		ImGui::TextWrapped("%s", T(TKEY("scene_settings_hint"), "Scene settings control sunlight, atmosphere and the cloud weather: coverage, altitude, shape, motion, lighting and cirrus. Map source, noise and rendering quality stay global and are hidden while editing a scene. Interior settings require Physical Sky to be enabled for interiors."));
@@ -806,6 +827,12 @@ void PhysicalSky::SettingsCelestials()
 			ImGui::TextUnformatted(T(TKEY("moon_illuminance_hint"), "Illuminance on a surface perpendicular to the moon, before atmospheric extinction. Scales all channels together, preserving the color."));
 	};
 
+	const auto drawMoonDiscBrightness = [](float& brightnessEV) {
+		ImGui::SliderFloat(T(TKEY("moon_disc_brightness"), "Disc Brightness"), &brightnessEV, kMoonDiscBrightnessMinEV, kMoonDiscBrightnessMaxEV, "%+.1f EV", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextUnformatted(T(TKEY("moon_disc_brightness_hint"), "Gain on the visible moon only, in stops. The moon's light is set by Lunar Illuminance."));
+	};
+
 	ImGui::SeparatorText(T(TKEY("masser"), "Masser"));
 	{
 		ImGui::PushID("Masser");
@@ -815,6 +842,7 @@ void PhysicalSky::SettingsCelestials()
 			ImGui::Text("%s", T(TKEY("light_color_hint"), "Light color before it passes through the atmosphere (extraterrestrial radiance)."));
 		drawMoonIlluminance(settings.masserColor);
 		ImGui::SliderAngle(T(TKEY("disk_angular_radius"), "Disk Angular Radius"), &settings.masserDiskRad, 0.05f, 30.f, "%.2f deg", ImGuiSliderFlags_AlwaysClamp);
+		drawMoonDiscBrightness(settings.masserDiscBrightnessEV);
 		ImGui::PopID();
 	}
 
@@ -827,6 +855,7 @@ void PhysicalSky::SettingsCelestials()
 			ImGui::Text("%s", T(TKEY("light_color_hint"), "Light color before it passes through the atmosphere (extraterrestrial radiance)."));
 		drawMoonIlluminance(settings.secundaColor);
 		ImGui::SliderAngle(T(TKEY("disk_angular_radius"), "Disk Angular Radius"), &settings.secundaDiskRad, 0.05f, 30.f, "%.2f deg", ImGuiSliderFlags_AlwaysClamp);
+		drawMoonDiscBrightness(settings.secundaDiscBrightnessEV);
 		ImGui::PopID();
 	}
 }
@@ -975,7 +1004,11 @@ void PhysicalSky::SettingsAtmosphere()
 		ImGui::SliderFloat(T(TKEY("ocean_glitter"), "Sun Glitter"), &settings.oceanGlitter, 0.f, 2.f, "%.2f");
 		ImGui::EndDisabled();
 		ImGui::InputFloat(T(TKEY("planet_radius"), "Planet Radius"), &settings.planetRadius, 1.f, 100000.f, "%.1f km");
+		if (ImGui::IsItemDeactivatedAfterEdit())
+			settings.SanitizePlanet();
 		ImGui::InputFloat(T(TKEY("atmosphere_radius"), "Atmosphere Radius"), &settings.atmosphereRadius, 1.f, 100000.f, "%.1f km");
+		if (ImGui::IsItemDeactivatedAfterEdit())
+			settings.SanitizePlanet();
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::Text("%s", T(TKEY("planet_radius_is_the_distance_from_the_planet"),
 								  "Planet radius is the distance from the planet center to sea level.\n"
@@ -1622,16 +1655,53 @@ void PhysicalSky::DrawCloudQualitySection()
 	if (ImGui::CollapsingHeader(T(TKEY("cloud_quality"), "Quality & Performance"), ImGuiTreeNodeFlags_SpanAvailWidth)) {
 		Util::Text::WrappedSecondary("%s", T(TKEY("cloud_quality_desc"),
 											   "Global rendering cost. A shorter ray or shadow range and a larger march step cost less; smaller steps keep more detail at a higher cost."));
+		// The section returns early while a Scene Manager replica borrows this panel, since presets write several settings at once.
+		if (ImGui::BeginTable("CloudQualityPresets", 3)) {
+			const auto drawPresetButton = [this](const char* label, const CloudQualityPreset& preset) {
+				ImGui::TableNextColumn();
+				if (Util::Button(label, { -1, 0 })) {
+					settings.rayMarchRange = preset.rayMarchRange;
+					settings.shadowVolumeRange = preset.shadowVolumeRange;
+					settings.marchStepScale = preset.marchStepScale;
+					settings.cloudBlurRadius = preset.cloudBlurRadius;
+					settings.cloudAmbientSHOnly = preset.cloudAmbientSHOnly;
+					settings.cloudHalfResTrace = preset.cloudHalfResTrace;
+					settings.cloudFastReconstruction = preset.cloudFastReconstruction;
+					settings.cloudCascadeShadows = preset.cloudCascadeShadows;
+				}
+				if (auto _tt = Util::HoverTooltipWrapper())
+					ImGui::Text(T(TKEY("cloud_quality_preset_tooltip"), "Ray March Range: %.1f km\nShadow Volume Range: %.1f km\nCloud March Step Scale: %.2f\nCloud Blur Radius: %d px"),
+						preset.rayMarchRange, preset.shadowVolumeRange, preset.marchStepScale, preset.cloudBlurRadius);
+			};
+			drawPresetButton(T(TKEY("cloud_quality_low"), "Low"), kCloudQualityLow);
+			drawPresetButton(T(TKEY("cloud_quality_medium"), "Medium"), kCloudQualityMedium);
+			drawPresetButton(T(TKEY("cloud_quality_high"), "High"), kCloudQualityHigh);
+			ImGui::EndTable();
+		}
+
+		ImGui::Checkbox(T(TKEY("cloud_ambient_sh_only"), "Approximate Ambient Occlusion"), &settings.cloudAmbientSHOnly);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextWrapped("%s", T(TKEY("cloud_ambient_sh_only_desc"), "Use sky spherical harmonics and a local density estimate for ambient shading. Large clouds lose some interior shadowing and light bounce."));
+		ImGui::Checkbox(T(TKEY("cloud_half_res_trace"), "Half-Resolution Cloud Trace"), &settings.cloudHalfResTrace);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextWrapped("%s", T(TKEY("cloud_half_res_trace_desc"), "Trace one ray per 8x8 pixel block each frame. Thin cloud edges and silhouettes resolve less precisely."));
+		ImGui::Checkbox(T(TKEY("cloud_fast_reconstruction"), "Fast Cloud Reconstruction"), &settings.cloudFastReconstruction);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextWrapped("%s", T(TKEY("cloud_fast_reconstruction_desc"), "Simplify temporal reconstruction and use a four-sample filter at a 2 px blur radius. Moving cloud edges may trail or soften."));
+		ImGui::Checkbox(T(TKEY("cloud_cascade_shadows"), "Scene Shadows on Clouds"), &settings.cloudCascadeShadows);
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::TextWrapped("%s", T(TKEY("cloud_cascade_shadows_desc"), "Sample the directional shadow map so nearby objects shadow low clouds. Terrain shadows still apply when off."));
+
 		ImGui::SliderFloat(T(TKEY("ray_march_range"), "Ray March Range"), &settings.rayMarchRange, 1.f, 64.f, "%.1f km");
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::Text("%s", T(TKEY("ray_march_range_desc"), "Maximum low-cloud distance from the camera, including clear space before and between clouds."));
-		ImGui::SliderFloat(T(TKEY("shadow_volume_range"), "Shadow Volume Range"), &settings.shadowVolumeRange, 1.f, 16.f, "%.1f km");
+		ImGui::SliderFloat(T(TKEY("shadow_volume_range"), "Shadow Volume Range"), &settings.shadowVolumeRange, 1.f, 16.f, "%.1f km", ImGuiSliderFlags_AlwaysClamp);
 		ImGui::SliderFloat(T(TKEY("cloud_march_step_scale"), "Cloud March Step Scale"), &settings.marchStepScale, 0.125f, 2.f, "%.3f", ImGuiSliderFlags_Logarithmic);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextWrapped("%s", T(TKEY("cloud_march_step_scale_desc"), "Step length multiplier. Larger steps cost less and lose thin detail; smaller steps cost more and resolve thin detail."));
 		ImGui::SliderInt(T(TKEY("cloud_blur_radius"), "Cloud Blur Radius"), &settings.cloudBlurRadius, 0, 2, "%d px", ImGuiSliderFlags_AlwaysClamp);
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextWrapped("%s", T(TKEY("cloud_blur_radius_desc"), "Final blur radius in internal rendering pixels, adjusted by cloud distance. 0 skips the blur pass; 1 is the default; 2 gives a wider blur."));
+			ImGui::TextWrapped("%s", T(TKEY("cloud_blur_radius_desc"), "Final blur radius in internal rendering pixels, adjusted by cloud distance. 0 skips the blur pass; 2 gives the widest blur."));
 		ImGui::Checkbox(T(TKEY("clouds_on_world_map"), "Volumetric Clouds on World Map"), &settings.cloudsOnWorldMap);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::TextWrapped("%s", T(TKEY("clouds_on_world_map_desc"), "Ray-march the volumetric clouds over the world map as well, with the same temporal smoothing as in the game, so local cloud layers such as a ring around the coast show there. The map camera flies up to 1.6 km and can sit in the low deck. Voxel clouds and lightning stay off on the map. Off = no volumetric clouds on the map, as before."));
@@ -1692,7 +1762,8 @@ void PhysicalSky::DrawDebugSection()
 		ImGui::SliderFloat(T(TKEY("view_scale"), "View Scale"), &debugScale, 0.1f, 1.f);
 
 		static const char* cubeFaces[] = { "+X", "-X", "+Y", "-Y", "+Z", "-Z" };
-		if (ImGui::SliderInt(T(TKEY("cubemap_face"), "Cubemap Face"), &debugCubeFace, 0, 5, cubeFaces[debugCubeFace]))
+		debugCubeFace = std::clamp(debugCubeFace, 0, 5);
+		if (ImGui::SliderInt(T(TKEY("cubemap_face"), "Cubemap Face"), &debugCubeFace, 0, 5, cubeFaces[debugCubeFace], ImGuiSliderFlags_AlwaysClamp))
 			debugCubeFaceSrvs.clear();
 
 		if (ImGui::TreeNode(T(TKEY("sky"), "Sky"))) {
@@ -2004,23 +2075,25 @@ bool PhysicalSky::ShadersOK()
 	// path still verifies every texture before binding.
 	const bool ndfReady = (ndfManager.texHeight && ndfManager.texModeling && ndfManager.generatorProgram && ndfManager.noiseProgram);
 	const bool cirrusMapsReady = !settings.cloudLayer.cirrus.enabled || cirrusMapManager.ShadersReady(settings.cloudLayer.cirrus);
+	const bool ambientShadersOk = settings.cloudAmbientSHOnly ||
+	                              (csCloudAmbientLighting && csCloudAmbientDensity && csCloudAmbientBoundary && csCloudAmbientSweep &&
+									  csCloudAmbientSweepFar && csCloudAmbientProject && csCloudAmbientLayout && csCloudAmbientView &&
+									  (!voxelCloudManager.Count() || csCloudAmbientDensityVoxel));
+	const bool reconstructionShadersOk = csVolFilter &&
+	                                     (settings.cloudFastReconstruction ? csVolReprojectFast && csVolFilterWideFast :
+																			 csVolReproject && csVolFilterWide);
 	bool volumetricShadersOk = !VolumetricCloudsEnabled() ||
 	                           (vsCloudBoundary && psCloudBoundary && texCloudBoundary && cloudBoundaryCB && cloudBoundaryIndices && cloudBoundaryBlend && cloudBoundaryRasterizer && cloudBoundaryDepth &&
 								   csCloudHeightBounds && csCloudHeightBoundsReduce && texCloudHeightBounds && texCloudHeightBoundsTiles && texCloudWeatherBounds &&
-								   csCloudAmbientLighting && texCloudAmbientLighting &&
-								   csCloudAmbientDensity && csCloudAmbientBoundary && csCloudAmbientSweep && csCloudAmbientSweepFar && csCloudAmbientProject && csCloudAmbientLayout && csCloudAmbientView && cloudAmbientVolumeCB &&
-								   texCloudAmbientView[0] && texCloudAmbientView[1] && texCloudAmbientView[2] && texCloudAmbientView[3] &&
-								   texCloudAmbientDensity && texCloudAmbientSweep && texCloudAmbientBoundary && texCloudAmbientLayout[0] && texCloudAmbientLayout[1] &&
-								   texCloudAmbientSource[0][0] && texCloudAmbientSource[0][1] && texCloudAmbientSource[1][0] && texCloudAmbientSource[1][1] &&
-								   texCloudAmbientSource[2][0] && texCloudAmbientSource[2][1] && texCloudAmbientSource[3][0] && texCloudAmbientSource[3][1] &&
-								   csVolMainView && csUpperView && csUpperSunDepth && texUpperSunDepth && csVolMainWithoutStorm && csVolMainSingleVolcanic && csStormTiles && texStormTiles && csVolFilter && csVolFilterWide && csVolReproject && csVolCubeReproject && csVolShadowVolume && csVolShadowResample && texShadowVolumeRaw && csCloudShadowMean && csCloudShadowMeanVolcanic && texCloudShadowMean && csVolCubemap && csVolAmbientSH && csCloudAmbientReduce && texVolCloudAmbientSH && texCloudAmbientPartial &&
+								   ambientShadersOk && cloudAmbientVolumeCB && reconstructionShadersOk &&
+								   csVolMainView && csUpperView && csUpperSunDepth && texUpperSunDepth && csVolMainWithoutStorm && csVolMainSingleVolcanic && csStormTiles && texStormTiles && csVolCubeReproject && csVolShadowVolume && csVolShadowResample && texShadowVolumeRaw && csCloudShadowMean && csCloudShadowMeanVolcanic && texCloudShadowMean && csVolCubemap && csVolAmbientSH && csCloudAmbientReduce && texVolCloudAmbientSH && texCloudAmbientPartial &&
 								   texVolTr && texVolLum && texVolAux && texVolLowTr && texVolLowLum && texVolLowAux &&
 								   texVolFilteredTr && texVolFilteredLum && texVolFilteredAux &&
 								   texVolHistoryTr && texVolHistoryLum && texVolHistoryAux && texVolCubeTr && texVolCubeLum &&
 								   texVolCubeAux && texVolCubeHistoryTr && texVolCubeHistoryLum && texVolCubeHistoryAux &&
 								   texVolCubeTraceTr && texVolCubeTraceLum && texVolCubeTraceAux &&
 								   texShadowVolume && baseShapeNoiseSrv && cloudProfileLutSrv && cloudAdjustmentLutSrv && ndfReady && cirrusMapsReady);
-	const bool voxelShadersOk = !voxelCloudManager.Count() || (cloudDispatchCb && csVoxelView && csVoxelLighting && csVolCubemapVoxel && csVolShadowVoxel && csCloudAmbientDensityVoxel && csCloudShadowMeanVoxel &&
+	const bool voxelShadersOk = !voxelCloudManager.Count() || (cloudDispatchCb && csVoxelView && csVoxelLighting && csVolCubemapVoxel && csVolShadowVoxel && csCloudShadowMeanVoxel &&
 																  texVoxelTraceTr && texVoxelTraceLum && texVoxelTraceAux && texVoxelTraceMotion && texVoxelTraceLightning);
 	return baseShadersOk && volumetricShadersOk && voxelShadersOk;
 }
@@ -2249,6 +2322,12 @@ void PhysicalSky::Reset()
 		settings.oceanHorizon ? 1.f : 0.f };
 	cbData.oceanParams = { std::isfinite(settings.oceanRoughness) ? std::clamp(settings.oceanRoughness, 0.002f, 0.2f) : 0.03f,
 		std::isfinite(settings.oceanGlitter) ? std::clamp(settings.oceanGlitter, 0.f, 4.f) : 1.f, 0.f, 0.f };
+	cbData.diskBrightness = {
+		1.f,
+		std::exp2(std::clamp(settings.masserDiscBrightnessEV, kMoonDiscBrightnessMinEV, kMoonDiscBrightnessMaxEV)),
+		std::exp2(std::clamp(settings.secundaDiscBrightnessEV, kMoonDiscBrightnessMinEV, kMoonDiscBrightnessMaxEV)),
+		1.f
+	};
 	if (const auto* sky = globals::game::sky; sky && sky->root) {
 		const auto& viewer = sky->root->world.translate;
 		const auto sunTan = sky->sun ? Util::GetBillboardHalfTan(sky->sun->sunBase.get(), viewer, 0.f) : 0.f;
@@ -2407,6 +2486,9 @@ void PhysicalSky::Prepass()
 				{ "textures", ndfTexManager.revision },
 				{ "skipShapeNoise", settings.cloudNoise.skipShapeNoise },
 				{ "useVoxelNoise", settings.cloudNoise.useVoxelNoise },
+				{ "cloudAmbientSHOnly", settings.cloudAmbientSHOnly },
+				{ "cloudHalfResTrace", settings.cloudHalfResTrace },
+				{ "cloudFastReconstruction", settings.cloudFastReconstruction },
 				{ "middleEnabled", settings.cloudLayer.middle.enabled },
 				{ "middleDetailMode", settings.cloudLayer.middle.detailMode },
 				{ "cirrusEnabled", settings.cloudLayer.cirrus.enabled },
@@ -2698,18 +2780,25 @@ void PhysicalSky::RestoreGrassSampler()
 
 void PhysicalSky::ModifyWater()
 {
+	if (waterSamplerModified)
+		RestoreWaterSampler();
 	waterSamplerModified = cbData.enabled != 0;
 	if (!waterSamplerModified)
 		return;
 	auto context = globals::d3d::context;
 	context->PSGetSamplers(13, 1, originalPSWaterSampler.put());
-
-	auto& samplerModifiedBits = globals::game::shadowState->GetRuntimeData().PSSamplerModifiedBits;
-	originalPSWaterSamplerModifiedBits = samplerModifiedBits & (1u << 13);
-	samplerModifiedBits &= ~(1u << 13);
-
 	auto sampler = sampSv.get();
 	context->PSSetSamplers(13, 1, &sampler);
+}
+
+void PhysicalSky::HoldWaterSampler()
+{
+	if (!waterSamplerModified)
+		return;
+	// The renderer re-binds slots marked modified when it flushes before a draw: drop s13's so ours stays for the batch.
+	auto& samplerModifiedBits = globals::game::shadowState->GetRuntimeData().PSSamplerModifiedBits;
+	originalPSWaterSamplerModifiedBits |= samplerModifiedBits & (1u << 13);
+	samplerModifiedBits &= ~(1u << 13);
 }
 
 void PhysicalSky::RestoreWaterSampler()
@@ -2751,11 +2840,19 @@ void PhysicalSky::Hooks::BSGrassShader_RestoreGeometry::thunk(RE::BSShader* This
 void PhysicalSky::Hooks::BSWaterShader_SetupGeometry::thunk(RE::BSShader* This, RE::BSRenderPass* Pass, uint32_t RenderFlags)
 {
 	func(This, Pass, RenderFlags);
-	globals::features::physicalSky.ModifyWater();
+	globals::features::physicalSky.HoldWaterSampler();
 }
 
-void PhysicalSky::Hooks::BSWaterShader_RestoreGeometry::thunk(RE::BSShader* This, RE::BSRenderPass* Pass, uint32_t RenderFlags)
+bool PhysicalSky::Hooks::BSWaterShader_SetupTechnique::thunk(RE::BSShader* This, uint32_t Technique)
 {
-	func(This, Pass, RenderFlags);
+	const bool ok = func(This, Technique);
+	if (ok)
+		globals::features::physicalSky.ModifyWater();
+	return ok;
+}
+
+void PhysicalSky::Hooks::BSWaterShader_RestoreTechnique::thunk(RE::BSShader* This, uint32_t Technique)
+{
 	globals::features::physicalSky.RestoreWaterSampler();
+	func(This, Technique);
 }

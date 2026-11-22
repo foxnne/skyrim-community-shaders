@@ -78,6 +78,31 @@ grew, so every shader must be rebuilt against the new `SharedData.hlsli`.
 | Enable LOD shadows (`EnableLODShadows`) | **on** (upstream: off) | |
 | GPU update budget (`UpdateBudgetMs`) | 0.1 ms | 0.01 - 0.4 |
 | Depth bias (`DepthBias`) | 8 units | 0 - 64 |
+| Texel bias (`TexelBias`) | 1 texel | 0 - 4 |
+| Tree crown bias (`CrownBias`) | 256 units | 0 - 1024 |
+| Light direction step (`DirectionStepDegrees`) | 0.5 degrees | 0 - 2 |
+| Far map limit (`FarMapLimit`) | 0 (none) | 0 - 1048576 |
+
+## Stability changes (branch `foxnne/lod-shadows-stability`)
+
+Not run in game either. What changed against the port above:
+
+- **Held light direction.** Each map is drawn for a direction that stays fixed until the light has moved
+  a step (far map: the setting, middle: half, near: a quarter), then moves half a step ahead of the
+  light and the map fades to it. Between steps a redraw (camera moved, scene changed, cache expired)
+  lands on the same texel and depth grid, so shadow edges do not crawl. The step grows with the measured
+  angular speed of the light so that no map retargets more than once per round of redraws plus fade.
+- **Jumps of the light** (wait, sleep, set gamehour): maps more than 4 degrees and 3 steps off fade out
+  over 0.5 s, work in progress for the old direction is dropped, and the new maps are drawn within the
+  budget and fade in. Nothing redraws all maps in one frame any more except the debug switch, and the
+  budget no longer scales with the timescale.
+- **Bias.** `DepthBias` plus `TexelBias` texels of the map plus 1.5 steps of D16. Crowns of object LOD
+  trees (Tree Wind `LODTreeCrown`) are looked up `CrownBias` units toward the light and without the
+  receiver plane, so they are not shaded by themselves.
+- **Far map** keeps its size while the casters need up to 4 cells less, and can be capped.
+- **CPU.** The LOD roots are scanned with the loaded references every 4th frame (every 16th while a map
+  is being drawn) instead of every frame. The caster list is built once per scene hash and each map
+  only filters it; before, every map start walked every geometry.
 
 Debug section: valid maps, caster counts, GPU timings, "redraw all maps every frame", history blend
 and scan throttle toggles, "Rebuild maps".
@@ -85,8 +110,8 @@ and scan throttle toggles, "Rebuild maps".
 ## Expected cost
 
 - VRAM: 18 slices of 2048 x 2048 R16 = about 151 MB.
-- GPU update: capped by the budget (0.1 ms per frame by default); a full refresh of all three maps
-  happens on load, worldspace change and after a time jump.
+- GPU update: capped by the budget (0.1 ms per frame by default). See "Stability changes": no full
+  refresh in one frame.
 - CPU: the loaded-reference walk runs every 4th frame and reuses cached geometry per reference, with a
   full walk every 8th scan or on a cell change.
 - Sampling: per lit exterior pixel one 4-tap gather per map it falls in (usually one, two in the 5%

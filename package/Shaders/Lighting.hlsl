@@ -3196,9 +3196,21 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float3 worldShadowDy = 0.0;
 #	endif
 
+	float3 worldShadowOffset = FrameBuffer::CameraPosAdjust.xyz;
+#	if defined(LOD_SHADOWS) && defined(LOD_TREE_LIGHTING)
+	// A crown in object LOD is a few texels of the far maps and no plane: it is looked up a crown radius toward
+	// the light and without the receiver plane, so the terrain and other trees shade it and it does not shade
+	// itself (lodTreeOcclusion stands for that)
+	if (lodTreeCrown) {
+		worldShadowOffset += DirLightDirection.xyz * LODShadows::GetCrownBias();
+		worldShadowDx = 0.0;
+		worldShadowDy = 0.0;
+	}
+#	endif
+
 	// Apply world shadow (LOD shadows, terrain shadows, cloud shadows) directly to light color
 	if (inWorld || inReflection)
-		dirLightColor *= ShadowSampling::GetWorldShadow(input.WorldPosition.xyz, FrameBuffer::CameraPosAdjust.xyz, cloudScatter, worldShadowDx, worldShadowDy);
+		dirLightColor *= ShadowSampling::GetWorldShadow(input.WorldPosition.xyz, worldShadowOffset, cloudScatter, worldShadowDx, worldShadowDy);
 
 	float dirLightAngle = dot(worldNormal.xyz, DirLightDirection.xyz);
 

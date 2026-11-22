@@ -159,13 +159,23 @@ private:
 	void Collect(RE::NiAVObject* a_object, bool a_ignoreAppCulling = false, bool a_loadedObject = false);
 	void AddCaster(RE::BSGeometry* a_geometry);
 	void BeginMap(uint32_t a_index, const RE::NiPoint3& a_center, const RE::NiPoint3& a_direction);
-	void UpdateMaps(const RE::NiPoint3& a_center, const RE::NiPoint3& a_direction, bool a_refreshImmediately);
+	void UpdateMaps(const RE::NiPoint3& a_center, bool a_refreshImmediately);
+	/** @brief Rebuilds the caster list of the collected scene; BeginMap filters it per map. */
+	void BuildSceneCasters();
+	/** @brief Moves the light direction each map is drawn for, in steps, and drops work a jump of the light made useless. */
+	void HoldDirections(const RE::NiPoint3& a_direction, bool a_follow);
+	/** @brief Angle in radians the light moves before the map takes a new direction; 0 follows it. */
+	float DirectionStep(uint32_t a_index) const;
+	/** @brief Angle between the light and the direction the map in use was drawn for. */
+	float DirectionOffsetDegrees(uint32_t a_index) const;
 	void RenderBatch(bool a_refreshImmediately);
 	void CaptureDistantDepth();
 	void ResolveTimings();
 	float GetHistoryBlend(uint32_t a_index) const;
 	void PublishCompletedMaps(bool a_refreshImmediately);
 	bool NeedsUpdate(uint32_t a_index, const RE::NiPoint3& a_position, const RE::NiPoint3& a_direction) const;
+	/** @brief True for a map drawn for a light direction the light has since jumped away from. */
+	bool IsStale(const Map& a_map, uint32_t a_index) const;
 	bool Intersects(const Caster& a_caster) const;
 	ID3D11InputLayout* GetLayout(const Caster& a_caster);
 
@@ -192,6 +202,25 @@ private:
 	float4 pendingLandBounds{};
 	std::vector<RE::NiPointer<RE::BSGeometry>> visibleGeometry;
 	std::vector<Caster> casters;
+	/** @brief Every caster of the collected scene, kept until the scene hash changes or the cache expires. */
+	struct SceneCasters
+	{
+		std::vector<Caster> casters;
+		uint32_t loadedStart = 0;
+		uint64_t scene = 0;
+		uint32_t frame = 0;
+		bool terrainSupported = true;
+		bool valid = false;
+	};
+	SceneCasters sceneCasters;
+	uint32_t sceneCasterBuilds = 0;
+	RE::NiPoint3 lightDirection{};
+	std::array<RE::NiPoint3, kMapCount> heldDirections{};
+	std::array<float, kMapCount> mapFades{};
+	double directionSpeed = 0;
+	double directionWindowAngle = 0;
+	double directionWindowMs = 0;
+	uint32_t directionChanges = 0;
 	std::vector<RE::NiPointer<RE::BSGeometry>> loadedGeometry;
 	ankerl::unordered_dense::set<RE::BSGeometry*> collectedGeometry;
 	/** @brief Geometry last collected for one static reference, reused until a full walk or its root changes. */

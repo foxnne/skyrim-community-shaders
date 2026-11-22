@@ -873,8 +873,8 @@ namespace SharedData
 	struct LODShadowMapData
 	{
 		row_major float4x4 WorldToClip;         // world space to the clip space of the map
-		float4 Parameters;                      // x: depth slice, y: valid, z: depth bias, w: [0] valid map count, [1] maps hold the terrain, [2] end of the native cascades
-		float4 Filter;                          // x: texel size in UV, y: texel size in world units, z: depth bias of the previous map
+		float4 Parameters;                      // x: depth slice, y: fade (0: not valid), z: depth bias, w: [0] valid map count, [1] maps hold the terrain, [2] end of the native cascades
+		float4 Filter;                          // x: texel size in UV, y: texel size in world units, z: depth bias of the previous map, w: [0] tree crown bias
 		row_major float4x4 HistoryWorldToClip;  // same for the previous map of this level
 		float4 History;                         // x: depth slice, y: blend towards the current map, z: valid
 	};

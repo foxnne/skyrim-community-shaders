@@ -46,6 +46,7 @@ struct SnowDeformation : Feature
 		bool Enabled = true;
 		bool IncludeNPCs = true;
 		bool IncludeObjects = true;
+		bool WeightResponse = true;
 		bool UseSnowCover = true;
 		bool DisplaceShadows = true;
 		bool SinkActors = true;
@@ -265,6 +266,8 @@ private:
 		RE::NiPoint3 centre;
 		float radius = 0.0f;
 		RE::bhkNiCollisionObject* object = nullptr;
+		float weight = 0.0f;
+		float area = 0.0f;
 	};
 
 	struct RaceTraits

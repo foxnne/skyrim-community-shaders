@@ -188,7 +188,7 @@ void EvaluateLighting(DirectContext context, MaterialProperties material,
 	[branch] if ((Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::LODTreeCrown) != 0)
 	{
 		// LODTreeWrapScale: less wrap on front-lit crowns that carry crown data, set in Lighting.hlsl
-		float2 diffuseCosines = PBR::GetThinSurfaceDiffuseCosines(NdotL, SharedData::lodTreeLightingSettings.Wrap * LODTreeWrapScale);
+		float2 diffuseCosines = PBR::GetThinSurfaceDiffuseCosines(NdotL, SharedData::lodTreeLightingSettings.Wrap * LODTreeWrapScale, context.lightDisk);
 		lightingOutput.diffuse = (diffuseCosines.x * diffuseLightColor + diffuseCosines.y * SharedData::lodTreeLightingSettings.Transmission * softLightColor) * Color::BRDFScale;
 	}
 #	endif

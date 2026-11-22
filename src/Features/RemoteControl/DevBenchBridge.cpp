@@ -1,6 +1,8 @@
 #include "Features/NeuralRendering.h"
 #include "Features/RemoteControl/DevBenchBridge.h"
 #include "Features/LightLimitFix.h"
+#include "Features/SkySync.h"
+#include "Features/InteriorSun.h"
 #include "Features/PostProcessing.h"
 #include "Features/PostProcessing/HistogramAutoExposure.h"
 
@@ -477,6 +479,19 @@ namespace
 					{ "neuralRendering", globals::features::neuralRendering.loaded && globals::features::neuralRendering.settings.enabled },
 					{ "utility", utility },
 					{ "shaders", types },
+				};
+			});
+		}
+		if (kind == "sky") {
+			return RunOnMainThread([]() -> json {
+				const auto d = globals::features::skySync.GetDebugState(globals::game::sky);
+				return json{
+					{ "currentSkyRotation", d.currentSkyRotation }, { "cellNorthRotation", d.cellNorthRotation },
+					{ "rootRotate", std::vector<float>(std::begin(d.rootRotate), std::end(d.rootRotate)) },
+					{ "active", d.active }, { "skyRotationApplied", d.skyRotationApplied }, { "cellIsCurrent", d.cellIsCurrent },
+					{ "cellInterior", d.cellInterior }, { "reasserts", d.reasserts },
+					{ "reassertEnabled", globals::features::skySync.settings.ReassertSkyRotation },
+					{ "interiorWithSun", globals::features::interiorSun.isInteriorWithSun.load() },
 				};
 			});
 		}

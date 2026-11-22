@@ -29,7 +29,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	NewMoonIntensity,
 	CrescentMoonIntensity,
 	FullMoonIntensity,
-	DisabledWorldspaces)
+	DisabledWorldspaces,
+	ReassertSkyRotation)
 
 void SkySync::DrawSettings()
 {
@@ -420,6 +421,21 @@ bool SkySync::Update(const RE::Sky* sky)
 			shadowFader.Reset();
 		UpdateWorldspaceDisabled();
 	}
+	else if (settings.ReassertSkyRotation && cell && skyRotationApplied && currentSkyRotation != D3D11_FLOAT32_MAX && sky->root) {
+		// Something (a game-hour change indoors) can rebuild the sky root's transform without a cell change; put the north rotation back.
+		const RE::NiMatrix3 want{ RE::NiPoint3{ 0.0f, 0.0f, -currentSkyRotation } };
+		const auto& have = sky->root->local.rotate;
+		float diff = 0.0f;
+		for (int r = 0; r < 3; ++r)
+			for (int k = 0; k < 3; ++k)
+				diff = std::max(diff, std::abs(have.entry[r][k] - want.entry[r][k]));
+		if (diff > 1e-3f) {
+			sky->root->local.rotate = want;
+			RE::NiUpdateData updateData;
+			sky->root->Update(updateData);
+			++skyRotationReasserts;
+		}
+	}
 
 	auto& physicalSky = globals::features::physicalSky;
 	bool physicalSkyInteriorOverride = physicalSky.IsActive() && physicalSky.settings.forceEnableAllInteriorCells;
@@ -675,6 +691,27 @@ void SkySync::SetSkyRotation(const RE::Sky* sky, RE::TESObjectCELL* cell)
 	sky->root->local.rotate = RE::NiMatrix3{ RE::NiPoint3{ 0.0f, 0.0f, -rotation } };
 	RE::NiUpdateData updateData;
 	sky->root->Update(updateData);
+}
+
+SkySync::DebugState SkySync::GetDebugState(const RE::Sky* sky) const
+{
+	DebugState d;
+	d.currentSkyRotation = currentSkyRotation;
+	d.active = active;
+	d.skyRotationApplied = skyRotationApplied;
+	d.reasserts = skyRotationReasserts;
+	const auto player = RE::PlayerCharacter::GetSingleton();
+	const auto cell = player ? player->GetParentCell() : nullptr;
+	d.cellIsCurrent = cell && cell == currentCell;
+	if (cell) {
+		d.cellInterior = cell->IsInteriorCell();
+		d.cellNorthRotation = cell->GetNorthRotation();
+	}
+	if (sky && sky->root)
+		for (int r = 0; r < 3; ++r)
+			for (int k = 0; k < 3; ++k)
+				d.rootRotate[r * 3 + k] = sky->root->local.rotate.entry[r][k];
+	return d;
 }
 
 void SkySync::ResetSkyRotation(const RE::Sky* sky)

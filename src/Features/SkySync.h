@@ -53,10 +53,22 @@ public:
 		float CrescentMoonIntensity = 0.25f;
 		float FullMoonIntensity = 1.0f;
 		// Editor IDs; the defaults are realms whose weathers keep the same light around the clock
+		// Debug: re-apply the cell's north rotation to the sky root whenever something else reset it (e.g. a game-hour change indoors).
+		bool ReassertSkyRotation = false;
 		std::vector<std::string> DisabledWorldspaces = { "Blackreach", "AlftandWorld", "Sovngarde", "DLC01SoulCairn", "DLC01Boneyard", "DLC2ApocryphaWorld" };
 	};
 
 	Settings settings;
+
+	/** @brief Snapshot for DevBench `inspect kind=sky`. */
+	struct DebugState
+	{
+		float currentSkyRotation = 0, cellNorthRotation = 0, rootRotate[9] = {};
+		bool active = false, skyRotationApplied = false, cellIsCurrent = false, cellInterior = false;
+		uint32_t reasserts = 0;
+	};
+	DebugState GetDebugState(const RE::Sky* sky) const;
+	uint32_t skyRotationReasserts = 0;
 
 	/** @brief Draws the ImGui settings panel for Sky Sync configuration. */
 	virtual void DrawSettings() override;

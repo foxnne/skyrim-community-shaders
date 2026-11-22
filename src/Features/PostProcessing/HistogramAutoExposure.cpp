@@ -86,7 +86,9 @@ HistogramAutoExposure::ExposureParameters HistogramAutoExposure::GetExposurePara
 		const float exposureDeltaEV = CinematicCamera::kReferenceEV100 - cam->EV100;
 		parameters.ExposureAtISO100 = exp2(exposureDeltaEV) * 100.0f / cam->ISO;
 		if (cam->Exposure == CinematicCamera::ExposureMode::AutoISO) {
-			parameters.CompensationEV = cam->ExposureCompensationEV;
+			// The camera's compensation replaces the daytime exterior value only: night and interiors keep their own offset from it,
+			// so Auto ISO does not lift a moonlit night to daylight.
+			parameters.CompensationEV = cam->ExposureCompensationEV + (compensation - settings.ExposureCompensation);
 			const float targetLuminance = parameters.ExposureTarget * exp2(parameters.CompensationEV);
 			const float minExposure = parameters.ExposureAtISO100 * cam->MinISO / 100.0f;
 			const float maxExposure = parameters.ExposureAtISO100 * cam->MaxISO / 100.0f;

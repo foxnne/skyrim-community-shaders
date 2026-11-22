@@ -111,6 +111,7 @@ cbuffer GrassBucket : register(b13)
 {
 	uint GrassBucketGroupCount : packoffset(c0.x);
 	uint GrassGroupBase : packoffset(c0.w);
+	uint GrassOutputEnd : packoffset(c1.x);
 	uint GrassOutputOffset : packoffset(c1.y);
 	float GrassComplexThreshold : packoffset(c3.z);
 	float3 GrassCanopyHeights : packoffset(c5);
@@ -258,7 +259,11 @@ VS_OUTPUT main(VS_INPUT input, uint instanceID : SV_InstanceID)
 
 	VS_OUTPUT vsout = (VS_OUTPUT)0;
 
-	const uint4 record = InstanceRecords.Load4((GrassOutputOffset + instanceID) * GrassInstance::RecordStride);
+	// The middle tier's view is one DWORD longer than a whole number of records, and culling filled its range backwards.
+	uint recordBytes;
+	InstanceRecords.GetDimensions(recordBytes);
+	const uint recordIndex = recordBytes % GrassInstance::RecordStride != 0 ? GrassOutputEnd - 1 - instanceID : GrassOutputOffset + instanceID;
+	const uint4 record = InstanceRecords.Load4(recordIndex * GrassInstance::RecordStride);
 	GrassInstance::Decode(GrassInstances.Load4(record.x * GrassInstance::Stride), input.InstanceData1, input.InstanceData2, input.InstanceData3, input.InstanceData4);
 
 	uint groupIndex, flags;

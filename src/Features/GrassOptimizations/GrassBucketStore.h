@@ -104,8 +104,9 @@ public:
 	/** @brief Uploads changed cull groups up to the bucket's available capacity. */
 	void UploadCullGroups(GrassBucket& bucket, ID3D11DeviceContext* ctx);
 
-	/** @brief Allocates shared cull output and assigns each visible bucket a range. */
-	bool PrepareCullOutputs(std::span<GrassBucket*> visible);
+	/** @brief Allocates shared cull output and assigns each visible bucket a range. When the output cannot grow,
+	    trailing buckets that do not fit lose their cull state and leave `visible`. */
+	bool PrepareCullOutputs(std::vector<GrassBucket*>& visible);
 
 	/** @brief Shared indirect arguments for the current visible-bucket order. */
 	std::unique_ptr<Buffer> arguments;

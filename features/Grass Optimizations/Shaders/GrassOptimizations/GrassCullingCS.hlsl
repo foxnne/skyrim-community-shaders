@@ -58,7 +58,8 @@ struct CullBucket
 	uint SliceTableOffset;
 	uint SliceCount;
 	uint GroupBase;
-	uint TierStride;
+	// The bucket's record range in each output region; the middle tier fills it backwards from OutputEnd.
+	uint OutputEnd;
 	uint OutputOffset;
 	uint ArgsOffset;
 	float OcclusionRadius;
@@ -89,7 +90,8 @@ cbuffer DispatchParams : register(b1)
 	uint BucketCount;
 	uint DispatchGroupCount;
 	uint DispatchRowWidth;
-	uint _dispatchPad;
+	// Records per output region.
+	uint RegionStride;
 };
 
 // All threads in a group share one bucket.
@@ -102,6 +104,8 @@ Texture2D<float> HiZ : register(t2);
 StructuredBuffer<uint2> SliceTable : register(t3);
 
 // RunGrass resolves each output record against its source instance and group.
+// The full and middle tiers share the first region and fill each bucket's range from opposite ends, as their combined
+// count cannot exceed the range. The far tier fills the same range of the second region.
 RWByteAddressBuffer Compacted : register(u0);
 // Each tier's DrawIndexedInstanced arguments store the instance count at byte offset 4.
 RWByteAddressBuffer Args : register(u1);
@@ -421,7 +425,8 @@ uint CullInstance(uint idx, GrassInstance::CullGroup group, out float2 wind, out
 	if (tier == TierCulled)
 		return;
 
-	const uint slot = Bucket.OutputOffset + tier * Bucket.TierStride + GroupTierBase[tier] + localSlot;
+	const uint tierSlot = GroupTierBase[tier] + localSlot;
+	const uint slot = tier == 1 ? Bucket.OutputEnd - 1 - tierSlot : Bucket.OutputOffset + (tier == 2 ? RegionStride : 0) + tierSlot;
 	// Instance indices are absolute, while group indices are relative to the bucket.
 	const uint sourceIndex = group.SourceStart + threadIdx;
 	const uint4 record = uint4(sourceIndex, GrassInstance::PackRecord(groupIndex, fade, flags), asuint(wind));

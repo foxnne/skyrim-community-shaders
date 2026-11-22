@@ -156,7 +156,7 @@ bool GrassOptimizations::DispatchCull(ID3D11DeviceContext* ctx)
 	}
 
 	// Contiguous dispatch ranges let the shader find each bucket by binary search.
-	CullDispatchCB params{ (uint32_t)cullEntries.size(), 0, 0, 0 };
+	CullDispatchCB params{ (uint32_t)cullEntries.size(), 0, 0, bucketStore.cullOutput.capacity };
 	for (auto& entry : cullEntries) {
 		entry.dispatchStart = params.groupCount;
 		params.groupCount += entry.cull.groupCount;
@@ -598,7 +598,7 @@ void GrassOptimizations::DisableOptimizedDraws()
 void GrassOptimizations::UploadCullState(ID3D11DeviceContext* ctx, CullParamsCB& params)
 {
 	if (visibleBuckets.empty()) {
-		bucketStore.PrepareCullOutputs({});
+		bucketStore.PrepareCullOutputs(visibleBuckets);
 		return;
 	}
 

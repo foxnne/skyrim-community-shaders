@@ -119,7 +119,7 @@ bool GrassOptimizations::UploadCullBucketConstants(ID3D11DeviceContext* ctx)
 			.sliceTableOffset = bucket->sliceTableOffset,
 			.sliceCount = bucket->sliceTableCount,
 			.groupBase = bucket->groupBase,
-			.tierStride = bucketStore.cullOutput.capacity,
+			.outputEnd = bucket->outputEnd,
 			.outputOffset = bucket->outputOffset,
 			.argsOffset = slot * kTierCount * kArgsStride,
 			.occlusionRadius = occlusionRadius,
@@ -398,13 +398,15 @@ std::unique_ptr<Buffer> GrassBucketStore::CreateGroupPoolBuffer(uint32_t capacit
 bool GrassBucketStore::CreateCullOutput(GrassCullBuffers& buffers, uint32_t capacity)
 {
 	try {
-		buffers.records = CreateRawBuffer((uint64_t)capacity * kTierCount * kCullRecordStride, D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE, 0, "GrassOptimizations::CompactedBuf");
+		buffers.records = CreateRawBuffer((uint64_t)capacity * kCullRegionCount * kCullRecordStride, D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE, 0, "GrassOptimizations::CompactedBuf");
 		for (uint32_t tier = 0; tier < kTierCount; ++tier) {
+			// The full and middle tiers view the first region and the far tier views the second. The middle tier's view
+			// extends one DWORD into the second region, so its length marks the records RunGrass reads backwards.
 			D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
 			srv.Format = DXGI_FORMAT_R32_TYPELESS;
 			srv.ViewDimension = D3D11_SRV_DIMENSION_BUFFEREX;
-			srv.BufferEx.FirstElement = tier * capacity * kCullRecordStride / 4;
-			srv.BufferEx.NumElements = capacity * kCullRecordStride / 4;
+			srv.BufferEx.FirstElement = tier == 2 ? capacity * kCullRecordStride / 4 : 0;
+			srv.BufferEx.NumElements = capacity * kCullRecordStride / 4 + (tier == 1 ? 1 : 0);
 			srv.BufferEx.Flags = D3D11_BUFFEREX_SRV_FLAG_RAW;
 
 			buffers.records->CreateSRV(srv);
@@ -440,9 +442,10 @@ bool GrassBucketStore::EnsureArgsCapacity(uint32_t count)
 	}
 }
 
-bool GrassBucketStore::PrepareCullOutputs(std::span<GrassBucket*> visible)
+bool GrassBucketStore::PrepareCullOutputs(std::vector<GrassBucket*>& visible)
 {
 	constexpr uint32_t kRetentionFrames = 600;
+	constexpr uint32_t kGrowthRetryFrames = 300;
 
 	if (!EnsureArgsCapacity((uint32_t)visible.size()))
 		return false;
@@ -451,22 +454,65 @@ bool GrassBucketStore::PrepareCullOutputs(std::span<GrassBucket*> visible)
 	for (auto* bucket : visible) {
 		bucket->outputOffset = (uint32_t)used;
 		used += std::min((uint64_t)bucket->residentInstances, (uint64_t)bucket->groupCount * kCullGroupSize);
+		bucket->outputEnd = (uint32_t)used;
 	}
 
-	const uint32_t maxCapacity = UINT32_MAX / (kTierCount * kCullRecordStride);
+	const uint32_t maxCapacity = UINT32_MAX / (kCullRegionCount * kCullRecordStride);
 	if (used > maxCapacity)
 		return false;
 
-	// Delay shrinking so camera turns do not cause repeated reallocations.
-	if (CanReduceInstanceCapacity(cullOutput.capacity, (uint32_t)used))
-		++cullOutput.underutilizedFrames;
-	else
-		cullOutput.underutilizedFrames = 0;
+	const auto reservedCapacity = [&](uint32_t needed) {
+		return std::min(maxCapacity, std::max({ 65536u, needed, ReservedInstanceCapacity(needed) }));
+	};
 
-	if (used > cullOutput.capacity || cullOutput.underutilizedFrames >= kRetentionFrames) {
-		cullOutput = {};
-		if (!CreateCullOutput(cullOutput, std::min(maxCapacity, std::max(65536u, ReservedInstanceCapacity((uint32_t)used)))))
-			return false;
+	if (cullOutput.growthRetryDelay)
+		--cullOutput.growthRetryDelay;
+
+	if (used > cullOutput.capacity) {
+		cullOutput.underutilizedFrames = 0;
+		cullOutput.underutilizedPeak = 0;
+
+		// Keep the current output until its replacement exists, and try the exact size before giving up.
+		if (!cullOutput.growthRetryDelay) {
+			GrassCullBuffers grown;
+			if (CreateCullOutput(grown, reservedCapacity((uint32_t)used)) || CreateCullOutput(grown, std::min(maxCapacity, ((uint32_t)used + 4095) & ~4095u)))
+				cullOutput = std::move(grown);
+			else
+				cullOutput.growthRetryDelay = kGrowthRetryFrames;
+		}
+	}
+
+	if (used > cullOutput.capacity) {
+		// Draw the leading buckets that fit the current output until it can grow.
+		size_t kept = 0;
+		while (kept < visible.size() && visible[kept]->outputEnd <= cullOutput.capacity)
+			++kept;
+
+		for (size_t dropped = kept; dropped < visible.size(); ++dropped)
+			visible[dropped]->ResetCullState();
+		visible.resize(kept);
+
+		return !visible.empty();
+	}
+
+	// Delay shrinking so camera turns do not cause repeated reallocations.
+	if (!CanReduceInstanceCapacity(cullOutput.capacity, (uint32_t)used)) {
+		cullOutput.underutilizedFrames = 0;
+		cullOutput.underutilizedPeak = 0;
+		return true;
+	}
+
+	cullOutput.underutilizedPeak = std::max(cullOutput.underutilizedPeak, (uint32_t)used);
+	if (++cullOutput.underutilizedFrames >= kRetentionFrames) {
+		// A failed or unnecessary reduction keeps the current output for another retention period.
+		GrassCullBuffers reduced;
+		const uint32_t capacity = reservedCapacity(cullOutput.underutilizedPeak);
+		if (capacity < cullOutput.capacity && CreateCullOutput(reduced, capacity)) {
+			cullOutput = std::move(reduced);
+		} else {
+			cullOutput.underutilizedFrames = 0;
+			cullOutput.underutilizedPeak = 0;
+		}
 	}
 
 	return true;

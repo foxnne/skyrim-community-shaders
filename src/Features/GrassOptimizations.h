@@ -147,7 +147,7 @@ private:
 		uint32_t sliceCount;
 		uint32_t groupBase;  // Records hold group indices relative to this bucket's range in the group pool.
 
-		uint32_t tierStride;
+		uint32_t outputEnd;  // The middle tier's records fill the range backwards from here.
 		uint32_t outputOffset;
 		uint32_t argsOffset;
 		float occlusionRadius;
@@ -174,7 +174,7 @@ private:
 	STATIC_ASSERT_ALIGNAS_16(CullBucketCB);
 	// Draw metadata offsets must match GrassBucket in RunGrass.hlsl.
 	static_assert(sizeof(CullBucketCB) == 96 && offsetof(CullBucketCB, groupCount) == 0 && offsetof(CullBucketCB, groupBase) == 12 && offsetof(CullBucketCB, complexThreshold) == 56 &&
-				  offsetof(CullBucketCB, outputOffset) == 20 && offsetof(CullBucketCB, argsOffset) == 24 && offsetof(CullBucketCB, occlusionRadius) == 28 &&
+				  offsetof(CullBucketCB, outputEnd) == 16 && offsetof(CullBucketCB, outputOffset) == 20 && offsetof(CullBucketCB, argsOffset) == 24 && offsetof(CullBucketCB, occlusionRadius) == 28 &&
 				  offsetof(CullBucketCB, midLODMeshCost) == 60 && offsetof(CullBucketCB, farLODMeshCost) == 76 &&
 				  offsetof(CullBucketCB, canopyHeights) == 80 && offsetof(CullBucketCB, alphaTestRef) == 92);
 
@@ -194,7 +194,7 @@ private:
 		uint32_t bucketCount;
 		uint32_t groupCount;
 		uint32_t dispatchWidth;
-		uint32_t pad;
+		uint32_t regionStride;  // Records per region of the cull output.
 	};
 	STATIC_ASSERT_ALIGNAS_16(CullDispatchCB);
 

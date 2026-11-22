@@ -14,6 +14,9 @@ inline constexpr uint32_t kMaxRecordGroups = 1u << 19;
 // Draw tiers use the full mesh followed by the middle and far LOD meshes.
 inline constexpr uint32_t kTierCount = 1 + (uint32_t)GrassMeshLibrary::LODTier::kCount;
 inline constexpr uint32_t kCullRecordStride = 16;
+// The full and middle tiers fill one region of the cull output from opposite ends, and the far tier fills the other.
+inline constexpr uint32_t kCullRegionCount = 2;
+static_assert(kTierCount == 3, "The cull output layout assigns three tiers to two regions");
 // Each indirect draw stores five DWORDs, with the instance count second.
 inline constexpr uint32_t kArgsStride = 5 * sizeof(uint32_t);
 
@@ -137,10 +140,13 @@ struct GrassPool
 struct GrassCullBuffers
 {
 	std::unique_ptr<Buffer> records;
+	// The middle tier's view is one DWORD longer, which tells RunGrass to read its records from the end of the bucket's range.
 	std::array<winrt::com_ptr<ID3D11ShaderResourceView>, kTierCount> compactedSRVs;
 
-	uint32_t capacity = 0;  // Records per tier.
+	uint32_t capacity = 0;  // Records per region.
 	uint32_t underutilizedFrames = 0;
+	uint32_t underutilizedPeak = 0;  // Most records needed while underutilized, so shrinking keeps room for them.
+	uint32_t growthRetryDelay = 0;   // Frames to wait after a failed growth before trying again.
 };
 
 /** @brief Holds a larger pool buffer created off the render thread until it is adopted. */
@@ -240,7 +246,9 @@ struct GrassBucket
 	ID3D11ShaderResourceView* resolvedTextureView = nullptr;
 	float distScale = 1.0f;
 	float minPixelScale = 1.0f;
-	uint32_t outputOffset = 0;  // This bucket's records start here in each tier of the shared cull output.
+	// This bucket's record range in each region of the shared cull output.
+	uint32_t outputOffset = 0;
+	uint32_t outputEnd = 0;
 	uint32_t cullSlot = UINT32_MAX;
 
 	// This window selects visible source runs from the shared slice table.

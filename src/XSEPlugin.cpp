@@ -59,7 +59,7 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 		Plugin::BUILD_DESCRIBE,
 		Plugin::BUILD_HASH.empty() ? "unknown" : Plugin::BUILD_HASH,
 		Plugin::BUILD_DIRTY ? " (dirty)" : "");
-	SKSE::AllocTrampoline(1 << 10);
+	SKSE::AllocTrampoline(1 << 12);
 	return Load();
 }
 

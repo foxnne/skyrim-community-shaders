@@ -210,6 +210,8 @@ bool Load()
 		L"Data/SKSE/Plugins/DynamicWetness.dll",
 		L"Data/SKSE/Plugins/NMN_DeformableTerrain.dll",
 		L"Data/SKSE/Plugins/skyrim-runtime-extender/reversed_z.dll"
+		// Fork: upstream 5d0d2b1f5 also blocks NativeMeshLightFlickerFix.dll, DripSim.dll and DripSimRain.dll. This modlist
+		// runs all three, so they are left out here until the user decides.
 	};
 
 	for (const auto dll : incompatibleDLLs) {

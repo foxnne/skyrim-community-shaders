@@ -16,6 +16,7 @@
 #include "Features/ViewAtmosphere.h"
 #include "I18n/I18n.h"
 #include "LinearLighting.h"
+#include "PhysicalSky/MoonTexture.h"
 #include "PostProcessing/ColorSpace.h"
 #include "PostProcessingMode.h"
 #include "SkySync.h"
@@ -190,8 +191,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	sunDiskRad,
 	masserDiskRad,
 	secundaDiskRad,
-	masserDiscBrightnessEV,
-	secundaDiscBrightnessEV,
+	masserDiscMatchLight,
+	secundaDiscMatchLight,
 	worldspaceWhitelist,
 	groundAlbedo,
 	oceanHorizon,
@@ -235,10 +236,11 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	cloudMap,
 	cloudLayer,
 	cloudNoise,
-	voxelClouds)
+	voxelClouds,
+	supercellStorms)
 #endif
-#define PSKY_SETTINGS_A enabled, enableAllExteriorCells, forceEnableAllInteriorCells, overrideDirLight, lightSkyStatics, skyStaticsBrightness, halfResApShadow, vanillaMix, trMix, apLumMix, apTrMix, cloudShadowRemapRange, sunlightColor, masserColor, secundaColor, proceduralSun, sunDiskRad, masserDiskRad, secundaDiskRad, masserDiscBrightnessEV, secundaDiscBrightnessEV, worldspaceWhitelist, groundAlbedo, oceanHorizon, oceanColor, oceanRoughness, oceanGlitter, planetRadius, atmosphereRadius, rayleighFalloff, rayleighScatter, rayleighScatterAP1
-#define PSKY_SETTINGS_B aerosolType, aerosolLoading, aerosolHumidity, aerosolFalloff, aerosolPhaseG, aerosolScatter, aerosolAbsorption, ozoneAltitude, ozoneThickness, ozoneAbsorption, ozoneAbsorptionAP1, fallbackZBottom, enableVanillaClouds, cloudRelightMix, cloudOriginalMix, silverLiningMix, silverLiningSpread, enableVolumetricClouds, lightningIntensity, lightning, rayMarchRange, shadowVolumeRange, marchStepScale, cloudBlurRadius, cloudsOnWorldMap, cloudAmbientSHOnly, cloudHalfResTrace, cloudFastReconstruction, cloudCascadeShadows, cloudMap, cloudLayer, cloudNoise, voxelClouds
+#define PSKY_SETTINGS_A enabled, enableAllExteriorCells, forceEnableAllInteriorCells, overrideDirLight, lightSkyStatics, skyStaticsBrightness, halfResApShadow, vanillaMix, trMix, apLumMix, apTrMix, cloudShadowRemapRange, sunlightColor, masserColor, secundaColor, proceduralSun, sunDiskRad, masserDiskRad, secundaDiskRad, masserDiscMatchLight, secundaDiscMatchLight, worldspaceWhitelist, groundAlbedo, oceanHorizon, oceanColor, oceanRoughness, oceanGlitter, planetRadius, atmosphereRadius, rayleighFalloff, rayleighScatter, rayleighScatterAP1
+#define PSKY_SETTINGS_B aerosolType, aerosolLoading, aerosolHumidity, aerosolFalloff, aerosolPhaseG, aerosolScatter, aerosolAbsorption, ozoneAltitude, ozoneThickness, ozoneAbsorption, ozoneAbsorptionAP1, fallbackZBottom, enableVanillaClouds, cloudRelightMix, cloudOriginalMix, silverLiningMix, silverLiningSpread, enableVolumetricClouds, lightningIntensity, lightning, rayMarchRange, shadowVolumeRange, marchStepScale, cloudBlurRadius, cloudsOnWorldMap, cloudAmbientSHOnly, cloudHalfResTrace, cloudFastReconstruction, cloudCascadeShadows, cloudMap, cloudLayer, cloudNoise, voxelClouds, supercellStorms
 void to_json(nlohmann::json& nlohmann_json_j, const PhysicalSky::Settings& nlohmann_json_t)
 {
 	NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(NLOHMANN_JSON_TO, PSKY_SETTINGS_A))
@@ -320,8 +322,12 @@ namespace
 
 	constexpr float kSunIlluminanceSpeed = 0.1f;
 	constexpr float kMoonIlluminanceSpeed = 0.001f;
-	constexpr float kMoonDiscBrightnessMinEV = -4.f;
-	constexpr float kMoonDiscBrightnessMaxEV = 20.f;
+	/** @brief Floor on a moon texture channel's mean, relative to its luminance, so a channel the texture lacks cannot blow up its gain. */
+	constexpr float kMinDiscChannelShare = 0.01f;
+	/** @brief moonDiscRadiance.w modes, matching Sky.hlsl: radiance per texture colour, weather-glare tinted, or the vanilla disc. */
+	constexpr float kDiscModeLight = 0.f;
+	constexpr float kDiscModeGlare = 1.f;
+	constexpr float kDiscModeVanilla = -1.f;
 
 	/** @brief Zeroes negative or non-finite channels of a light color, since light cannot be negative. */
 	void ClampLightColor(float3& color)
@@ -339,6 +345,34 @@ namespace
 			return working.x * 0.2722287168f + working.y * 0.6740817658f + working.z * 0.0536895174f;
 		}
 		return color.x * 0.2125f + color.y * 0.7154f + color.z * 0.0721f;
+	}
+
+	/** @brief Re-measures a moon when its bound texture changes; fullMean stays zero when it or the full-moon texture is unreadable. */
+	void UpdateMoonPhotometry(PhysicalSky::MoonPhotometry& photometry, const RE::Moon* moon, bool linearLighting)
+	{
+		// The bound texture rather than the phase's: the engine only swaps it while the moon is faded out
+		auto* property = moon && moon->moonMesh ? skyrim_cast<RE::BSSkyShaderProperty*>(moon->moonMesh->GetGeometryRuntimeData().shaderProperty.get()) : nullptr;
+		const auto* bound = property ? property->GetBaseTexture() : nullptr;
+		const std::string_view boundPath = bound ? bound->name.c_str() : "";
+		if (boundPath == photometry.texturePath)
+			return;
+		photometry = { .texturePath = std::string(boundPath) };
+		const auto full = bound ? MoonTexture::GetMeanColor(moon->stateTextures[RE::Moon::Phases::Phase::kFull].c_str(), linearLighting) : std::nullopt;
+		const auto current = full ? MoonTexture::GetMeanColor(boundPath, linearLighting) : std::nullopt;
+		const float fullLuminance = full ? GetWorkingLuminance(*full) : 0.f;
+		if (current && fullLuminance > 0.f) {
+			photometry.phase = GetWorkingLuminance(*current) / fullLuminance;
+			photometry.fullMean = *full;
+			photometry.currentMean = *current;
+		}
+	}
+
+	/** @brief Solid angle of a square sky billboard whose half-width subtends the given angle. */
+	float GetBillboardSolidAngle(float halfAngle)
+	{
+		const float halfTan = std::tan(halfAngle);
+		const float halfTanSq = halfTan * halfTan;
+		return 4.f * std::asin(halfTanSq / (1.f + halfTanSq));
 	}
 
 	/** @brief Lux control that scales all channels of a light color together, preserving its chromaticity. */
@@ -825,7 +859,7 @@ void PhysicalSky::SettingsCelestials()
 	ImGui::SeparatorText(T(TKEY("sun"), "Sun"));
 	{
 		ImGui::PushID("Sun");
-		if (ImGui::ColorEdit3(T(TKEY("light_color"), "Light Color"), &settings.sunlightColor.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR))
+		if (Util::ColorEdit3(T(TKEY("light_color"), "Light Color"), &settings.sunlightColor.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR))
 			ClampLightColor(settings.sunlightColor);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::Text("%s", T(TKEY("sun_light_color_hint"), "Linear RGB illuminance before atmospheric extinction. The lux control scales all channels together, preserving the color."));
@@ -842,38 +876,38 @@ void PhysicalSky::SettingsCelestials()
 	const auto drawMoonIlluminance = [](float3& color) {
 		DrawIlluminanceControl(T(TKEY("moon_illuminance"), "Lunar Illuminance"), color, kMoonIlluminanceSpeed);
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(T(TKEY("moon_illuminance_hint"), "Illuminance on a surface perpendicular to the moon, before atmospheric extinction. Scales all channels together, preserving the color."));
+			ImGui::TextUnformatted(T(TKEY("moon_illuminance_hint"), "Full-moon illuminance on a surface perpendicular to the moon, before atmospheric extinction. Other phases scale it by how much of the moon texture is lit, and the visible disc is drawn to match. Scales all channels together, preserving the color."));
 	};
 
-	const auto drawMoonDiscBrightness = [](float& brightnessEV) {
-		ImGui::SliderFloat(T(TKEY("moon_disc_brightness"), "Disc Brightness"), &brightnessEV, kMoonDiscBrightnessMinEV, kMoonDiscBrightnessMaxEV, "%+.1f EV", ImGuiSliderFlags_AlwaysClamp);
+	const auto drawDiscMatchLight = [](bool& matchLight) {
+		ImGui::Checkbox(T(TKEY("moon_disc_match_light"), "Disc Matches Light Color"), &matchLight);
 		if (auto _tt = Util::HoverTooltipWrapper())
-			ImGui::TextUnformatted(T(TKEY("moon_disc_brightness_hint"), "Gain on the visible moon only, in stops. The moon's light is set by Lunar Illuminance."));
+			ImGui::TextUnformatted(T(TKEY("moon_disc_match_light_hint"), "Tint the visible moon with its Light Color. Off uses the weather's moon glare color instead. Brightness follows Lunar Illuminance either way."));
 	};
 
 	ImGui::SeparatorText(T(TKEY("masser"), "Masser"));
 	{
 		ImGui::PushID("Masser");
-		if (ImGui::ColorEdit3(T(TKEY("light_color"), "Light Color"), &settings.masserColor.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR))
+		if (Util::ColorEdit3(T(TKEY("light_color"), "Light Color"), &settings.masserColor.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR))
 			ClampLightColor(settings.masserColor);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::Text("%s", T(TKEY("light_color_hint"), "Light color before it passes through the atmosphere (extraterrestrial radiance)."));
 		drawMoonIlluminance(settings.masserColor);
 		ImGui::SliderAngle(T(TKEY("disk_angular_radius"), "Disk Angular Radius"), &settings.masserDiskRad, 0.05f, 30.f, "%.2f deg", ImGuiSliderFlags_AlwaysClamp);
-		drawMoonDiscBrightness(settings.masserDiscBrightnessEV);
+		drawDiscMatchLight(settings.masserDiscMatchLight);
 		ImGui::PopID();
 	}
 
 	ImGui::SeparatorText(T(TKEY("secunda"), "Secunda"));
 	{
 		ImGui::PushID("Secunda");
-		if (ImGui::ColorEdit3(T(TKEY("light_color"), "Light Color"), &settings.secundaColor.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR))
+		if (Util::ColorEdit3(T(TKEY("light_color"), "Light Color"), &settings.secundaColor.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR))
 			ClampLightColor(settings.secundaColor);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::Text("%s", T(TKEY("light_color_hint"), "Light color before it passes through the atmosphere (extraterrestrial radiance)."));
 		drawMoonIlluminance(settings.secundaColor);
 		ImGui::SliderAngle(T(TKEY("disk_angular_radius"), "Disk Angular Radius"), &settings.secundaDiskRad, 0.05f, 30.f, "%.2f deg", ImGuiSliderFlags_AlwaysClamp);
-		drawMoonDiscBrightness(settings.secundaDiscBrightnessEV);
+		drawDiscMatchLight(settings.secundaDiscMatchLight);
 		ImGui::PopID();
 	}
 }
@@ -909,8 +943,8 @@ void PhysicalSky::SettingsAtmosphere()
 									 "Particles much smaller than the wavelength of light, which scatter almost equally forward and backward. "
 									 "On Earth, they make the sky blue and, at sunset, red. Usually needs no change."));
 
-		ImGui::ColorEdit3(T(TKEY("scatter_srgb"), "Scatter (sRGB)"), &settings.rayleighScatter.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
-		ImGui::ColorEdit3(T(TKEY("scatter_ap1"), "Scatter (AP1)"), &settings.rayleighScatterAP1.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+		Util::ColorEdit3(T(TKEY("scatter_srgb"), "Scatter (sRGB)"), &settings.rayleighScatter.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+		Util::ColorEdit3(T(TKEY("scatter_ap1"), "Scatter (AP1)"), &settings.rayleighScatterAP1.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::Text("%s", T(TKEY("band_averaged_coefficients_for_acescg_ap1_primaries_computed"), "Band-averaged coefficients for ACEScg (AP1) primaries, computed via CIE 1931 spectral integration."));
 		ImGui::SliderFloat(T(TKEY("falloff"), "Falloff"), &settings.rayleighFalloff, 0.f, 2.f, "%.2f km^-1");
@@ -979,8 +1013,8 @@ void PhysicalSky::SettingsAtmosphere()
 		// page stores, and the picker above is only a shortcut for writing them.
 		if (sceneScoped || type == 0) {
 			ImGui::SliderFloat(T(TKEY("anisotropy"), "Anisotropy"), &settings.aerosolPhaseG, -0.999f, 0.999f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
-			ImGui::ColorEdit3(T(TKEY("scatter"), "Scatter"), &settings.aerosolScatter.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
-			ImGui::ColorEdit3(T(TKEY("absorption"), "Absorption"), &settings.aerosolAbsorption.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+			Util::ColorEdit3(T(TKEY("scatter"), "Scatter"), &settings.aerosolScatter.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+			Util::ColorEdit3(T(TKEY("absorption"), "Absorption"), &settings.aerosolAbsorption.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
 		}
 		if (ImGui::TreeNode(T(TKEY("aerosol_vertical_distribution"), "Vertical Distribution"))) {
 			ImGui::SliderFloat(T(TKEY("falloff"), "Falloff"), &settings.aerosolFalloff, 0.f, 2.f, "%.2f km^-1");
@@ -996,8 +1030,8 @@ void PhysicalSky::SettingsAtmosphere()
 									 "The ozone layer high in the atmosphere. It mainly absorbs certain wavelengths of light, "
 									 "which keeps the zenith sky blue, especially at sunrise and sunset."));
 
-		ImGui::ColorEdit3(T(TKEY("absorption_srgb"), "Absorption (sRGB)"), &settings.ozoneAbsorption.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
-		ImGui::ColorEdit3(T(TKEY("absorption_ap1"), "Absorption (AP1)"), &settings.ozoneAbsorptionAP1.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+		Util::ColorEdit3(T(TKEY("absorption_srgb"), "Absorption (sRGB)"), &settings.ozoneAbsorption.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+		Util::ColorEdit3(T(TKEY("absorption_ap1"), "Absorption (AP1)"), &settings.ozoneAbsorptionAP1.x, ImGuiColorEditFlags_DisplayHSV | ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
 		if (auto _tt = Util::HoverTooltipWrapper())
 			ImGui::Text("%s", T(TKEY("band_averaged_coefficients_for_acescg_ap1_primaries_computed_2"), "Band-averaged coefficients for ACEScg (AP1) primaries, computed via CIE 1931 spectral integration."));
 		ImGui::DragFloat(T(TKEY("mean_altitude"), "Mean Altitude"), &settings.ozoneAltitude, .1f, 0.f, 100.f, "%.3f km");
@@ -1772,6 +1806,9 @@ void PhysicalSky::DrawDebugSection()
 		ImGui::InputFloat3(T(TKEY("sun_direction"), "Sun Direction"), &cbData.sunDir.x, "%.3f", ImGuiInputTextFlags_ReadOnly);
 		ImGui::InputFloat3(T(TKEY("masser_direction"), "Masser Direction"), &cbData.masserDir.x, "%.3f", ImGuiInputTextFlags_ReadOnly);
 		ImGui::InputFloat3(T(TKEY("secunda_direction"), "Secunda Direction"), &cbData.secundaDir.x, "%.3f", ImGuiInputTextFlags_ReadOnly);
+		const std::array moonNames{ T(TKEY("masser"), "Masser"), T(TKEY("secunda"), "Secunda") };
+		for (size_t moon = 0; moon < moonPhotometry.size(); ++moon)
+			ImGui::Text(T(TKEY("moon_photometry"), "%s: phase %.3f, full-moon texture luminance %.4f"), moonNames[moon], moonPhotometry[moon].phase, GetWorkingLuminance(moonPhotometry[moon].fullMean));
 	}
 
 	ImGui::SeparatorText(T(TKEY("textures"), "Textures"));
@@ -2230,6 +2267,11 @@ void PhysicalSky::Reset()
 		return TransformColor(v, mat);
 	};
 
+	const bool linearLightingActive = linearLighting.IsLinearLightingActive();
+	const auto* sky = globals::game::sky;
+	UpdateMoonPhotometry(moonPhotometry[0], sky ? sky->masser : nullptr, linearLightingActive);
+	UpdateMoonPhotometry(moonPhotometry[1], sky ? sky->secunda : nullptr, linearLightingActive);
+
 	if (cbData.zBottom != zBottom)
 		cloudAmbientValid = false;
 	cbData = {
@@ -2242,10 +2284,10 @@ void PhysicalSky::Reset()
 		.trMix = settings.trMix,
 		.masserDir = { masserDir.x, masserDir.y, masserDir.z },
 		.apLumMix = settings.apLumMix,
-		.masserColor = sRGBToWorkingGamut(settings.masserColor),
+		.masserColor = sRGBToWorkingGamut(settings.masserColor) * moonPhotometry[0].phase,
 		.apTrMix = settings.apTrMix,
 		.secundaDir = { secundaDir.x, secundaDir.y, secundaDir.z },
-		.secundaColor = sRGBToWorkingGamut(settings.secundaColor),
+		.secundaColor = sRGBToWorkingGamut(settings.secundaColor) * moonPhotometry[1].phase,
 		.enabled = allGood,
 		// Neutral at the default: 0 skips the surface shader branch, and the map is not built.
 		.deckGroundLight = csCloudDeckLight && std::isfinite(settings.cloudLayer.lighting.deckGroundLight) && settings.cloudLayer.lighting.deckLight > 0.f ?
@@ -2340,13 +2382,30 @@ void PhysicalSky::Reset()
 		settings.oceanHorizon ? 1.f : 0.f };
 	cbData.oceanParams = { std::isfinite(settings.oceanRoughness) ? std::clamp(settings.oceanRoughness, 0.002f, 0.2f) : 0.03f,
 		std::isfinite(settings.oceanGlitter) ? std::clamp(settings.oceanGlitter, 0.f, 4.f) : 1.f, 0.f, 0.f };
-	cbData.diskBrightness = {
-		1.f,
-		std::exp2(std::clamp(settings.masserDiscBrightnessEV, kMoonDiscBrightnessMinEV, kMoonDiscBrightnessMaxEV)),
-		std::exp2(std::clamp(settings.secundaDiscBrightnessEV, kMoonDiscBrightnessMinEV, kMoonDiscBrightnessMaxEV)),
-		1.f
+	// The drawn phase texture integrates to the phased light, so the disc and the moonlight always match
+	const auto discRadiance = [&](const float3& lightColor, float diskRadius, const MoonPhotometry& photometry, bool matchLight) {
+		if (GetWorkingLuminance(photometry.fullMean) <= 0.f)
+			return float4(0.f, 0.f, 0.f, kDiscModeVanilla);
+		const float3 phasedLight = lightColor * photometry.phase;
+		const float currentLuminance = GetWorkingLuminance(photometry.currentMean);
+		const float lightLuminance = GetWorkingLuminance(phasedLight);
+		// A blank phase texture draws nothing to scale, and a dark light leaves nothing to draw
+		if (currentLuminance <= 0.f || lightLuminance <= 0.f)
+			return float4(0.f, 0.f, 0.f, kDiscModeLight);
+		const float solidAngle = GetBillboardSolidAngle(diskRadius);
+		const float3 meanWorking = sRGBToWorkingGamut(photometry.currentMean);
+		if (matchLight) {
+			// Divides out the texture's mean colour, as the light colour already carries the moon's
+			const float3 radiance = sRGBToWorkingGamut(phasedLight) / (float3::Max(meanWorking, float3(currentLuminance * kMinDiscChannelShare)) * solidAngle);
+			return float4(radiance.x, radiance.y, radiance.z, kDiscModeLight);
+		}
+		// The glare is only known per vertex, so the shader divides by Y(glare * this) to normalise the tinted texture
+		const float3 meanPerLight = meanWorking * (solidAngle / lightLuminance);
+		return float4(meanPerLight.x, meanPerLight.y, meanPerLight.z, kDiscModeGlare);
 	};
-	if (const auto* sky = globals::game::sky; sky && sky->root) {
+	cbData.moonDiscRadiance[0] = discRadiance(settings.masserColor, cbData.diskAngularRadius.y, moonPhotometry[0], settings.masserDiscMatchLight);
+	cbData.moonDiscRadiance[1] = discRadiance(settings.secundaColor, cbData.diskAngularRadius.z, moonPhotometry[1], settings.secundaDiscMatchLight);
+	if (sky && sky->root) {
 		const auto& viewer = sky->root->world.translate;
 		const auto sunTan = sky->sun ? Util::GetBillboardHalfTan(sky->sun->sunBase.get(), viewer, 0.f) : 0.f;
 		const auto masserTan = sky->masser ? Util::GetBillboardHalfTan(sky->masser->moonMesh.get(), viewer, 0.f) : 0.f;

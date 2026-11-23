@@ -756,7 +756,7 @@ namespace SharedData
 		float4 diskBillboardScale;
 		float4 oceanColorAmount;  // water colour (reflectance of the water body), amount: 0 = no sea below the horizon
 		float4 oceanParams;       // wave slope variance, sun glitter strength, unused, unused
-		float4 diskBrightness;
+		float4 moonDiscRadiance[2];  // Masser, Secunda; w = 0: rgb is radiance per texture colour, 1: rgb is mean * solid angle / light Y for the glare tint, -1: vanilla
 	};
 
 	struct RainRefractionSettings

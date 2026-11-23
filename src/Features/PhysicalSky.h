@@ -155,9 +155,9 @@ struct PhysicalSky final : public Feature
 		float sunDiskRad = DirectX::XMConvertToRadians(0.53f);
 		float masserDiskRad = DirectX::XMConvertToRadians(8.f);
 		float secundaDiskRad = DirectX::XMConvertToRadians(4.f);
-		// Visible moon billboard gain in stops; does not change the moon's light.
-		float masserDiscBrightnessEV = 0.f;
-		float secundaDiscBrightnessEV = 0.f;
+		// Off tints the disc with the weather's moon glare instead; its brightness stays derived from the light.
+		bool masserDiscMatchLight = true;
+		bool secundaDiscMatchLight = true;
 
 		std::map<std::string, WorldspaceInfo> worldspaceWhitelist = {
 			{ "Tamriel", { -14500.f } },
@@ -248,6 +248,7 @@ struct PhysicalSky final : public Feature
 		CloudLayer cloudLayer = {};
 		CloudNoiseSettings cloudNoise = {};
 		SceneBlend voxelClouds;
+		SceneBlend supercellStorms;
 
 		Aerosol::Optics GetAerosolOptics() const;
 		void ApplyAerosolOptics();
@@ -342,9 +343,19 @@ struct PhysicalSky final : public Feature
 		float4 diskBillboardScale;
 		float4 oceanColorAmount;  // water colour, amount (0 = no sea below the horizon)
 		float4 oceanParams;       // wave slope variance, sun glitter strength, unused, unused
-		float4 diskBrightness;  // Sun (unused, 1), Masser, Secunda linear gains on the visible disc; w unused
+		float4 moonDiscRadiance[2];  // Masser, Secunda; w = 0: rgb is radiance per texture colour, 1: rgb is mean * solid angle / light Y for the glare tint, -1: vanilla
 	} cbData;
 	STATIC_ASSERT_ALIGNAS_16(CbData);
+
+	/** @brief A moon's drawn texture luminance relative to its full-moon texture, and both textures' mean linear colours (zero when unreadable). */
+	struct MoonPhotometry
+	{
+		float phase = 1.f;
+		float3 fullMean{};
+		float3 currentMean{};
+		std::string texturePath;  // bound texture the values were measured for
+	};
+	std::array<MoonPhotometry, 2> moonPhotometry;  // Masser, Secunda
 
 	eastl::unique_ptr<Texture2D> texTrLut = nullptr;  // transmittance
 	constexpr static uint32_t kDiskPhaseLutSize = 2048;

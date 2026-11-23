@@ -495,6 +495,16 @@ cbuffer PerMaterial : register(b1)
 #			include "WetnessEffects/WetnessEffects.hlsli"
 #		endif
 
+// When SSGI replaces ambient, its IL (traced plus cubemap fallback) only multiplies the reflection albedo, and the
+// SSGI composite scales IL by 1 + Masks.z. Transmission takes its ambient from IL through that factor, so it is
+// occluded like the rest of the ambient instead of keeping unoccluded vanilla ambient (bright grass in shade).
+float GetSSGITransmissionBoost(float3 reflectionAlbedo, float3 transmissionAlbedo)
+{
+	float reflectionLuminance = Color::RGBToLuminance(ColorManagement::SceneToLinear(max(0, reflectionAlbedo)));
+	float totalLuminance = Color::RGBToLuminance(ColorManagement::SceneToLinear(max(0, reflectionAlbedo + transmissionAlbedo)));
+	return max(0, totalLuminance / max(reflectionLuminance, EPSILON_DIVISION) - 1.0);
+}
+
 #		if defined(TRUE_PBR)
 PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 {
@@ -826,17 +836,21 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		skylightingDiffuse = PBR::GetFoliageShadowVisibility(skylightingDiffuse, material.Thickness);
 	Skylighting::ApplySkylighting(directColor, directionalAmbientColor, outputAlbedo, skylightingDiffuse);
 	sh2 backSkylightingSH = skylightingSH;
-	[branch] if (any(indirectLobes.backTransmission > 0.0f))
+	[branch] if (SharedData::ssgiSettings.ReplaceAmbient == 0 && any(indirectLobes.backTransmission > 0.0f))
 	{
 		float unusedShadowVisibility;
 		backSkylightingSH = Skylighting::Sample(input.WorldPosition.xyz, -normal, unusedShadowVisibility, false);
 	}
 #				endif
 
+	float ssgiTransmissionBoost = 0;
+	if (SharedData::ssgiSettings.ReplaceAmbient != 0)
+		ssgiTransmissionBoost = GetSSGITransmissionBoost(indirectLobes.diffuse, indirectLobes.frontTransmission + indirectLobes.backTransmission);
+
 	[unroll] for (uint side = 0; side < 2; ++side)
 	{
 		float3 transmissionWeight = side == 0 ? indirectLobes.frontTransmission : indirectLobes.backTransmission;
-		[branch] if (any(transmissionWeight > 0.0f))
+		[branch] if (SharedData::ssgiSettings.ReplaceAmbient == 0 && any(transmissionWeight > 0.0f))
 		{
 			float3 transmissionNormal = side == 0 ? normal : -normal;
 			float3 ambientColor = Color::Ambient(max(0, SharedData::GetAmbient(transmissionNormal)));
@@ -891,7 +905,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	psout.Albedo = float4(outputAlbedo, 1);
 	psout.Specular = float4(totalLighting.specular + wetnessDirectSpecularColor * Color::PBRLightingScale, 1);
 	psout.Reflectance = float4(indirectLobes.specular + wetnessReflectance, 1);
-	psout.Masks = float4(0, 0, SharedData::ssgiSettings.ReplaceAmbient == 0 ? Color::RGBToYCoCg(directionalAmbientColor).x : 0, 0);
+	psout.Masks = float4(0, 0, SharedData::ssgiSettings.ReplaceAmbient == 0 ? Color::RGBToYCoCg(directionalAmbientColor).x : ssgiTransmissionBoost, 0);
 	psout.Masks2 = float4(1.0 - vertexAO, 0, 0, 1);
 #				if !defined(RENDER_DEPTH)
 	psout.Diffuse.rgb = PreExposure::EncodeScene(psout.Diffuse.rgb);
@@ -1271,10 +1285,14 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	Skylighting::ApplySkylighting(diffuseColor, directionalAmbientColor, diffuseLobeWeight, skylightingDiffuse);
 #				endif
 
+	float ssgiTransmissionBoost = 0;
+	if (SharedData::ssgiSettings.ReplaceAmbient != 0)
+		ssgiTransmissionBoost = GetSSGITransmissionBoost(diffuseLobeWeight, (frontTransmissionAlbedo + backTransmissionAlbedo) * canopyVisibility);
+
 	[unroll] for (uint side = 0; side < 2; ++side)
 	{
 		float3 transmissionAlbedo = (side == 0 ? frontTransmissionAlbedo : backTransmissionAlbedo) * canopyVisibility;
-		[branch] if (any(transmissionAlbedo > 0.0))
+		[branch] if (SharedData::ssgiSettings.ReplaceAmbient == 0 && any(transmissionAlbedo > 0.0))
 		{
 			float3 transmissionNormal = side == 0 ? normal : -normal;
 			float3 ambientColor = Color::Ambient(max(0, SharedData::GetAmbient(transmissionNormal)));
@@ -1334,7 +1352,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	psout.NormalGlossiness = float4(GBuffer::EncodeNormal(normalVS), 1.0 - outputRoughness, 1);
 
 	psout.Specular = float4(specularColor, 1);
-	psout.Masks = float4(0, 0, SharedData::ssgiSettings.ReplaceAmbient == 0 ? Color::RGBToYCoCg(directionalAmbientColor).x : 0, 0);
+	psout.Masks = float4(0, 0, SharedData::ssgiSettings.ReplaceAmbient == 0 ? Color::RGBToYCoCg(directionalAmbientColor).x : ssgiTransmissionBoost, 0);
 	psout.Masks2 = float4(NeuralRenderingCategories::Pack(1.0 - vertexAO, NeuralRenderingCategories::Foliage), 0, 0, 0);
 #			endif
 #			if !defined(RENDER_DEPTH)
@@ -1493,6 +1511,10 @@ PS_OUTPUT main(PS_INPUT input)
 	if (SharedData::iblSettings.EnableIBL)
 		directionalAmbientColor = ImageBasedLighting::GetDiffuseIBL(directionalAmbientColor, -normal, input.WorldPosition.xyz);
 #			endif
+
+	// SSGI IL replaces this ambient in the composite; keeping it would add ambient twice.
+	if (SharedData::ssgiSettings.ReplaceAmbient != 0)
+		directionalAmbientColor = 0;
 
 	directionalAmbientColor += ShadowSampling::GetCloudScatterLighting(cloudScatterColor, cloudScatter, normal);
 

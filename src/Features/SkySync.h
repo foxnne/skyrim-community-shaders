@@ -52,6 +52,8 @@ public:
 		float NewMoonIntensity = 0.05f;
 		float CrescentMoonIntensity = 0.25f;
 		float FullMoonIntensity = 1.0f;
+		// Share of moonlight that still reaches the scene when the weather hides the moons (storm, snow); 0 = vanilla, pitch black
+		float HiddenMoonIntensity = 0.4f;
 		// Editor IDs; the defaults are realms whose weathers keep the same light around the clock
 		// Debug: re-apply the cell's north rotation to the sky root whenever something else reset it (e.g. a game-hour change indoors).
 		bool ReassertSkyRotation = false;

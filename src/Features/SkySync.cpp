@@ -29,6 +29,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	NewMoonIntensity,
 	CrescentMoonIntensity,
 	FullMoonIntensity,
+	HiddenMoonIntensity,
 	DisabledWorldspaces,
 	ReassertSkyRotation)
 
@@ -117,6 +118,10 @@ void SkySync::DrawSettings()
 	ImGui::SliderFloat(T(TKEY("new_moon_intensity"), "New Moon Intensity"), &settings.NewMoonIntensity, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
 	ImGui::SliderFloat(T(TKEY("crescent_intensity"), "Crescent Intensity"), &settings.CrescentMoonIntensity, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
 	ImGui::SliderFloat(T(TKEY("full_moon_intensity"), "Full Moon Intensity"), &settings.FullMoonIntensity, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+	ImGui::SliderFloat(T(TKEY("hidden_moon_intensity"), "Hidden Moon Intensity"), &settings.HiddenMoonIntensity, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper()) {
+		ImGui::TextUnformatted(T(TKEY("hidden_moon_intensity_tooltip"), "Share of moonlight kept when the weather hides the moons (storms, snow). 0 leaves those nights without any moonlight."));
+	}
 
 	if (ImGui::TreeNodeEx(T(TKEY("disabled_worldspaces"), "Disabled Worldspaces"), ImGuiTreeNodeFlags_None)) {
 		Util::TextUnformattedDisabled(T(TKEY("disabled_worldspaces_hint"), "Sky Sync leaves lighting to vanilla in these worldspaces."));
@@ -783,13 +788,16 @@ void SkySync::ProcessMoon(const RE::Sky* sky, const Caster type, RE::NiPoint3 di
 
 	const auto rootFlags = moon->root->GetFlags();
 	const bool hiddenByWeather = rootFlags.any(RE::NiAVObject::Flag::kHidden) && sky->skyColor[RE::TESWeather::ColorTypes::kMoonGlare] == RE::NiColor{};
-	if (rootFlags.none(RE::NiAVObject::Flag::kDisplayObject) || hiddenByWeather)
+	// A weather that hides the moons still lets some of their light through the overcast, or its nights go pitch black
+	const float hiddenShare = hiddenByWeather ? std::clamp(settings.HiddenMoonIntensity, 0.0f, 1.0f) : 1.0f;
+	if (rootFlags.none(RE::NiAVObject::Flag::kDisplayObject) || hiddenShare <= 0.0f)
 		return;
 
 	dirs[idx] = Util::Moon::GetFacingAxis(moon->root->local.rotate);
 
 	const auto& baseColor = type == Caster::Masser ? Util::Moon::MasserBaseColor : Util::Moon::SecundaBaseColor;
 	float4 color = Util::Moon::GetLightColor(moon, baseColor, settings.NewMoonIntensity, settings.CrescentMoonIntensity, settings.FullMoonIntensity).GetColor();
+	color *= hiddenShare;
 	colors[idx] = color;
 
 	const auto src = static_cast<MoonLightSource>(settings.MoonLightSource);

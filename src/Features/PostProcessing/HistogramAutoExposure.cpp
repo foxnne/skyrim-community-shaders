@@ -416,7 +416,7 @@ void HistogramAutoExposure::Draw(TextureInfo& inout_tex)
 	// scene too dark afterwards.
 	const bool holdAdaptation = (menuScene || globals::features::physicalSky.lightning.Transient()) && hasMeasuredAdaptation;
 
-	// Flight: rises over ~1 s once the camera is clearly flying, falls back over ~2 s after it slows.
+	// Flight: rises over ~1 s once the camera is clearly flying, falls back over ~0.75 s as it slows into the descent.
 	{
 		const float dt = std::max(RE::BSTimer::GetSingleton()->realTimeDelta, 1e-4f);
 		const RE::NiPoint3 eye = Util::GetEyePosition();
@@ -424,7 +424,7 @@ void HistogramAutoExposure::Draw(TextureInfo& inout_tex)
 		flightLastEye = eye;
 		flightHaveLastEye = true;
 		const float target = std::isfinite(speed) ? std::clamp((speed - kFlightSpeedStart) / (kFlightSpeedFull - kFlightSpeedStart), 0.0f, 1.0f) : 0.0f;
-		flightBlend += (target - flightBlend) * std::min(1.0f, dt / (target > flightBlend ? 1.0f : 2.0f));
+		flightBlend += (target - flightBlend) * std::min(1.0f, dt / (target > flightBlend ? 1.0f : 0.75f));
 	}
 	const float brightSceneCompression = std::clamp(settings.BrightSceneCompression, 0.f, 1.f) * (1.0f - flightBlend);
 

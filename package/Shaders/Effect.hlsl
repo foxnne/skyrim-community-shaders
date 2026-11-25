@@ -12,7 +12,7 @@
 #include "Common/Skinned.hlsli"
 
 #ifndef FIRE_YELLOW_AMOUNT
-#	define FIRE_YELLOW_AMOUNT 0.6  // 0 = authored flame colour, 1 = fully pulled to the target
+#	define FIRE_YELLOW_AMOUNT 0.0  // 0 = authored flame colour, 1 = fully pulled to the target
 #	define FIRE_YELLOW_TARGET 0.5  // green as a share of red for a red flame texel (0.5 = amber; 0.72 went lemon)
 #endif
 #define EFFECT

@@ -46,8 +46,9 @@ struct HistogramAutoExposure : public PostProcessFeature
 
 	// Fast-travel flight (camera far faster than any riding): Bright Scene Compression eases off so the
 	// exposure adapts fully to miles of sunlit snow and cloud, then eases back after landing.
-	static constexpr float kFlightSpeedStart = 3000.0f;  // units per second; a horse at full gallop is ~1000
-	static constexpr float kFlightSpeedFull = 8000.0f;
+	static constexpr float kFlightSpeedStart = 8000.0f;  // units per second; a horse at full gallop is ~1000. Sky Above peaks at 27000-30000:
+	// these release the flight exposure at ~84% of the arc, so it is back to normal before touchdown (user 2026-11-25)
+	static constexpr float kFlightSpeedFull = 15000.0f;
 	RE::NiPoint3 flightLastEye{};
 	bool flightHaveLastEye = false;
 	float flightBlend = 0.0f;  // 0 normal play, 1 in flight

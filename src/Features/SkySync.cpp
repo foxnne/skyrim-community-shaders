@@ -1010,7 +1010,7 @@ void SkySync::ShadowFader::SetLighting(const RE::Sky* sky, RE::NiPoint3 dir)
 	ClampDirection(dir);
 
 	static const float holdCos = std::cos(DirectX::XMConvertToRadians(ShadowDirectionHoldAngle));
-	if (!transitioning && strikeWeight <= 0.0f && hasHeldDir && dir.Dot(heldDir) >= holdCos)
+	if (ShadowDirectionHoldAngle > 0.0f && !transitioning && strikeWeight <= 0.0f && hasHeldDir && dir.Dot(heldDir) >= holdCos)
 		dir = heldDir;
 	heldDir = dir;
 	hasHeldDir = true;

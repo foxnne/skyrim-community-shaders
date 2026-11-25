@@ -228,7 +228,7 @@ private:
 	static constexpr float SecondsPerGameHour = 3600.0f;
 	static constexpr float AlignmentFadeStartAngle = 2.0f;
 	static constexpr float AlignmentFadeEndAngle = 15.0f;
-	static constexpr float ShadowDirectionHoldAngle = 0.1f;
+	static constexpr float ShadowDirectionHoldAngle = 0.0f;  // fork: no hold. 0.1 made shadows step every ~1.2 s at timescale 20 (user 2026-11-25); shimmer is handled by the 4096 shadow map
 	static constexpr float MaxHorizonFadeHours = 1.5f;
 	static constexpr float DefaultSunAlphaTransTime = 2.0f;
 	static constexpr float AlternateSunHorizonOffsetHours = 0.25f;

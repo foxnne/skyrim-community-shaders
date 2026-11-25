@@ -1402,7 +1402,9 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		float depthSampledLinear = SharedData::GetScreenDepth(depthSampled);
 		float depthPixelLinear = SharedData::GetScreenDepth(input.Position.z);
 
-		blendFactorTerrain = saturate((depthSampledLinear - depthPixelLinear) / 10.0);
+		// Terrain fades over objects within this many units of its surface. 10 dissolved boot soles into the road, so
+		// characters looked like they floated (user 2026-11-25); 2 keeps rocks soft and gives feet a contact edge.
+		blendFactorTerrain = saturate((depthSampledLinear - depthPixelLinear) / 2.0);
 
 		if (input.Position.z == depthSampled)
 			blendFactorTerrain = 1;
@@ -2254,6 +2256,10 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	else
 	float3 worldNormal = normalize(mul(tbn, normal.xyz));
 #		if defined(TREE_ANIM) && !defined(TRUE_PBR)
+#			if defined(SNOW_COVER)
+#				define TREE_SNOW_COVERAGE_NORMAL
+	float3 treeSnowCoverageNormal = worldNormal;
+#			endif
 	float3 viewNormal = normalize(FrameBuffer::WorldToView(worldNormal, false));
 	viewNormal = float3(viewNormal.xy, -abs(viewNormal.z));
 	worldNormal = normalize(FrameBuffer::ViewToWorld(viewNormal, false));
@@ -2269,8 +2275,21 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float3 skinWetNormal = worldNormal.xyz;
 	float skinWetness = 0.0f;
 #		endif
+	const float3 skinShadowNormal = worldNormal.xyz;
+	float3x3 skinShadowFrame = float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1);
+	float skinWorldPerUV = 1.0;
+	float skinUVFootprint = 0.0;
 	[branch] if (skinEnabled)
 	{
+		{
+			const float3 skinPositionDX = ddx(input.WorldPosition.xyz);
+			const float3 skinPositionDY = ddy(input.WorldPosition.xyz);
+			const float2 skinUVDX = ddx(uv);
+			const float2 skinUVDY = ddy(uv);
+			const float skinUVArea = abs(skinUVDX.x * skinUVDY.y - skinUVDX.y * skinUVDY.x);
+			skinWorldPerUV = sqrt(length(cross(skinPositionDX, skinPositionDY)) / max(skinUVArea, 1e-12));
+			skinUVFootprint = max(length(skinUVDX), length(skinUVDY));
+		}
 #		if defined(WETNESS_EFFECTS)
 #			if defined(FACEGEN)
 		float2 wetUV = uv;
@@ -2286,8 +2305,10 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		const float3x3 tbnTr = Skin::SurfaceBasis(input.WorldPosition.xyz, worldNormal, uv);
 		const float3x3 tbn = transpose(tbnTr);
 		const float3 tangentNormal = mul(tbnTr, worldNormal.xyz);
+		skinShadowFrame = tbnTr;
 #		else
 		const float3 tangentNormal = normal.xyz;
+		skinShadowFrame = Skin::SurfaceBasis(input.WorldPosition.xyz, worldNormal.xyz, uv);
 #		endif  // MODELSPACENORMALS
 		float3 combinedTangentNormal = tangentNormal;
 		if (skinData.skinDetailParams.w > 0.0f) {
@@ -2348,6 +2369,9 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		if defined(LODOBJECTSHD)
 	projWeight += (-0.5 + input.Color.w) * 2.5;
 #		endif  // LODOBJECTSHD
+#		if defined(TREE_SNOW_COVERAGE_NORMAL)
+	const float treeSnowProjWeight = projWeight + (dot(treeSnowCoverageNormal, texProj) - dot(worldNormal.xyz, texProj)) * vertexAlpha;
+#		endif
 #		if defined(SPARKLE)
 	if (projWeight < 0)
 		discard;
@@ -2396,6 +2420,9 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		projBaseColor.xyz = pow(abs(projBaseColor.xyz), SharedData::lodBlendingSettings.LODObjectSnowGamma) * SharedData::lodBlendingSettings.LODObjectSnowBrightness;
 #			endif  // LOD_BLENDING
 		float3 projectedWorldNormal = normalize(mul(transpose(tbnTr), finalProjNormal));
+#			if defined(TREE_SNOW_COVERAGE_NORMAL)
+		treeSnowCoverageNormal = normalize(lerp(treeSnowCoverageNormal, projectedWorldNormal, smoothstep(0, 1, 5 * (0.1 + treeSnowProjWeight))));
+#			endif
 		worldNormal = normalize(lerp(worldNormal, projectedWorldNormal, projectedMaterialWeight));
 		baseColor.xyz = lerp(baseColor.xyz, projBaseColor, projectedMaterialWeight);
 
@@ -2436,7 +2463,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	const float visibleRawDepth = SharedData::DepthTexture.Load(int3(input.Position.xy, 0)).x;
 	const float visibleSceneDepth = SharedData::GetScreenDepth(visibleRawDepth);
 #	endif
-#	if defined(DEFERRED) && !defined(LANDSCAPE) && defined(TERRAIN_BLENDING_OBJECTS)
+#	if defined(DEFERRED) && !defined(LANDSCAPE) && !defined(SKINNED) && defined(TERRAIN_BLENDING_OBJECTS)  // not characters: their soles need a dark contact edge
 	// Terrain Blending fades terrain over the part of an object below the terrain surface, where the scene
 	// depth holds the terrain. Light that part like the terrain it fades into by bending its normal up.
 	[branch] if (SharedData::terrainBlendingSettings.Enabled)
@@ -2457,8 +2484,13 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		[branch] if (buriedDepth > 0.0)
 		{
 			// A downward normal passes through zero halfway, so fall back to up there instead of normalizing it
-			const float3 blendedNormal = lerp(worldNormal, float3(0, 0, 1), saturate(buriedDepth / 10.0));
+			const float normalBlend = saturate(buriedDepth / 10.0);
+			const float3 blendedNormal = lerp(worldNormal, float3(0, 0, 1), normalBlend);
 			worldNormal = dot(blendedNormal, blendedNormal) > 1e-6 ? normalize(blendedNormal) : float3(0, 0, 1);
+#		if defined(TREE_SNOW_COVERAGE_NORMAL)
+			const float3 treeSnowBlendedNormal = lerp(treeSnowCoverageNormal, float3(0, 0, 1), normalBlend);
+			treeSnowCoverageNormal = dot(treeSnowBlendedNormal, treeSnowBlendedNormal) > 1e-6 ? normalize(treeSnowBlendedNormal) : float3(0, 0, 1);
+#		endif
 		}
 	}
 #	endif
@@ -2655,8 +2687,10 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 			material.Roughness = skinRoughness * skinData.physicalParams.x;
 			material.RoughnessSecondary = skinRoughness * skinData.physicalParams.y;
 		}
-		material.Roughness = clamp(material.Roughness + extraRoughness, 0.02f, 1.0f);
-		material.RoughnessSecondary = clamp(material.RoughnessSecondary + extraRoughness, 0.02f, 1.0f);
+		const float3 skinNormalDx = ddx(worldNormal.xyz);
+		const float3 skinNormalDy = ddy(worldNormal.xyz);
+		material.Roughness = Skin::FilterRoughness(clamp(material.Roughness + extraRoughness, 0.02f, 1.0f), skinNormalDx, skinNormalDy);
+		material.RoughnessSecondary = Skin::FilterRoughness(clamp(material.RoughnessSecondary + extraRoughness, 0.02f, 1.0f), skinNormalDx, skinNormalDy);
 		material.SecondarySpecIntensity = skinData.skinParams2.x;
 		material.Thickness = 1.0f - saturate(skinsk.x);
 		material.F0 = hasSkinExtra ? 0.08f * skinSpecular * skinData.physicalParams.z : skinData.skinParams2.zzz;
@@ -2915,6 +2949,9 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		if defined(TREE_ANIM)
 		snowNormal = normalize(snowNormal + float3(0, 0, 0.5));
 		float3 treeSnowNormal = snowNormal;
+#			if defined(TREE_SNOW_COVERAGE_NORMAL)
+		snowNormal = normalize(treeSnowCoverageNormal + float3(0, 0, 0.5));
+#			endif
 		if (SharedData::snowCoverSettings.AffectTreeTint && !(Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::NoFoliageTint))
 			SnowCover::ApplyFoliageColor(material.BaseColor, SnowCover::GetEnvironmentalMultiplier(adjustedWorldPos));
 #		elif defined(DO_ALPHA_TEST)
@@ -3287,10 +3324,18 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 			if (NearTreeLeaf)
 				screenSpaceShadows = lerp(1.0, screenSpaceShadows, lerp(1.0, SharedData::nearTreeLeafSettings.ScreenShadow, NearTreeLeafWeight));
 #		endif
-#		if defined(SKINNED) || defined(SKIN) || defined(HAIR)
-			screenSpaceShadows.x = lerp(1.0, screenSpaceShadows.x, saturate(4.0 * dirLightAngle));
+			float contactLightAngle = dirLightAngle;
+			float contactStrength = 1.0;
+#		if defined(CS_SKIN_SHADING)
+			if (skinEnabled) {
+				contactLightAngle = dot(skinShadowNormal, DirLightDirection.xyz);
+				contactStrength = skinData.shadowParams.w;
+			}
 #		endif
-			if (dirLightAngle >= 0.0)
+#		if defined(SKINNED) || defined(SKIN) || defined(HAIR)
+			screenSpaceShadows.x = lerp(1.0, screenSpaceShadows.x, saturate(4.0 * contactLightAngle) * contactStrength);
+#		endif
+			if (contactLightAngle >= 0.0)
 				dirDetailedShadow *= screenSpaceShadows.x;
 			dirTransmissionContactShadow = dirLightAngle >= 0.0 ? screenSpaceShadows.x : screenSpaceShadows.y;
 		}
@@ -3334,6 +3379,21 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		endif  // LANDSCAPE
 	}
 #	endif  // defined(EMAT) && (defined(SKINNED) || !defined(MODELSPACENORMALS))
+
+#	if defined(CS_SKIN_SHADING)
+	[branch] if (skinEnabled && inWorld && !inReflection && skinData.shadowParams.x > 0.0 && dirDetailedShadow > 0.0 && dot(skinShadowNormal, DirLightDirection.xyz) > 0.0)
+	{
+		float4 skinShadowParams = skinData.shadowParams;
+		skinShadowParams.x *= 1.0 - smoothstep(512.0, 1024.0, viewPosition.z);
+#		if defined(MODELSPACENORMALS) && !defined(SKINNED)
+		const float3x3 skinShadowDecode = float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1);
+#		else
+		const float3x3 skinShadowDecode = tbn;
+#		endif
+		[branch] if (skinShadowParams.x > 0.0)
+			dirDetailedShadow *= Skin::NormalMapShadow(TexNormalSampler, SampNormalSampler, uv, skinShadowDecode, skinShadowFrame, DirLightDirection.xyz, skinWorldPerUV, skinUVFootprint, skinShadowParams);
+	}
+#	endif
 
 #	if defined(EMAT_NMS)
 	[branch] if (nmsStrength > 0.0 && dirLightAngle > 0.0 && dirDetailedShadow > 0.0)

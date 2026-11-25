@@ -34,6 +34,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Thickness,
 	AOPower,
 	GIStrength,
+	ILSaturation,
 	EnableMultiBounce,
 	UseDynamicCubemapsAsFallback,
 	DiffuseCubemapMult,
@@ -203,6 +204,9 @@ void ScreenSpaceGI::DrawSettings()
 					resetReblurHistory = true;
 					hasMultiBounceHistory = false;
 				}
+				ImGui::SliderFloat(T(TKEY("il_saturation"), "IL Saturation"), &settings.ILSaturation, 0.f, 2.f, "%.2f");
+				if (auto _tt = Util::HoverTooltipWrapper())
+					ImGui::Text("%s", T(TKEY("il_saturation_tooltip"), "Colour of the bounce light. Below 1 keeps sunlit grass and ground from tinting shade, so it keeps the sky's cool fill; 1 is unchanged."));
 			}
 			if (ImGui::Checkbox(T(TKEY("multi_bounce"), "Multi-Bounce"), &settings.EnableMultiBounce)) {
 				resetReblurHistory = true;
@@ -367,6 +371,7 @@ void ScreenSpaceGI::LoadSettings(json& o_json)
 	ResetIfOutOfRange(settings.Thickness, 0.0f, 0.2f, defaults.Thickness);
 	ResetIfOutOfRange(settings.AOPower, 0.0f, 6.0f, defaults.AOPower);
 	ResetIfOutOfRange(settings.GIStrength, 0.0f, 6.0f, defaults.GIStrength);
+	ResetIfOutOfRange(settings.ILSaturation, 0.0f, 2.0f, defaults.ILSaturation);
 	ResetIfOutOfRange(settings.DiffuseCubemapMult, 0.0f, 5.0f, defaults.DiffuseCubemapMult);
 	settings.FallbackSkyBoost = Util::ClampFinite(settings.FallbackSkyBoost, defaults.FallbackSkyBoost, 0.0f, 1.0f);
 	ResetIfOutOfRange(settings.DiffusePrepassBlurRadius, 0.0f, 75.0f, defaults.DiffusePrepassBlurRadius);
@@ -518,13 +523,16 @@ void ScreenSpaceGI::SetupResources()
 		mainTex.texture->GetDesc(&texDesc);
 		srvDesc.Format = uavDesc.Format = texDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-		texDesc.MipLevels = srvDesc.Texture2D.MipLevels = 5;
+		const uint mipCount = std::clamp<uint>(static_cast<uint>(std::bit_width(std::min(texDesc.Width, texDesc.Height))), 1u, 5u);
+		texDesc.MipLevels = srvDesc.Texture2D.MipLevels = mipCount;
+		for (uint i = 0; i < 5; ++i)
+			uavRadiance[i] = uavWorkingDepth[i] = uavNormal[i] = nullptr;
 
 		{
 			texRadiance = eastl::make_unique<Texture2D>(texDesc, "SSGI::Radiance");
 			texRadiance->CreateSRV(srvDesc);
 
-			for (uint i = 0; i < 5; ++i) {
+			for (uint i = 0; i < mipCount; ++i) {
 				D3D11_UNORDERED_ACCESS_VIEW_DESC mipUavDesc = {
 					.Format = DXGI_FORMAT_R16G16B16A16_FLOAT,
 					.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D,
@@ -542,10 +550,10 @@ void ScreenSpaceGI::SetupResources()
 		{
 			texWorkingDepth = eastl::make_unique<Texture2D>(texDesc, "SSGI::WorkingDepth");
 			texWorkingDepth->CreateSRV(srvDesc);
-			for (int i = 0; i < 5; ++i) {
+			for (uint i = 0; i < mipCount; ++i) {
 				uavDesc.Texture2D.MipSlice = i;
 				DX::ThrowIfFailed(device->CreateUnorderedAccessView(texWorkingDepth->resource.get(), &uavDesc, uavWorkingDepth[i].put()));
-				Util::SetResourceName(uavWorkingDepth[i].get(), "SSGI::WorkingDepth UAV mip%d", i);
+				Util::SetResourceName(uavWorkingDepth[i].get(), "SSGI::WorkingDepth UAV mip%u", i);
 			}
 		}
 
@@ -553,7 +561,7 @@ void ScreenSpaceGI::SetupResources()
 		{
 			texNormal = eastl::make_unique<Texture2D>(texDesc, "SSGI::Normal");
 			texNormal->CreateSRV(srvDesc);
-			for (uint i = 0; i < 5; ++i) {
+			for (uint i = 0; i < mipCount; ++i) {
 				uavDesc.Texture2D.MipSlice = i;
 				DX::ThrowIfFailed(device->CreateUnorderedAccessView(texNormal->resource.get(), &uavDesc, uavNormal[i].put()));
 				Util::SetResourceName(uavNormal[i].get(), "SSGI::Normal UAV mip%u", i);
@@ -1023,6 +1031,7 @@ void ScreenSpaceGI::DrawSSGI()
 
 		resetViews();
 		srvs.at(0) = texWorkingDepth->srv.get();
+		srvs.at(1) = renderer->GetRuntimeData().renderTargets[MASKS].SRV;
 		srvs.at(2) = texRadiance->srv.get();
 		srvs.at(3) = texNoise->srv.get();
 		if (dynamicCubemaps.loaded) {
@@ -1229,7 +1238,7 @@ ScreenSpaceGI::SharedData ScreenSpaceGI::GetCommonBufferData()
 	data.EnableIL = (enabled && settings.EnableGI) ? 1u : 0u;
 	data.ReplaceAmbient = (data.EnableIL && UsesCubemapFallback()) ? 1u : 0u;
 	data.AOPower = settings.AOPower;
-	data.ILSaturation = appliedE11Overlay.active ? userSettings.E11ILSaturation : 1.0f;
+	data.ILSaturation = appliedE11Overlay.active ? userSettings.E11ILSaturation : settings.ILSaturation;
 	data.FallbackSkyBoost = std::clamp(settings.FallbackSkyBoost, 0.0f, 1.0f);
 	return data;
 }

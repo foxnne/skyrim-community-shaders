@@ -14,6 +14,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	ExposureCompensation,
 	AdaptationRange,
 	AdaptArea,
+	InteriorBrightening,
 	AdaptSpeed,
 	NightAdaptationRange,
 	NightExposureCompensation,
@@ -167,6 +168,10 @@ void HistogramAutoExposure::DrawSettings()
 			T("feature.post_processing.histogram_auto_exposure.min_max_the_average_scene_luminance_will_be",
 				"[Min, Max] The average scene luminance will be clamped between them when doing auto exposure. "
 				"Turning up the minimum, for example, makes it adapt less to darkness and therefore prevents over-brightening of dark scenes."));
+	ImGui::SliderFloat(T("feature.post_processing.histogram_auto_exposure.interior_brightening", "Interior Brightening"), &settings.InteriorBrightening, 0.f, 5.f, "%.2f EV", ImGuiSliderFlags_AlwaysClamp);
+	if (auto _tt = Util::HoverTooltipWrapper())
+		ImGui::TextUnformatted(T("feature.post_processing.histogram_auto_exposure.interior_brightening_tooltip",
+			"Lowers the Adaptation Range minimum by this many stops in interiors, so dark caves and dungeons can brighten further while night exteriors stay dark. 0 uses the same minimum everywhere."));
 	ImGui::EndDisabled();
 
 	ImGui::BeginDisabled(cam != nullptr);

@@ -413,6 +413,15 @@ float2 GetShadowProjectionScale(float4x3 projection)
 		length(float3(projection[0].z, projection[1].z, projection[2].z)));
 }
 
+#	if defined(RENDER_SHADOWMASK)
+float GetCascadeCompareOffset(float4x3 projection, float engineOffset)
+{
+	float cascade0DepthScale = GetShadowProjectionScale(ShadowMapProj[0]).y;
+	float cascadeDepthScale = GetShadowProjectionScale(projection).y;
+	return min(engineOffset, AlphaTestRef.y * cascadeDepthScale / max(cascade0DepthScale, 1e-12));
+}
+#	endif
+
 float SampleShadowPCSS(Texture2DArray<float4> tex, SamplerComparisonState samp, float2 baseUV, float layerIndex, float compareValue, float2x2 rotationMatrix, float2 projectionScale, float maxOccluderDistance)
 {
 	uint width, height, elements;
@@ -516,7 +525,11 @@ PS_OUTPUT main(PS_INPUT input)
 	baseTexCoord = input.TexCoord0.xy;
 #		endif
 #	endif
+#	if defined(RENDER_SHADOWMAP) && defined(ALPHA_TEST)
+	float4 baseColor = TexBaseSampler.Sample(SampBaseSampler, baseTexCoord);
+#	else
 	float4 baseColor = TexBaseSampler.SampleBias(SampBaseSampler, baseTexCoord, SharedData::MipBias);
+#	endif
 
 #	if defined(RENDER_SHADOWMAP_PB)
 	if (input.TexCoord1.z < 0) {
@@ -598,21 +611,24 @@ PS_OUTPUT main(PS_INPUT input)
 	if (EndSplitDistances.z >= shadowMapDepth) {
 		float4x3 lightProjectionMatrix = ShadowMapProj[0];
 		float shadowMapThreshold = AlphaTestRef.y;
+		float cascadeCompareOffset = AlphaTestRef.y;
 		float cascadeIndex = 0;
 		if (2.5 < EndSplitDistances.w && EndSplitDistances.y < shadowMapDepth) {
 			lightProjectionMatrix = ShadowMapProj[2];
 			shadowMapThreshold = AlphaTestRef.z;
+			cascadeCompareOffset = GetCascadeCompareOffset(ShadowMapProj[2], AlphaTestRef.z);
 			cascadeIndex = 2;
 		} else if (EndSplitDistances.x < shadowMapDepth) {
 			lightProjectionMatrix = ShadowMapProj[1];
 			shadowMapThreshold = AlphaTestRef.z;
+			cascadeCompareOffset = GetCascadeCompareOffset(ShadowMapProj[1], AlphaTestRef.z);
 			cascadeIndex = 1;
 		}
 
 		float shadowVisibility = 0;
 
 		float3 positionLS = mul(transpose(lightProjectionMatrix), float4(positionMS.xyz, 1)).xyz;
-		float shadowMapCompareValue = positionLS.z - shadowMapThreshold;
+		float shadowMapCompareValue = positionLS.z - cascadeCompareOffset;
 
 #			if SHADOWFILTER == 0
 		float shadowMapValue = TexShadowMapSampler.Sample(SampShadowMapSampler, float3(positionLS.xy, cascadeIndex)).x;
@@ -634,7 +650,7 @@ PS_OUTPUT main(PS_INPUT input)
 			float cascade1ShadowVisibility = 0;
 
 			float3 cascade1PositionLS = mul(transpose(ShadowMapProj[1]), float4(positionMS.xyz, 1)).xyz;
-			float cascade1ShadowMapCompareValue = cascade1PositionLS.z - AlphaTestRef.z;
+			float cascade1ShadowMapCompareValue = cascade1PositionLS.z - GetCascadeCompareOffset(ShadowMapProj[1], AlphaTestRef.z);
 
 #			if SHADOWFILTER == 0
 			float cascade1ShadowMapValue = TexShadowMapSampler.Sample(SampShadowMapSampler, float3(cascade1PositionLS.xy, 1)).x;

@@ -10,6 +10,11 @@
 #include "Common/Random.hlsli"
 #include "Common/SharedData.hlsli"
 #include "Common/Skinned.hlsli"
+
+#ifndef FIRE_YELLOW_AMOUNT
+#	define FIRE_YELLOW_AMOUNT 0.6  // 0 = authored flame colour, 1 = fully pulled to the target
+#	define FIRE_YELLOW_TARGET 0.5  // green as a share of red for a red flame texel (0.5 = amber; 0.72 went lemon)
+#endif
 #define EFFECT
 
 #if defined(SOFT) && defined(NORMALS) && defined(TEXTURE) && defined(FALLOFF) && defined(VC) && \
@@ -934,7 +939,10 @@ PS_OUTPUT main(PS_INPUT input)
 	{
 		const uint additiveClass = GetEffectClass();
 		if (additiveClass == EffectClass::Fire) {
-			const float3 fireColor = max(baseColor.xyz, 0.0);
+			float3 fireColor = max(baseColor.xyz, 0.0);
+			// foxnne: flames more yellow than red (user 2026-11-23). Where a flame texel is red-dominant, raise green
+			// toward the red channel; texels that are already yellow or white are untouched.
+			fireColor.g = lerp(fireColor.g, max(fireColor.g, fireColor.r * FIRE_YELLOW_TARGET), FIRE_YELLOW_AMOUNT);
 			baseColor.xyz = pow(fireColor, SharedData::postProcessingSettings.FireCurve) * SharedData::postProcessingSettings.FireIntensity;
 			const float fireColorPreservation = SharedData::postProcessingSettings.FireColorPreservation;
 			[branch] if (fireColorPreservation > 0.0)

@@ -164,6 +164,26 @@ Texture3D<unorm float4> TexCloudShapeNoise : register(t4);
 #ifndef CLOUD_DETILE_AMOUNT
 #	define CLOUD_DETILE_AMOUNT 0.19  // horizontal slide of the puff pattern (noise tiles); 0.19 keeps local stretch under ~35%; 0 = original repeating pattern
 #endif
+// foxnne tall clouds: the weather map is extruded straight up, so a layer taller than ~1.5 km renders as vertical-sided
+// slabs. Both terms below scale with the layer thickness (0 at 1.3 km, full at 2.8 km), so the 900 m fair-weather
+// layer is untouched.
+#ifndef CLOUD_BILLOW_METERS
+#	define CLOUD_BILLOW_METERS 500.0  // sideways warp of the map lookup by ~550 m 3D noise lobes, growing with height; 0 = off
+#endif
+#ifndef CLOUD_TAPER
+#	define CLOUD_TAPER 0.6  // how much broken columns narrow toward the top (domes instead of walls); 0 = off
+#	define CLOUD_LOBE_ON 1  // mid-scale turrets carved into the cloud profile before fine erosion; 0 = original popcorn-only shapes
+#	define CLOUD_LOBE_SCALE 0.1  // fraction of the shape-noise frequency: 0.1 = 2300 m tile, lobes of roughly 260-780 m
+#	define CLOUD_LOBE_STRENGTH 0.45  // how deep the gaps between turrets cut (profile units, 0..1)
+#	define CLOUD_LOBE_LOW 0.15  // noise value below which the cut is full
+#	define CLOUD_LOBE_HIGH 0.5  // noise value above which nothing is cut (turret cores)
+#	define CLOUD_FRINGE_ON 1  // remove the ring of repeated puffs around cloud edges; 0 = original
+#	define CLOUD_FRINGE_LOW 0.10  // profile below this carries no cloud
+#	define CLOUD_FRINGE_HIGH 0.32  // profile above this is untouched
+#endif
+#ifndef CLOUD_DETILE_TILT
+#	define CLOUD_DETILE_TILT 1.0  // lean of the vertical noise repeat (tall layers); 0 = off
+#endif
 #ifndef CLOUD_DETILE_SLICE
 #	define CLOUD_DETILE_SLICE 0.2  // vertical slide: neighbouring puffs take noise slices ~0.25 tile apart; 0 = off
 #endif
@@ -825,7 +845,10 @@ float CloudNdfProfile(inout NDFInfo ndf)
 	const float verticalProfile = max(topProfile * bottom, 0.0);
 	const float heightFade = saturate(ndf.height_fraction / info.coverageHeightRange);
 	const float exponent = lerp(lerp(lerp(info.coverageBottomPower, 1.0, heightFade), 1.0, saturate((ndf.storm - 0.15) * 20.0)), 1.0, heightFade);
-	const float coverageProfile = pow(ndf.coverage, exponent);
+	// Tall layers: a column loses coverage with height, so cells narrow upward. Full coverage (a closed deck) is unchanged.
+	const float tallLayer = saturate((max(ndf.altitude.y - ndf.altitude.x, 0.0) * GAME_UNIT_TO_M - 1300.0) / 1500.0);
+	const float taper = CLOUD_TAPER * tallLayer * ndf.height_fraction * ndf.height_fraction;
+	const float coverageProfile = pow(saturate((ndf.coverage - taper) / max(1.0 - taper, 1e-3)), exponent);
 	return verticalProfile * coverageProfile;
 }
 
@@ -969,9 +992,14 @@ float3 WeatherCloudNoisePosition(float zMeters, float2 fieldMeters, float height
 			sin(q.y * 1.87 + 1.4 * sin(q.x * 2.57 + 4.0)) + 0.6 * sin(q.x * 4.31 + 0.9));
 		noiseXY += slide * CLOUD_DETILE_AMOUNT;
 	}
+	// foxnne: the noise tile also repeats every 287 m going up, so a tall layer stacked identical copies into vertical
+	// strings. Lean the repeat axis (~17 deg) so the copy one tile up sits 0.36 / 0.24 tile sideways, and let the slice
+	// slide drift slowly with height. Static in time, so reprojection is unaffected.
+	noiseXY += zMeters * float2(0.00127, -0.00083) * CLOUD_DETILE_TILT;
 	return float3(noiseXY, (zMeters - 20.0 + bottomFade * 10.0) * 0.0034834063 -
 							   info.cloudEvolution.x * (1.0 / 6.283185307179586) +
-							   sin(fieldMeters.x * 0.00213 + 2.0 * sin(fieldMeters.y * 0.00167)) * CLOUD_DETILE_SLICE);
+							   sin(fieldMeters.x * 0.00213 + 2.0 * sin(fieldMeters.y * 0.00167)) * CLOUD_DETILE_SLICE +
+							   0.15 * CLOUD_DETILE_TILT * sin(zMeters * 0.0011 + fieldMeters.y * 0.0009));
 }
 
 float sampleCloudDensityFromContext(
@@ -1015,6 +1043,20 @@ float sampleCloudDensityFromContext(
 		}
 	}
 	float profile = ndf.dimension_profile;
+#if CLOUD_LOBE_ON
+	// foxnne: mid-scale lobes. The shape noise only has 26-77 m lobes (tile 230 m), so every cloud is a map outline
+	// decorated with popcorn; real cumulus is built from rounded turrets of a few hundred metres, and the small detail
+	// only decorates those. Read the same noise volume again at a fraction of the frequency (cellular channel: rounded
+	// cells) and let it bite into the profile before the fine erosion. It only carves, so coverage never grows past
+	// the weather map, and it fades in above the base so cloud bottoms stay flat.
+	[branch] if (info.skipShapeNoise == 0u && !ndf.stormVolume && !voxelNoise)
+	{
+		const float3 lobeCoordinates = density_context.noise_coordinates * CLOUD_LOBE_SCALE + float3(0.37, 0.61, 0.19);
+		const float lobe = TexCloudShapeNoise.SampleLevel(TileableSampler, lobeCoordinates, 0.0).g;
+		const float lift = saturate((ndf.height_fraction - 0.15) * 3.0);
+		profile = saturate(profile - CLOUD_LOBE_STRENGTH * lift * (1.0 - smoothstep(CLOUD_LOBE_LOW, CLOUD_LOBE_HIGH, lobe)));
+	}
+#endif
 #ifndef NO_CLOUD_STORMS
 	if (risingBillows) {
 		// G is generated by the local Alligator kernel. Use its large cells to
@@ -1054,6 +1096,14 @@ float sampleCloudDensityFromContext(
 		}
 #endif
 	}
+#if CLOUD_FRINGE_ON
+	// foxnne: the echo around cloud edges. Where the profile is low, erosion leaves only the highest noise peaks, and
+	// since the fine noise repeats every 230 m those peaks are the same few puffs over and over: a fringe of identical
+	// blobs ringing every cloud (user 2026-11-23: "echo duplication around cloud edges"). Fade density out across the
+	// outermost part of the profile so a cloud ends at its own edge. Storm volumes keep their own edges.
+	if (!ndf.stormVolume)
+		eroded *= smoothstep(CLOUD_FRINGE_LOW, CLOUD_FRINGE_HIGH, profile);
+#endif
 #ifdef NO_CLOUD_STORMS
 	const float densityScale = info.lowDensityScale;
 #elif defined(VOLCANIC_STORMS_ONLY)
@@ -1101,7 +1151,18 @@ float sampleWeatherCloudDensity(
 		return 0.0;
 
 	const float2 fieldMeters = CloudFieldPosition((pos.xy - info.noiseWindOffset) * GAME_UNIT_TO_M, info.cloudEvolution.xy);
-	density_context.ndf = sampleNDF(fieldMeters * GAME_UNITS_PER_METER, pos.xy, profileAltitude);
+	float2 mapMeters = fieldMeters;
+	{
+		const float slab = max(info.lowCloudTopAltitude - info.lowCloudBaseAltitude, 1.0);
+		const float tallLayer = saturate((slab * GAME_UNIT_TO_M - 1300.0) / 1500.0) * CLOUD_BILLOW_METERS;
+		[branch] if (tallLayer > 0.0)
+		{
+			const float heightEstimate = saturate((profileAltitude - info.lowCloudBaseAltitude) / slab);
+			const float2 lobes = TexCloudShapeNoise.SampleLevel(TileableSampler, float3(fieldMeters, pos.z * GAME_UNIT_TO_M) * 0.0006, 2).gb;
+			mapMeters += (lobes - 0.5) * (tallLayer * saturate(heightEstimate * 2.0));
+		}
+	}
+	density_context.ndf = sampleNDF(mapMeters * GAME_UNITS_PER_METER, pos.xy, profileAltitude);
 	density_context.weather_height_fraction = density_context.ndf.height_fraction;
 	if (!density_context.ndf.in_layer || density_context.ndf.dimension_profile <= 0.0)
 		return 0;

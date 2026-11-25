@@ -4,6 +4,7 @@
 
 #include "../I18n/I18n.h"
 #include "Globals.h"
+#include "Features/RemoteControl/ReferenceClock.h"
 #include "State.h"
 
 #define I18N_KEY_PREFIX "feature.tree_wind."
@@ -536,6 +537,11 @@ void TreeWind::Reset()
 	if (phase > kPhaseWrap) {
 		phase -= kPhaseWrap;
 		prevPhase -= kPhaseWrap;
+	}
+	// Reference shots: every tree stands in the same pose.
+	if (ReferenceClock::on.load(std::memory_order_relaxed)) {
+		phase = std::fmod(static_cast<double>(ReferenceClock::seconds.load(std::memory_order_relaxed)) * settings.BaseSpeed, kPhaseWrap);
+		prevPhase = phase;
 	}
 
 	// The map menus draw the LOD too; it sways there only with Sway on World Map. While off, the draws skip all

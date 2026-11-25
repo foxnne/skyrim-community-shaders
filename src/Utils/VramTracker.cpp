@@ -52,6 +52,7 @@ namespace VramTracker
 		std::vector<std::pair<HMODULE, std::string>> g_mods;
 
 		bool g_active = false;
+		bool g_priority = true;
 
 		// Engine call sites of large allocations: up to three SkyrimSE.exe return addresses (innermost first)
 		struct Site
@@ -59,6 +60,7 @@ namespace VramTracker
 			uint32_t rva[3]{};
 			int64_t windowBytes = 0, windowCount = 0, totalBytes = 0;
 			int cat = 0;
+			std::string chain;  // every module on the stack, innermost first: who really made the call
 		};
 		std::mutex g_siteMutex;
 		std::unordered_map<uint64_t, Site> g_sites;
@@ -69,8 +71,8 @@ namespace VramTracker
 		{
 			if (a_bytes < kSiteMinBytes || !g_exeBase)
 				return;
-			void* frames[24];
-			const USHORT count = RtlCaptureStackBackTrace(2, 24, frames, nullptr);
+			void* frames[40];
+			const USHORT count = RtlCaptureStackBackTrace(2, 40, frames, nullptr);
 			Site site;
 			int found = 0;
 			uint64_t key = static_cast<uint64_t>(a_cat) * 0x9E3779B97F4A7C15ull;
@@ -88,6 +90,24 @@ namespace VramTracker
 			if (entry.totalBytes == 0) {
 				std::memcpy(entry.rva, site.rva, sizeof(site.rva));
 				entry.cat = a_cat;
+				// Another plugin can wrap the device (Hitch Hunter does), so the direct caller says nothing.
+				// Name every module on the stack once per site; consecutive frames of one module collapse.
+				std::string last;
+				int listed = 0;
+				for (USHORT i = 0; i < count && listed < 12; ++i) {
+					HMODULE h = nullptr;
+					if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(frames[i]), &h) || !h)
+						continue;
+					wchar_t buf[MAX_PATH] = {};
+					if (!GetModuleFileNameW(h, buf, MAX_PATH))
+						continue;
+					const std::string name = std::filesystem::path(buf).filename().string();
+					if (name == last)
+						continue;
+					last = name;
+					entry.chain += std::format("{}{}+{:X}", listed ? " < " : "", name, reinterpret_cast<uintptr_t>(frames[i]) - reinterpret_cast<uintptr_t>(h));
+					++listed;
+				}
 			}
 			entry.windowBytes += a_bytes;
 			entry.windowCount += 1;
@@ -239,7 +259,17 @@ namespace VramTracker
 			{
 				void* ret = _ReturnAddress();
 				const HRESULT hr = func(a_this, a_desc, a_init, a_out);
-				if (SUCCEEDED(hr) && a_out && *a_out && a_desc) {
+				// When video memory runs over (far travel, other programs holding memory) Windows moves something of this
+				// process to slow shared memory. Left alone it picked the Neural Rendering working set: 6 ms became 350 ms
+				// and stayed there (2026-11-24). Plain asset textures go first instead; anything rendered into stays.
+				if (g_priority && SUCCEEDED(hr) && a_out && *a_out && a_desc && a_desc->Usage != D3D11_USAGE_STAGING) {
+					const bool target = (a_desc->BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_UNORDERED_ACCESS)) != 0 ||
+					                    (a_desc->MiscFlags & (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX)) != 0;
+					Microsoft::WRL::ComPtr<IDXGIResource> dxgi;
+					if (SUCCEEDED((*a_out)->QueryInterface(IID_PPV_ARGS(&dxgi))))
+						dxgi->SetEvictionPriority(target ? DXGI_RESOURCE_PRIORITY_MAXIMUM : DXGI_RESOURCE_PRIORITY_LOW);
+				}
+				if (g_active && SUCCEEDED(hr) && a_out && *a_out && a_desc) {
 					int cat;
 					const UINT maxDim = std::max(a_desc->Width, a_desc->Height);
 					if (a_desc->Usage == D3D11_USAGE_STAGING)
@@ -286,6 +316,11 @@ namespace VramTracker
 	{
 		try {
 			const auto dir = Util::PathHelpers::GetCommunityShaderPath();
+			// On unless VramPriority.off exists: sets which memory Windows may move out first (see CreateTexture2DHook).
+			g_priority = !std::filesystem::exists(dir / "VramPriority.off");
+			if (g_priority || std::filesystem::exists(dir / "VramTrack.on"))
+				stl::detour_vfunc<5, CreateTexture2DHook>(a_device);
+			logger::info("[VramTracker] eviction priority {}", g_priority ? "on" : "off (VramPriority.off)");
 			if (!std::filesystem::exists(dir / "VramTrack.on"))
 				return;
 			g_outPath = dir / "VramTrack.jsonl";
@@ -304,7 +339,6 @@ namespace VramTracker
 
 			stl::detour_vfunc<3, CreateBufferHook>(a_device);
 			stl::detour_vfunc<4, CreateTexture1DHook>(a_device);
-			stl::detour_vfunc<5, CreateTexture2DHook>(a_device);
 			stl::detour_vfunc<6, CreateTexture3DHook>(a_device);
 			g_active = true;
 			logger::info("[VramTracker] active, writing {}", g_outPath.string());
@@ -397,7 +431,7 @@ namespace VramTracker
 				const auto& site = top[i];
 				if (site.windowBytes < 1024 * 1024)
 					break;
-				sites.push_back({ { "rva", std::format("{:X}>{:X}>{:X}", site.rva[0], site.rva[1], site.rva[2]) },
+				sites.push_back({ { "chain", site.chain }, { "rva", std::format("{:X}>{:X}>{:X}", site.rva[0], site.rva[1], site.rva[2]) },
 					{ "cat", kCatNames[site.cat] },
 					{ "mb", std::round(site.windowBytes * kMB * 10) / 10 },
 					{ "n", site.windowCount } });

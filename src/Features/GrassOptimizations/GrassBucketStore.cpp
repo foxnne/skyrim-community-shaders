@@ -398,7 +398,7 @@ void GrassBucketStore::EndFrame()
 
 void GrassBucketStore::DrainPending()
 {
-	std::vector<PendingEvent> events;
+	decltype(readyEvents) events;
 	{
 		std::scoped_lock lock(pendingMutex);
 		events.swap(readyEvents);

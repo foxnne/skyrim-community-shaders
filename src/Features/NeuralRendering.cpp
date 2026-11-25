@@ -16,6 +16,7 @@
 #include "Upscaling.h"
 #include "Utils/FileSystem.h"
 #include "Utils/Game.h"
+#include "Utils/RenderPassGuard.h"
 #include "Utils/UI.h"
 #include "imgui_stdlib.h"
 
@@ -1751,6 +1752,10 @@ void NeuralRendering::BSLightingShader_SetupGeometry::thunk(RE::BSShader* This, 
 
 void NeuralRendering::BSBatchRenderer_RenderPassImmediately::thunk(RE::BSRenderPass* a_pass, uint32_t a_technique, bool a_alphaTest, uint32_t a_renderFlags)
 {
+	// Outermost thunk on this call site when Fur Shells is not loaded; a_pass->shader is read below.
+	if (!Util::RenderPassGuard::IsDrawable(a_pass, a_technique)) [[unlikely]]
+		return;
+
 	auto& neuralRendering = globals::features::neuralRendering;
 	auto* deferred = globals::deferred;
 	auto* state = globals::state;

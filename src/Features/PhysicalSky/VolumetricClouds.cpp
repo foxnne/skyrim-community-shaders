@@ -3,6 +3,7 @@
 #include "Deferred.h"
 #include "Features/CloudShadows.h"
 #include "Features/PostProcessing/RasterPass.h"
+#include "Features/RemoteControl/ReferenceClock.h"
 #include "Features/TerrainShadows.h"
 #include "Features/ViewAtmosphere.h"
 #include "State.h"
@@ -10,6 +11,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <imgui.h>
 #include <limits>
@@ -19,6 +22,26 @@
 namespace
 {
 	constexpr float KilometersToGameUnits(float value) { return value / Util::Units::GAME_UNIT_TO_KM; }
+
+	// The low cloud deck as last drawn (world Z, game units), for other plugins: Sky Above plans its
+	// fast-travel arc through and above it. Published once per cloud frame; stale after a few seconds.
+	std::atomic<float> gDeckBaseZ{ 0.f }, gDeckTopZ{ 0.f };
+	std::atomic<int64_t> gDeckStampMs{ 0 };
+	int64_t NowMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+}
+
+// Returns false while Physical Sky has not drawn clouds in the last 3 s (interiors, feature off).
+extern "C" __declspec(dllexport) bool BottledShaders_GetCloudDeck(float* a_baseZ, float* a_topZ)
+{
+	if (!a_baseZ || !a_topZ || NowMs() - gDeckStampMs.load(std::memory_order_relaxed) > 3000)
+		return false;
+	*a_baseZ = gDeckBaseZ.load(std::memory_order_relaxed);
+	*a_topZ = gDeckTopZ.load(std::memory_order_relaxed);
+	return true;
+}
+
+namespace
+{
 
 	struct CloudMsQuadrature
 	{
@@ -994,13 +1017,29 @@ void PhysicalSky::UpdateCloudWind()
 	auto* ui = globals::game::ui;
 	if (!ui || ui->GameIsPaused())
 		return;
-	const double elapsed = RE::GetSecondsSinceLastFrame();
+	// Reference shots: the field is what it would be a fixed time after the game started, whatever has passed since.
+	const bool reference = ReferenceClock::on.load(std::memory_order_relaxed);
+	double elapsed = reference ? static_cast<double>(ReferenceClock::seconds.load(std::memory_order_relaxed)) : static_cast<double>(RE::GetSecondsSinceLastFrame());
 	if (!std::isfinite(elapsed) || elapsed <= 0.0)
 		return;
+	// Time-lapse: when time runs faster than the vanilla TimeScale of 20 (a fast-travel flight that shows
+	// the hours passing), the clouds drift and develop that much faster too. Normal play is unchanged.
+	if (!reference) {
+		static auto* timeScale = RE::TESForm::LookupByID<RE::TESGlobal>(0x3A);
+		if (timeScale && std::isfinite(timeScale->value))
+			elapsed *= std::clamp(static_cast<double>(timeScale->value) / 20.0, 1.0, 250.0);
+	}
 
 	const auto& layer = settings.cloudLayer;
 	const float2 lowVelocity = CloudVelocity(layer.wind.lowVelocity);
 	const float2 highVelocity = CloudVelocity(layer.wind.highVelocity);
+	if (reference) {
+		volWind.lowOffset = {};
+		volWind.highOffset = {};
+		volWind.phase = 0.0;
+		volWind.stormTime = 0.0;
+		horizonCloudDrift = 0.0;
+	}
 	volWind.lowOffset[0] += lowVelocity.x * elapsed;
 	volWind.lowOffset[1] += lowVelocity.y * elapsed;
 	volWind.highOffset[0] += highVelocity.x * elapsed;
@@ -1072,6 +1111,17 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 			volMainHistoryValid = false;
 			volHistoryUnifiedMedium = unified;
 		}
+		// Fast camera (fast-travel flights, teleports): reprojected history smears into radial streaks,
+		// crosshatch and hard blocks inside the cloud layer (2026-11-25). Above this speed every frame
+		// starts from its own trace.
+		static RE::NiPoint3 lastEye{};
+		static bool haveLastEye = false;
+		const RE::NiPoint3 eye = Util::GetEyePosition();
+		const float dt = std::max(RE::GetSecondsSinceLastFrame(), 1e-4f);
+		if (haveLastEye && eye.GetDistance(lastEye) / dt > 6000.0f)
+			volMainHistoryValid = false;
+		lastEye = eye;
+		haveLastEye = true;
 	}
 	if (!ShadersOK())
 		return;
@@ -1155,6 +1205,9 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 	const float2 lowAltitudeRange = low.GetNdfAltitudeRangeKm();
 	const float lowCloudBaseKm = lowAltitudeRange.x;
 	const float lowCloudTopKm = lowAltitudeRange.y;
+	gDeckBaseZ.store(cbData.zBottom + KilometersToGameUnits(lowCloudBaseKm), std::memory_order_relaxed);
+	gDeckTopZ.store(cbData.zBottom + KilometersToGameUnits(lowCloudTopKm), std::memory_order_relaxed);
+	gDeckStampMs.store(NowMs(), std::memory_order_relaxed);
 	const float cloudCurvatureRadius = KilometersToGameUnits(low.GetCurvatureRadiusKm());
 	const auto localRect = localNdfManager.GetRect();
 	const auto localAltitude = localNdfManager.GetAltitude();

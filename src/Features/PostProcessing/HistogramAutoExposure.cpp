@@ -77,6 +77,9 @@ HistogramAutoExposure::ExposureParameters HistogramAutoExposure::GetExposurePara
 	}
 	auto mix = [](float2 a, float2 b, float t) { return float2{ a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t }; };
 	float2 range = mix(mix(settings.AdaptationRange, settings.NightAdaptationRange, night), settings.InteriorAdaptationRange, interior);
+	// In flight the view is miles of sunlit snow, haze and cloud, brighter than the day range allows (16 EV100):
+	// clamped there, the exposure could not come down and the picture blew out. Let it go 3 EV further.
+	range.y += 3.0f * flightBlend * (1.0f - interior);
 	float compensation = std::lerp(std::lerp(settings.ExposureCompensation, settings.NightExposureCompensation, night), settings.InteriorExposureCompensation, interior);
 	ExposureParameters parameters{
 		.LuminanceRange = { exp2(std::min(range.x, range.y) - 3.0f), exp2(std::max(range.x, range.y) - 3.0f) },
@@ -413,6 +416,18 @@ void HistogramAutoExposure::Draw(TextureInfo& inout_tex)
 	// scene too dark afterwards.
 	const bool holdAdaptation = (menuScene || globals::features::physicalSky.lightning.Transient()) && hasMeasuredAdaptation;
 
+	// Flight: rises over ~1 s once the camera is clearly flying, falls back over ~2 s after it slows.
+	{
+		const float dt = std::max(RE::BSTimer::GetSingleton()->realTimeDelta, 1e-4f);
+		const RE::NiPoint3 eye = Util::GetEyePosition();
+		const float speed = flightHaveLastEye ? eye.GetDistance(flightLastEye) / dt : 0.0f;
+		flightLastEye = eye;
+		flightHaveLastEye = true;
+		const float target = std::isfinite(speed) ? std::clamp((speed - kFlightSpeedStart) / (kFlightSpeedFull - kFlightSpeedStart), 0.0f, 1.0f) : 0.0f;
+		flightBlend += (target - flightBlend) * std::min(1.0f, dt / (target > flightBlend ? 1.0f : 2.0f));
+	}
+	const float brightSceneCompression = std::clamp(settings.BrightSceneCompression, 0.f, 1.f) * (1.0f - flightBlend);
+
 	AutoExposureCB cbData = {
 		.AdaptArea = settings.AdaptArea,
 		.AdaptationRange = parameters.LuminanceRange,
@@ -423,7 +438,7 @@ void HistogramAutoExposure::Draw(TextureInfo& inout_tex)
 		.PurkinjeStrength = settings.PurkinjeStrength,
 		.ExposureTarget = parameters.ExposureTarget,
 		.BrightSceneKneeLogLum = std::clamp(settings.BrightSceneKneeEV, kMinBrightSceneKneeEV, kMaxBrightSceneKneeEV) - 3.0f,
-		.BrightSceneCompression = owner && owner->GetActivePhysicalCameraState() ? 0.f : std::clamp(settings.BrightSceneCompression, 0.f, 1.f),
+		.BrightSceneCompression = owner && owner->GetActivePhysicalCameraState() ? 0.f : brightSceneCompression,
 	};
 	autoExposureCB->Update(cbData);
 

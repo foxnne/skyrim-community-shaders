@@ -65,7 +65,21 @@ float4 main(FullscreenTriangleVSOutput input) : SV_Target
 	lin *= exp2(ev);
 	lin *= float3(1.0 + 0.30 * temp, 1.0 - 0.20 * tint, 1.0 - 0.30 * temp);
 	float3 v = L2S(lin);
-	v = (v - pivot) * contrast + pivot;
+	// Contrast around the pivot: the plain straight line, as before, down to a small toe. Below the toe the line used to
+	// run on to zero and clip (contrast 1.1 at pivot 0.45 cut everything under 0.041 to one value), which flattened
+	// shadows into a posterized floor (user 2026-11-23). The toe rolls off exponentially from the same value and slope,
+	// so blacks stay deep but never collapse onto a single level; everything above the toe is unchanged.
+	// 2026-11-24: that exponential toe never reached zero, so night scenes sat on a grey floor (user: "still dark and
+	// the blacks are lifted"). Below the knee the curve is now a power function matched to the line in value and
+	// slope, so it still cannot clip but black in stays black out.
+	{
+		const float3 line_ = (v - pivot) * contrast + pivot;
+		const float knee = 0.12;
+		const float kneeOut = max((knee - pivot) * contrast + pivot, 1e-4);
+		const float power = max(contrast * knee / kneeOut, 1.0);
+		const float3 toeCurve = kneeOut * pow(saturate(v / knee), power);
+		v = lerp(toeCurve, line_, step(knee, v));
+	}
 	v = max((v - bp) / max(wp - bp, 1e-3), 0.0);
 	v *= gain;
 	v = v + lift * (1.0 - clamp(v, 0., 1.));
@@ -86,7 +100,8 @@ float4 main(FullscreenTriangleVSOutput input) : SV_Target
 	float l = dot(v, float3(0.2126, 0.7152, 0.0722));
 	float3 sh = (HueRGB(P3.x) - 0.5) * 2.0 * P3.y;
 	float3 hi = (HueRGB(P3.z) - 0.5) * 2.0 * P3.w;
-	v += sh * (1.0 - smoothstep(0.0, 0.5, l)) + hi * smoothstep(0.5, 1.0, l);
+	// The shadow tint fades out toward black, so the deepest darks are not all set to one tinted value.
+	v += sh * (1.0 - smoothstep(0.0, 0.5, l)) * smoothstep(0.0, 0.08, l) + hi * smoothstep(0.5, 1.0, l);
 	l = dot(v, float3(0.2126, 0.7152, 0.0722));
 	float3 h0 = RGB2HSV(clamp(v, 0., 1.));
 	v = lerp(float3(l, l, l), v, sat * (1.0 + vib * (1.0 - h0.y)));

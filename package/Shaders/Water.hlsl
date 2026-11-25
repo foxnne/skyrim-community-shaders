@@ -721,6 +721,11 @@ struct WaterNormalData
 	float4 rippleInfo;  // xyz = scaled ripple normal (normalized normal * intensity), w = splash effect intensity
 };
 
+// Far-sea wave fade (game units; 1 cell = 4096). The seam to the Horizon Fix skirt is about 94 cells out.
+#define WATER_FAR_FADE_START 25000.0
+#define WATER_FAR_FADE_END 160000.0
+#define WATER_FAR_FADE_AMOUNT 0.9
+
 WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float normalsDepthFactor, float3 viewDirection, float depth, float wetnessOcclusion)
 {
 	WaterNormalData result;
@@ -833,6 +838,17 @@ WaterNormalData GetWaterNormal(PS_INPUT input, float distanceFactor, float norma
 #			else
 	float3 finalNormal =
 		normalize(float3(0, 0, 1) + normalsAmplitude.xxx * normals1);
+#			endif
+
+#			if !defined(UNDERWATER)
+	// Far sea: waves cannot be resolved at kilometres, so their normals fade toward flat with distance. Without this
+	// the far water tiles visibly (nothing else fades it: Unified Water pins the distance blend), and the Horizon Fix
+	// skirt beyond the terrain LOD, which uses a different water record (twice the pattern size, 1.5x the amplitude),
+	// meets the nearer sea with a hard seam. Both sides now arrive at the same near-flat surface before the seam.
+	{
+		float farWaveFade = smoothstep(WATER_FAR_FADE_START, WATER_FAR_FADE_END, length(input.WPosition.xyz));
+		finalNormal = normalize(lerp(finalNormal, float3(0, 0, 1), farWaveFade * WATER_FAR_FADE_AMOUNT));
+	}
 #			endif
 
 #			if defined(WADING_RT) || defined(WADING)
@@ -1207,6 +1223,9 @@ PS_OUTPUT main(PS_INPUT input)
 	if (HorizonFix::IsEmptyDepth(DepthTex.Load(float3(screenPosition, 0)).x))
 		distanceMul = 1.0.xxxx;
 #					endif
+	// Same idea for depth: far water is treated as deep on both sides of the skirt boundary, so shallow-colour and
+	// normal-strength terms do not step where the seabed stops being drawn.
+	distanceMul = lerp(distanceMul, 1.0.xxxx, smoothstep(WATER_FAR_FADE_START, WATER_FAR_FADE_END, length(input.WPosition.xyz)));
 #				endif
 #			endif
 

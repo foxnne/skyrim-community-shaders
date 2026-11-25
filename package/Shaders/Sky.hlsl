@@ -342,6 +342,10 @@ float3 ShadeStars(float4 starTexel, float2 uv)
 }
 #	endif
 
+#ifndef MOON_DISC_GAIN
+#	define MOON_DISC_GAIN 0.12  // visible moon disc brightness against its physical radiance; 1 = upstream
+#endif
+
 PS_OUTPUT main(PS_INPUT input)
 {
 	PS_OUTPUT psout;
@@ -506,6 +510,10 @@ PS_OUTPUT main(PS_INPUT input)
 			vertexColor = discRadiance.rgb;
 		else if (discRadiance.w > 0.0)
 			vertexColor /= max(Color::RGBToLuminance(discRadiance.rgb * vertexColor), 1e-6);
+		// foxnne: the disc now carries the moon's full physical radiance, which clips to a white blob at night exposure.
+		// Hold the visible disc back (its light on the world is unchanged) so the surface detail and a softer glow remain.
+		if (discRadiance.w >= 0.0)
+			vertexColor *= MOON_DISC_GAIN;
 	}
 #			endif
 

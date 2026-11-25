@@ -1129,6 +1129,7 @@ namespace Hooks
 	{
 		static void thunk(RE::Main* a_this, float a2)
 		{
+			HitchSampler::OnMainUpdate();
 			func(a_this, a2);
 			FrameMark;
 		}

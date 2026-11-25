@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <span>
 #include <variant>
 
@@ -222,7 +223,9 @@ private:
 	std::unique_ptr<BS::thread_pool<>> allocator;
 
 	std::vector<PendingCapture> pendingCaptures;
-	std::vector<PendingEvent> readyEvents;
+	// A deque: a cell unload removes hundreds of groups in one frame, and a growing vector moved every queued
+	// capture (vertex data and all) on each reallocation, on the main thread (fast-travel move frame, 2026-11-25).
+	std::deque<PendingEvent> readyEvents;
 	std::unordered_map<RE::BSMultiStreamInstanceTriShape*, std::shared_ptr<GrassShapeRegistration>> shapes;
 	std::vector<std::shared_ptr<GrassShapeRegistration>> activeShapes;
 

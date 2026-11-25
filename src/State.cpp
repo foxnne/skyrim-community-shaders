@@ -21,6 +21,7 @@
 #include "Features/ExponentialHeightFog.h"
 #include "Features/HDRDisplay.h"
 #include "Features/InteriorSun.h"
+#include "Features/RemoteControl/ReferenceClock.h"
 #include "Features/LinearLighting.h"
 #include "Features/PerformanceOverlay.h"
 #include "Features/PostProcessing.h"
@@ -415,7 +416,9 @@ void State::Reset()
 	// Cache menu open states once per frame to avoid repeated IsMenuOpen calls
 	// (each call constructs a BSFixedString, which is expensive at scale).
 	if (auto ui = globals::game::ui) {
-		if (!ui->GameIsPaused())
+		if (ReferenceClock::on.load(std::memory_order_relaxed))
+			timer = ReferenceClock::seconds.load(std::memory_order_relaxed);
+		else if (!ui->GameIsPaused())
 			timer += RE::GetSecondsSinceLastFrame();
 
 		isMainMenuOpen = ui->IsMenuOpen(RE::MainMenu::MENU_NAME);
@@ -1698,6 +1701,7 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		} else {
 			data.MipBias = 0;
 		}
+		data.MipBias += mipBiasOffset.load(std::memory_order_relaxed);
 
 		if (auto sky = globals::game::sky) {
 			const auto& skySync = globals::features::skySync;

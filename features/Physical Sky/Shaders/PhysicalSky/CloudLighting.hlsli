@@ -302,9 +302,43 @@ float CloudTransportExtinction(NDFInfo ndf)
 	return ndf.stormVolume ? 1.0 - CloudMaterialAlbedo(ndf) * meanCosine : info.msTransportExtinction;
 }
 
+#ifndef CLOUD_LONG_SHADOW
+#	define CLOUD_LONG_SHADOW 1.0  // strength of the long-range cloud-on-cloud shadow below; 0 = off
+#endif
+
+// foxnne: the local probe above sees only 120-240 m toward the sun, so one cloud mass never shadows another and a deck
+// has no lit and shaded sides. The shadow volume the ground already uses stores the sun's transmittance through the
+// whole cloud field (8 km box round the camera), so read it at the far end of the local probe and add what it has
+// blocked to the optical depth. Adding depth (not scaling the sun) lets the multiple scattering term dim with it
+// instead of cutting to black. Faded out at the box sides. Only in heavy-sky weathers (deck light on), so the
+// fair-weather cumulus look is untouched.
+float CloudLongShadowDepth(float3 pos, NDFInfo ndf)
+{
+	const VolumetricCloudData info = VolumetricCloudBuffer[0];
+	const float gate = saturate(info.heavySky.x * 4.0) * CLOUD_LONG_SHADOW;
+	if (gate <= 0.0 || ndf.stormVolume)
+		return 0.0;
+	uint3 dims;
+	TexShadowVolume.GetDimensions(dims.x, dims.y, dims.z);
+	if (any(dims == 0u))
+		return 0.0;
+	const float extentMeters = 240.0 - saturate(ndf.height_fraction * 3.3333333) * 120.0;
+	const float3 end = pos + info.dirlightDir * (extentMeters * GAME_UNITS_PER_METER);
+	const float2 center = CloudShadowVolume::GridCenter(FrameBuffer::CameraPosAdjust.xy, info.shadowVolumeRange, dims.xy);
+	const float thickness = max(info.shadowVolumeTop - info.shadowVolumeBottom, 1.0);
+	const float3 uvw = float3((end.xy - center) / info.shadowVolumeRange + 0.5, (end.z - info.shadowVolumeBottom) / thickness);
+	if (any(uvw < 0.0) || any(uvw > 1.0))
+		return 0.0;
+	const float2 side = min(uvw.xy, 1.0 - uvw.xy);
+	const float fade = smoothstep(0.0, 0.06, min(side.x, side.y));
+	const float transmittance = TexShadowVolume.SampleLevel(TransmittanceSampler, uvw, 0);
+	return -log(max(transmittance, 1e-4)) * fade * gate;
+}
+
 float CloudLightOpticalDepth(float3 pos, float3 viewDir, NDFInfo ndf, float extinction, float viewDistance, float minimumMip)
 {
-	return TraceCloudLighting(pos, viewDir, ndf, extinction, viewDistance, minimumMip, CloudTransportExtinction(ndf)) * VolumetricCloudBuffer[0].sunExtinction;
+	return TraceCloudLighting(pos, viewDir, ndf, extinction, viewDistance, minimumMip, CloudTransportExtinction(ndf)) * VolumetricCloudBuffer[0].sunExtinction +
+		   CloudLongShadowDepth(pos, ndf);
 }
 
 // foxnne heavy sky: light that has diffused down through the whole column above the sample. The local light march

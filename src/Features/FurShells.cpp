@@ -7,6 +7,7 @@
 #include "TruePBR.h"
 #include "Utils/D3D.h"
 #include "Utils/Game.h"
+#include "Utils/RenderPassGuard.h"
 #include "Utils/UI.h"
 
 #define I18N_KEY_PREFIX "feature.fur_shells."
@@ -875,6 +876,9 @@ struct FurShells::Hooks
 	{
 		static void thunk(RE::BSRenderPass* a_pass, uint32_t a_technique, bool a_alphaTest, uint32_t a_renderFlags)
 		{
+			// Outermost of our thunks on this call site: stop a freed pass before any of them reads it.
+			if (!Util::RenderPassGuard::IsDrawable(a_pass, a_technique)) [[unlikely]]
+				return;
 			auto& furShells = globals::features::furShells;
 			furShells.currentPass = { a_pass, a_technique, a_alphaTest, a_renderFlags };
 			func(a_pass, a_technique, a_alphaTest, a_renderFlags);

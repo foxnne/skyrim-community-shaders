@@ -72,6 +72,8 @@ public:
 	std::mutex shaderDefinesMutex;
 
 	float timer = 0;
+	/** @brief Added to the texture mip bias the upscaler asks for (set by remote tools; positive = softer textures). */
+	std::atomic<float> mipBiasOffset{ 0.0f };
 	/** @brief Collect per-shader draw stats until this frame even with the performance overlay hidden (set by remote tools). */
 	std::atomic<uint32_t> drawStatsUntilFrame{ 0 };
 	double smoothDrawCalls[RE::BSShader::Type::Total + 1];

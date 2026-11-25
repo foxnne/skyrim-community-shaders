@@ -1,5 +1,6 @@
 #include "Features/NeuralRendering.h"
 #include "Features/RemoteControl/DevBenchBridge.h"
+#include "Features/RemoteControl/ReferenceClock.h"
 #include "Features/LightLimitFix.h"
 #include "Features/SkySync.h"
 #include "Features/InteriorSun.h"
@@ -1178,7 +1179,7 @@ namespace
 		static constexpr const char* kAllowed[] = {
 			"coc ", "cow ", "player.setpos ", "player.setangle ", "player.moveto ", "tfc", "tcl", "tgm",
 			"tm", "tai", "tcai", "tdetect", "set timescale to ", "set gamehour to ", "sucsm ", "fw ", "sw ",
-			"forceweather ", "setweather ", "player.placeatme "
+			"forceweather ", "setweather ", "player.placeatme ", "tfc 1", "fov ", "tll", "tws", "showracemenu", "pcb", "tmm ", "player.unequipall", "player.equipitem ", "player.additem "
 		};
 		for (const char* prefix : kAllowed) {
 			const std::string p = prefix;
@@ -1264,6 +1265,15 @@ namespace
 				return json{ { "ok", true }, { "command", cmd } };
 			}
 
+			// Reference shots: clouds, tree sway and the shader timer read a fixed clock (see ReferenceClock.h).
+			if (action == "refclock") {
+				if (a_args.contains("seconds") && a_args["seconds"].is_number())
+					ReferenceClock::seconds.store(std::clamp(a_args["seconds"].get<float>(), 1.0f, 86400.0f));
+				if (a_args.contains("on") && a_args["on"].is_boolean())
+					ReferenceClock::on.store(a_args["on"].get<bool>());
+				return json{ { "ok", true }, { "on", ReferenceClock::on.load() }, { "seconds", ReferenceClock::seconds.load() } };
+			}
+
 			// Stops the world (animation, physics, wind, weather) while rendering continues: identical frames for A/B shots.
 			if (action == "freeze") {
 				auto* main = RE::Main::GetSingleton();
@@ -1302,6 +1312,56 @@ namespace
 					return json{ { "error", "console command not allowed by the bridge allowlist" }, { "command", command } };
 				RE::Console::ExecuteCommand(command.c_str());
 				return json{ { "ok", true }, { "command", command } };
+			}
+
+			// A real fast travel to a map marker, by its map name (e.g. "Riften"): Game.FastTravel(marker), the same
+			// call carriages make, so Sky Above flies it when its bScriptedFastTravel is on. Case-insensitive; an
+			// exact name match wins over a prefix match. list=true returns the travel-able marker names instead.
+			if (action == "fasttravel") {
+				auto* player = RE::PlayerCharacter::GetSingleton();
+				auto* world = player ? player->GetWorldspace() : nullptr;
+				auto* cell = world ? world->persistentCell : nullptr;
+				if (!cell)
+					return json{ { "error", "player is not in a worldspace with a persistent cell" } };
+				auto lower = [](std::string s) { for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return s; };
+				const std::string want = lower(a_args.value("name", std::string{}));
+				const bool listOnly = a_args.value("list", false);
+				RE::TESObjectREFR* exact = nullptr;
+				RE::TESObjectREFR* prefix = nullptr;
+				json names = json::array();
+				cell->ForEachReference([&](RE::TESObjectREFR* a_ref) {
+					auto* marker = a_ref ? a_ref->extraList.GetByType<RE::ExtraMapMarker>() : nullptr;
+					const char* full = marker && marker->mapData ? marker->mapData->locationName.GetFullName() : nullptr;
+					if (!full || !*full)
+						return RE::BSContainer::ForEachResult::kContinue;
+					if (listOnly) {
+						names.push_back(full);
+						return RE::BSContainer::ForEachResult::kContinue;
+					}
+					const std::string n = lower(full);
+					if (n == want) {
+						exact = a_ref;
+						return RE::BSContainer::ForEachResult::kStop;
+					}
+					if (!prefix && !want.empty() && n.compare(0, want.size(), want) == 0)
+						prefix = a_ref;
+					return RE::BSContainer::ForEachResult::kContinue;
+				});
+				if (listOnly)
+					return json{ { "markers", names } };
+				auto* dest = exact ? exact : prefix;
+				if (!dest)
+					return json{ { "error", "no map marker with that name in this worldspace" }, { "name", want } };
+				auto* vm = RE::BSScript::Internal::VirtualMachine::GetSingleton();
+				if (!vm)
+					return json{ { "error", "script VM unavailable" } };
+				RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> result;
+				auto* fnArgs = RE::MakeFunctionArguments(std::move(dest));
+				const bool queued = vm->DispatchStaticCall("Game", "FastTravel", fnArgs, result);
+				const auto* marker = dest->extraList.GetByType<RE::ExtraMapMarker>();
+				return json{ { "queued", queued }, { "marker", std::format("0x{:08X}", dest->GetFormID()) },
+					{ "name", marker && marker->mapData ? marker->mapData->locationName.GetFullName() : "" },
+					{ "x", dest->GetPositionX() }, { "y", dest->GetPositionY() } };
 			}
 
 			if (action == "load") {
@@ -1418,16 +1478,414 @@ namespace
 		return done;
 	}
 
+	// ---- view anchor: hold the player at a point while a detached camera frames a shot -----------
+	// The engine draws distant land by where the PLAYER is, not the camera, and it lets a hovering player fall
+	// as soon as the free camera state starts. A pinned player has no gravity and is put back on its point every
+	// frame, so a view can be anchored anywhere, in the air included. The tick re-queues itself while the pin is on.
+	struct PlayerPin
+	{
+		std::atomic<bool> on{ false };
+		RE::NiPoint3 position{};
+		float savedGravity = 1.0f;
+		bool gravitySaved = false;
+		std::atomic<bool> hide{ true };
+		bool hidden = false;  // main thread only: we culled the third-person body and must show it again
+	};
+	PlayerPin gPlayerPin;
+	std::atomic<bool> gPlayerPinQueued{ false };
+
+	void PlayerPinTick()
+	{
+		if (!gPlayerPin.on.load(std::memory_order_acquire)) {
+			gPlayerPinQueued.store(false, std::memory_order_release);
+			return;
+		}
+		if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+			if (auto* controller = player->GetCharController()) {
+				if (!gPlayerPin.gravitySaved) {
+					gPlayerPin.savedGravity = controller->gravity;
+					gPlayerPin.gravitySaved = true;
+				}
+				controller->gravity = 0.0f;
+				controller->SetLinearVelocityImpl(RE::hkVector4{});
+				// No fall is building up while held, so putting the character down never hurts it.
+				controller->fallStartHeight = gPlayerPin.position.z;
+				controller->fallTime = 0.0f;
+			}
+			if (const float off = player->GetPosition().GetDistance(gPlayerPin.position); off > 1.0f) {
+				// A long move must warp the Havok controller first: moved normally it sweeps from the old spot to
+				// the new one, and a sweep over tens of thousands of units can overflow Havok's stack (the Sky Above
+				// fast travel plugin hit this and does the same).
+				if (off > 2000.0f)
+					if (auto* controller = player->GetCharController()) {
+						const float sc = RE::bhkWorld::GetWorldScale();
+						controller->SetPositionImpl(RE::hkVector4(gPlayerPin.position.x * sc, gPlayerPin.position.y * sc, gPlayerPin.position.z * sc, 0.0f), false, true);
+					}
+				player->SetPosition(gPlayerPin.position, true);
+			}
+			// A pinned character is only there so the game draws the land; keep it out of the picture.
+			if (gPlayerPin.hide.load(std::memory_order_acquire))
+				if (auto* node = player->Get3D(false); node && !node->GetAppCulled()) {
+					node->SetAppCulled(true);
+					gPlayerPin.hidden = true;
+				}
+		}
+		gPlayerPinQueued.store(false, std::memory_order_release);
+	}
+
+	// The tick must never queue itself: the game empties its task queue in one go, so a task that re-adds itself
+	// keeps the queue full for ever and no frame is drawn again (2026-11-23: two hangs, closed by a watchdog).
+	// A small thread posts one tick at a time instead, and only when the last one has run.
+	void PlayerPinStart()
+	{
+		if (gPlayerPin.on.exchange(true))
+			return;
+		std::thread([] {
+			while (gPlayerPin.on.load(std::memory_order_acquire)) {
+				if (!gPlayerPinQueued.exchange(true))
+					if (auto* task = SKSE::GetTaskInterface())
+						task->AddTask(PlayerPinTick);
+				std::this_thread::sleep_for(std::chrono::milliseconds(3));
+			}
+		}).detach();
+	}
+
+	void PlayerPinRelease()
+	{
+		gPlayerPin.on.store(false, std::memory_order_release);
+		if (auto* player = RE::PlayerCharacter::GetSingleton(); player && gPlayerPin.hidden)
+			if (auto* node = player->Get3D(false))
+				node->SetAppCulled(false);
+		gPlayerPin.hidden = false;
+		if (auto* player = RE::PlayerCharacter::GetSingleton())
+			if (auto* controller = player->GetCharController(); controller && gPlayerPin.gravitySaved) {
+				controller->gravity = gPlayerPin.savedGravity;
+				controller->fallStartHeight = player->GetPosition().z;
+				controller->fallTime = 0.0f;
+			}
+		gPlayerPin.gravitySaved = false;
+	}
+
+	// View override: the method of the Sky Above fast travel plugin (GPL-3, same licence as this project). The game
+	// stays in its normal camera state; after its own camera update the rendered camera is moved to the wanted pose.
+	// No free-camera state, so nothing the game ties to that state changes (it dropped a held character, and it is the
+	// suspected cause of far land going missing in view shots, 2026-11-23).
+	struct ViewOverride
+	{
+		std::atomic<bool> on{ false };
+		RE::NiPoint3 pos{};
+		RE::NiPoint3 dir{ 0.0f, 1.0f, 0.0f };
+		float fov = 0.0f;       // 0 = leave
+		float savedFov = 0.0f;  // world FOV before the override, restored when it ends
+		bool installed = false;
+		bool failed = false;
+	};
+	ViewOverride gView;
+
+	bool ViewBasis(const RE::NiPoint3& a_forward, RE::NiMatrix3& a_out)
+	{
+		const float len = a_forward.Length();
+		if (len < 1e-4f)
+			return false;
+		const RE::NiPoint3 f = a_forward / len;
+		RE::NiPoint3 r = f.Cross(RE::NiPoint3{ 0.0f, 0.0f, 1.0f });
+		// Straight up or down has no level "right": use east.
+		r = r.Length() < 0.02f ? RE::NiPoint3{ 1.0f, 0.0f, 0.0f } : r / r.Length();
+		const RE::NiPoint3 u = r.Cross(f);
+		const RE::NiPoint3 cols[3] = { f, r, u };  // column 0 = view direction, 1 = right, 2 = up
+		for (int c = 0; c < 3; ++c) {
+			a_out.entry[0][c] = cols[c].x;
+			a_out.entry[1][c] = cols[c].y;
+			a_out.entry[2][c] = cols[c].z;
+		}
+		return true;
+	}
+
+	void ViewOverrideApply(RE::PlayerCamera* a_cam)
+	{
+		if (!gView.on.load(std::memory_order_acquire) || !a_cam)
+			return;
+		auto* root = a_cam->cameraRoot.get();
+		RE::NiCamera* lens = nullptr;
+		if (root)
+			for (auto& child : root->GetChildren())
+				if (auto* cam = child ? netimmerse_cast<RE::NiCamera*>(child.get()) : nullptr) {
+					lens = cam;
+					break;
+				}
+		if (!root || !lens)
+			return;
+		const RE::NiPoint3 nativeDir{ lens->world.rotate.entry[0][0], lens->world.rotate.entry[1][0], lens->world.rotate.entry[2][0] };
+		RE::NiMatrix3 from, to;
+		if (!ViewBasis(nativeDir, from) || !ViewBasis(gView.dir, to))
+			return;
+		const RE::NiMatrix3 turn = to * from.Transpose();
+		// The turned lens still carries whatever roll the game's camera has this frame (camera mods add handheld sway:
+		// two takes of one view were 0.15 degrees apart in roll, 2026-11-24). Level it: forward stays the wanted
+		// direction, up goes into the plane of forward and the world's up, right follows with its old sense.
+		RE::NiMatrix3 lensRot = turn * lens->world.rotate;
+		{
+			auto col = [&](int c) { return RE::NiPoint3{ lensRot.entry[0][c], lensRot.entry[1][c], lensRot.entry[2][c] }; };
+			auto setCol = [&](int c, const RE::NiPoint3& v) { lensRot.entry[0][c] = v.x; lensRot.entry[1][c] = v.y; lensRot.entry[2][c] = v.z; };
+			RE::NiPoint3 f = gView.dir / gView.dir.Length();
+			const int upCol = std::abs(col(1).z) >= std::abs(col(2).z) ? 1 : 2;
+			const int rightCol = upCol == 1 ? 2 : 1;
+			RE::NiPoint3 up = RE::NiPoint3{ 0.0f, 0.0f, 1.0f } - f * f.z;
+			if (up.Length() > 0.02f) {
+				up = up / up.Length();
+				if (up.Dot(col(upCol)) < 0.0f)
+					up = up * -1.0f;
+				RE::NiPoint3 right = f.Cross(up);
+				if (right.Dot(col(rightCol)) < 0.0f)
+					right = right * -1.0f;
+				setCol(0, f);
+				setCol(upCol, up);
+				setCol(rightCol, right);
+			}
+		}
+		const RE::NiMatrix3 rotate = lensRot * lens->local.rotate.Transpose();
+		const RE::NiPoint3 translate = gView.pos - rotate * lens->local.translate;
+		if (root->parent) {
+			const auto parent = root->parent->world.Invert();
+			root->local.rotate = parent.rotate * rotate;
+			root->local.translate = parent * translate;
+		} else {
+			root->local.rotate = rotate;
+			root->local.translate = translate;
+		}
+		RE::NiUpdateData update{};
+		root->Update(update);
+		if (gView.fov > 1.0f)
+			a_cam->GetRuntimeData2().worldFOV = gView.fov;
+	}
+
+	struct View_CameraUpdate
+	{
+		static void thunk(RE::PlayerCamera* a_cam)
+		{
+			func(a_cam);
+			ViewOverrideApply(a_cam);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	bool ViewOverrideInstall()
+	{
+		if (gView.installed || gView.failed)
+			return gView.installed;
+		// The call inside PlayerCamera::Update that camera plugins wrap (Cinemacam, Sky Above); write_call chains.
+		const std::uintptr_t site = REL::RelocationID(49852, 50784).address() + 0x1A6;
+		if (*reinterpret_cast<const std::uint8_t*>(site) != 0xE8) {
+			gView.failed = true;
+			return false;
+		}
+		stl::write_thunk_call<View_CameraUpdate>(site);
+		gView.installed = true;
+		return true;
+	}
+
 	json BuildTestbedResult(const json& a_args)
 	{
 		const std::string action = a_args.value("action", std::string{});
 		if (action.empty())
-			return json{ { "error", "missing required parameter 'action'" }, { "supported", json::array({ "spawn", "talk", "place", "equip", "remove", "clear", "list", "camera", "camera_get" }) } };
+			return json{ { "error", "missing required parameter 'action'" }, { "supported", json::array({ "spawn", "talk", "place", "equip", "remove", "clear", "list", "camera", "camera_get", "view_get", "pin", "unpin", "mipbias", "inspect_actor" }) } };
 
 		return RunOnMainThread([action, a_args]() -> json {
 			auto* player = RE::PlayerCharacter::GetSingleton();
 			if (!player)
 				return json{ { "error", "player unavailable" } };
+
+			// Everything needed to reproduce the view on screen: the real camera pose whatever camera made it
+			// (first or third person, free camera, a camera mod), and where the player stands.
+			if (action == "view_get") {
+				constexpr float kRadToDeg = 57.29577951f;
+				json out = json::object();
+				const auto pos = player->GetPosition();
+				out["player"] = json{ { "x", pos.x }, { "y", pos.y }, { "z", pos.z }, { "yaw", player->GetAngleZ() * kRadToDeg }, { "pitch", player->GetAngleX() * kRadToDeg } };
+				// Where the face is, for close-ups: the head bone and the way it faces (the bone's own +Y is forward).
+				if (auto* body = player->Get3D(false))
+					if (auto* head = body->GetObjectByName("NPC Head [Head]")) {
+						const auto& hw = head->world;
+						const RE::NiPoint3 hf = hw.rotate * RE::NiPoint3{ 0.0f, 1.0f, 0.0f };
+						float hyaw = std::atan2(hf.x, hf.y) * kRadToDeg;
+						if (hyaw < 0.0f)
+							hyaw += 360.0f;
+						out["head"] = json{ { "x", hw.translate.x }, { "y", hw.translate.y }, { "z", hw.translate.z }, { "yaw", hyaw }, { "fx", hf.x }, { "fy", hf.y }, { "fz", hf.z } };
+					}
+				if (auto* cell = player->GetParentCell()) {
+					const char* editorID = cell->GetFormEditorID();
+					out["cell"] = json{ { "editorID", editorID ? editorID : "" }, { "interior", cell->IsInteriorCell() }, { "attached", cell->IsAttached() } };
+				}
+				if (auto* worldspace = player->GetWorldspace()) {
+					const char* editorID = worldspace->GetFormEditorID();
+					out["worldspace"] = editorID ? editorID : "";
+				}
+				if (auto* camera = RE::PlayerCamera::GetSingleton()) {
+					json cam = json::object();
+					if (camera->currentState)
+						cam["state"] = static_cast<int>(camera->currentState->id);
+					cam["firstPerson"] = camera->IsInFirstPerson();
+					cam["free"] = camera->IsInFreeCameraMode();
+					cam["fov"] = camera->GetRuntimeData2().worldFOV;
+					if (camera->cameraRoot) {
+						const auto& world = camera->cameraRoot->world;
+						cam["x"] = world.translate.x;
+						cam["y"] = world.translate.y;
+						cam["z"] = world.translate.z;
+						// The camera looks along its local +Y. yaw: 0 north, 90 east. pitch: negative looks up (the testbed convention).
+						const RE::NiPoint3 forward = world.rotate * RE::NiPoint3{ 0.0f, 1.0f, 0.0f };
+						float yaw = std::atan2(forward.x, forward.y) * kRadToDeg;
+						if (yaw < 0.0f)
+							yaw += 360.0f;
+						cam["yaw"] = yaw;
+						cam["pitch"] = -std::asin(std::clamp(forward.z, -1.0f, 1.0f)) * kRadToDeg;
+						// The lens itself: what is really drawn. roll 0 = level horizon; frustum = half-width and half-height at distance 1.
+						for (auto& child : camera->cameraRoot->GetChildren())
+							if (auto* lens = child ? netimmerse_cast<RE::NiCamera*>(child.get()) : nullptr) {
+								const auto& lr = lens->world.rotate;
+								const float z1 = lr.entry[2][1], z2 = lr.entry[2][2];
+								cam["roll"] = std::atan2(std::abs(z1) >= std::abs(z2) ? z2 : z1, std::abs(z1) >= std::abs(z2) ? z1 : z2) * kRadToDeg;
+								const auto& fr = lens->GetRuntimeData2().viewFrustum;
+								cam["frustum"] = json{ { "right", fr.fRight }, { "top", fr.fTop } };
+								cam["lens"] = json{ { "x", lens->world.translate.x }, { "y", lens->world.translate.y }, { "z", lens->world.translate.z } };
+								break;
+							}
+					}
+					out["camera"] = cam;
+				}
+				if (auto* ui = RE::UI::GetSingleton())
+					out["loading"] = ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
+				out["pinned"] = gPlayerPin.on.load();
+				out["override"] = gView.on.load();
+				return out;
+			}
+
+			// What an actor's body is drawn with, piece by piece (2026-11-25: Auri's body turns black on some loads):
+			// textures by path and whether they are really loaded, shader type and flags, alpha, emissive.
+			// actor: "player", a reference form ID ("0x5C3139C8"), or part of a loaded actor's name.
+			if (action == "inspect_actor") {
+				const std::string wanted = a_args.value("actor", std::string{ "player" });
+				RE::Actor* actor = nullptr;
+				if (wanted == "player")
+					actor = player;
+				else if (wanted.rfind("0x", 0) == 0) {
+					if (auto* form = RE::TESForm::LookupByID(static_cast<RE::FormID>(std::stoul(wanted, nullptr, 16))))
+						actor = form->As<RE::Actor>();
+				} else if (auto* lists = RE::ProcessLists::GetSingleton()) {
+					auto lower = [](std::string s) { std::ranges::transform(s, s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); }); return s; };
+					for (auto& handle : lists->highActorHandles)
+						if (auto a = handle.get(); a && lower(a->GetDisplayFullName() ? a->GetDisplayFullName() : "").find(lower(wanted)) != std::string::npos) {
+							actor = a.get();
+							break;
+						}
+				}
+				if (!actor)
+					return json{ { "error", "actor not found (player, 0x reference ID, or part of a loaded actor's name)" } };
+				auto texture = [](const RE::NiPointer<RE::NiSourceTexture>& t) -> json {
+					if (!t)
+						return nullptr;
+					return json{ { "name", t->name.c_str() ? t->name.c_str() : "" }, { "loaded", t->rendererTexture != nullptr } };
+				};
+				json pieces = json::array();
+				if (auto* root = actor->Get3D(false))
+					RE::BSVisit::TraverseScenegraphGeometries(root, [&](RE::BSGeometry* geometry) {
+						const auto& rd = geometry->GetGeometryRuntimeData();
+						json p{ { "name", geometry->name.c_str() ? geometry->name.c_str() : "" }, { "culled", geometry->GetAppCulled() } };
+						if (auto* alpha = rd.alphaProperty.get())
+							p["alpha"] = json{ { "flags", alpha->alphaFlags }, { "threshold", alpha->alphaThreshold } };
+						if (auto* shader = rd.shaderProperty.get()) {
+							p["shaderFlags"] = std::format("{:016X}", shader->flags.underlying());
+							if (auto* lit = netimmerse_cast<RE::BSLightingShaderProperty*>(shader)) {
+								if (lit->emissiveColor)
+									p["emissive"] = json{ lit->emissiveColor->red, lit->emissiveColor->green, lit->emissiveColor->blue, lit->emissiveMult };
+								if (auto* mat = static_cast<RE::BSLightingShaderMaterialBase*>(lit->material)) {
+									p["feature"] = static_cast<int>(mat->GetFeature());
+									// Body skin (FaceGen RGB tint): the skin colour multiplies the diffuse; all zero = black skin
+									// (suspected for the player's hands / new coc characters' arms, 2026-11-25).
+									if (mat->GetFeature() == RE::BSShaderMaterial::Feature::kFaceGenRGBTint) {
+										const auto& tc = static_cast<RE::BSLightingShaderMaterialFacegenTint*>(mat)->tintColor;
+										p["tintColor"] = json{ tc.red, tc.green, tc.blue };
+									}
+									p["materialAlpha"] = mat->materialAlpha;
+									p["diffuse"] = texture(mat->diffuseTexture);
+									p["normal"] = texture(mat->normalTexture);
+									p["subsurfaceOrGlow"] = texture(mat->rimSoftLightingTexture);
+									p["specular"] = texture(mat->specularBackLightingTexture);
+									if (mat->textureSet) {
+										json paths = json::array();
+										for (int i = 0; i < 8; ++i) {
+											const char* path = mat->textureSet->GetTexturePath(static_cast<RE::BSTextureSet::Texture>(i));
+											paths.push_back(path ? path : "");
+										}
+										p["textureSet"] = paths;
+									}
+								}
+							} else
+								p["shader"] = shader->GetRTTI() ? shader->GetRTTI()->GetName() : "?";
+						}
+						pieces.push_back(std::move(p));
+						return RE::BSVisit::BSVisitControl::kContinue;
+					});
+				const char* name = actor->GetDisplayFullName();
+				return json{ { "actor", name ? name : "" }, { "formID", std::format("{:08X}", actor->GetFormID()) }, { "pieces", std::move(pieces) } };
+			}
+
+			// Hide or show an actor's 3D pieces by name (substring, case-insensitive), to tell overlapping meshes apart
+			// (2026-11-25: two body meshes on a naked male, HIMBO's and TNG's, one renders black). actor as inspect_actor.
+			if (action == "piece_cull") {
+				const std::string wanted = a_args.value("actor", std::string{ "player" });
+				const std::string part = a_args.value("name", std::string{});
+				const bool culled = a_args.value("culled", true);
+				RE::Actor* actor = wanted == "player" ? player : nullptr;
+				if (!actor && wanted.rfind("0x", 0) == 0)
+					if (auto* form = RE::TESForm::LookupByID(static_cast<RE::FormID>(std::stoul(wanted, nullptr, 16))))
+						actor = form->As<RE::Actor>();
+				if (!actor || part.empty())
+					return json{ { "error", "give actor (player or 0x reference ID) and name (part of a piece name)" } };
+				auto lower = [](std::string s) { std::ranges::transform(s, s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); }); return s; };
+				const std::string needle = lower(part);
+				json changed = json::array();
+				if (auto* root = actor->Get3D(false))
+					RE::BSVisit::TraverseScenegraphGeometries(root, [&](RE::BSGeometry* geometry) {
+						const std::string pieceName = geometry->name.c_str() ? geometry->name.c_str() : "";
+						if (lower(pieceName).find(needle) != std::string::npos) {
+							geometry->SetAppCulled(culled);
+							changed.push_back(pieceName);
+						}
+						return RE::BSVisit::BSVisitControl::kContinue;
+					});
+				return json{ { "ok", true }, { "culled", culled }, { "pieces", std::move(changed) } };
+			}
+
+			if (action == "pin") {
+				if (!(a_args.contains("x") && a_args.contains("y") && a_args.contains("z")))
+					return json{ { "error", "provide x, y, z (world units) to pin the player at" } };
+				gPlayerPin.position = { a_args["x"].get<float>(), a_args["y"].get<float>(), a_args["z"].get<float>() };
+				if (a_args.contains("yaw") && a_args["yaw"].is_number())
+					player->SetAngle({ player->GetAngleX(), 0.0f, a_args["yaw"].get<float>() * 0.01745329252f });
+				player->SetPosition(gPlayerPin.position, true);
+				gPlayerPin.hide.store(a_args.value("hide", true));
+				PlayerPinStart();
+				return json{ { "ok", true }, { "pinned", true }, { "x", gPlayerPin.position.x }, { "y", gPlayerPin.position.y }, { "z", gPlayerPin.position.z } };
+			}
+
+			// Texture sharpness: offset added to the mip bias the upscaler sets (DLSS asks for log2(render/display) - 1).
+			if (action == "mipbias") {
+				if (a_args.contains("offset") && a_args["offset"].is_number())
+					globals::state->mipBiasOffset.store(std::clamp(a_args["offset"].get<float>(), -2.0f, 3.0f));
+				return json{ { "ok", true }, { "offset", globals::state->mipBiasOffset.load() } };
+			}
+
+			if (action == "unpin") {
+				const bool was = gPlayerPin.on.load();
+				// Put the player down first (where it stood before the shot), then give gravity back, so it never falls.
+				if (a_args.contains("x") && a_args.contains("y") && a_args.contains("z")) {
+					gPlayerPin.position = { a_args["x"].get<float>(), a_args["y"].get<float>(), a_args["z"].get<float>() };
+					player->SetPosition(gPlayerPin.position, true);
+				}
+				PlayerPinRelease();
+				return json{ { "ok", true }, { "pinned", false }, { "wasPinned", was } };
+			}
 
 			if (action == "talk") {
 				// Starts dialogue with a spawned actor, as if the player had activated them
@@ -1527,6 +1985,27 @@ namespace
 				if (!camera)
 					return json{ { "error", "player camera unavailable" } };
 				const std::string mode = a_args.value("mode", std::string{ "free" });
+				if (action == "camera" && mode != "override" && gView.on.exchange(false) && gView.savedFov > 1.0f)
+					camera->GetRuntimeData2().worldFOV = gView.savedFov;
+				if (action == "camera" && mode == "override") {
+					// x y z pitch yaw fov as for the free camera: yaw 0 north, 90 east; positive pitch looks down.
+					if (!ViewOverrideInstall())
+						return json{ { "error", "camera update hook not installed: unexpected code at PlayerCamera::Update+0x1A6" } };
+					auto* freeState = camera->GetRuntimeData().cameraStates[RE::CameraState::kFree].get();
+					if (freeState && camera->currentState.get() == freeState)
+						camera->ForceThirdPerson();
+					for (const char* k : { "x", "y", "z", "pitch", "yaw" })
+						if (!a_args.contains(k) || !a_args[k].is_number())
+							return json{ { "error", "override needs x, y, z, pitch, yaw" } };
+					const float pitch = a_args["pitch"].get<float>() * 0.01745329252f, yaw = a_args["yaw"].get<float>() * 0.01745329252f;
+					gView.pos = { a_args["x"].get<float>(), a_args["y"].get<float>(), a_args["z"].get<float>() };
+					gView.dir = { std::sin(yaw) * std::cos(pitch), std::cos(yaw) * std::cos(pitch), -std::sin(pitch) };
+					if (!gView.on.load())
+						gView.savedFov = camera->GetRuntimeData2().worldFOV;
+					gView.fov = a_args.contains("fov") && a_args["fov"].is_number() ? a_args["fov"].get<float>() : 0.0f;
+					gView.on.store(true, std::memory_order_release);
+					return json{ { "ok", true }, { "mode", "override" } };
+				}
 				if (action == "camera" && mode == "player") {
 					camera->ForceThirdPerson();
 					return json{ { "ok", true }, { "mode", "player-third" } };
@@ -1630,7 +2109,7 @@ namespace DevBenchBridge
 			R"({"description":"Named runtime booleans guarding temporary candidate code paths (DEV_FLAG(\"tmp::name\") in C++), for screening a change on and off in one launch. Flags read false until set and reset at every launch. Action-dispatched. set: params flags (object of name -> boolean; all validated before any is applied). list (default): every flag a call site has read or set. reset: every flag false. All return {flags:{name:bool}}.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["set","list","reset"]},"flags":{"type":"object","additionalProperties":{"type":"boolean"}}}}})";
 		dvb->RegisterTool("communityshaders.devflags", devflagsDesc, &DevFlagsToolHandler, nullptr);
 		static constexpr const char* worldDesc =
-			R"({"description":"Put the game in a known state for look comparisons. Action-dispatched, runs on the main thread. state: gameHour, timeScale, weather (current/outgoing/percent/locked), player position and angles, cell, worldspace. list_weathers: weather records (optional filter on editor ID substring). weather: force a weather by full form ID ('id', e.g. 0x0010A236) or editor ID ('name'); instant defaults true; lock true/false pins or releases the weather. hour: set the game hour (0-24) with a sky transition refresh. timescale: set the timescale (0 freezes time). teleport: player.setpos / setangle via x,y,z (units) and rx,rz (degrees). console: an allowlisted console command (coc, cow, player.setpos, tfc, tgm, tcl, set timescale, set gamehour, fw, sw, ...). load: load a save by file name; loadMostRecent. quit: ends the game, requires confirm=true.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["state","list_weathers","weather","hour","timescale","teleport","console","load","loadMostRecent","quit"]},"id":{"type":"string"},"name":{"type":"string"},"instant":{"type":"boolean"},"lock":{"type":"boolean"},"value":{"type":"number"},"transition":{"type":"boolean"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"rx":{"type":"number"},"rz":{"type":"number"},"command":{"type":"string"},"save":{"type":"string"},"filter":{"type":"string"},"confirm":{"type":"boolean"}},"required":["action"]}})";
+			R"({"description":"Put the game in a known state for look comparisons. Action-dispatched, runs on the main thread. state: gameHour, timeScale, weather (current/outgoing/percent/locked), player position and angles, cell, worldspace. list_weathers: weather records (optional filter on editor ID substring). weather: force a weather by full form ID ('id', e.g. 0x0010A236) or editor ID ('name'); instant defaults true; lock true/false pins or releases the weather. hour: set the game hour (0-24) with a sky transition refresh. timescale: set the timescale (0 freezes time). teleport: player.setpos / setangle via x,y,z (units) and rx,rz (degrees). console: an allowlisted console command (coc, cow, player.setpos, tfc, tgm, tcl, set timescale, set gamehour, fw, sw, ...). fasttravel: real fast travel (Game.FastTravel) to the map marker named name (list=true lists marker names). load: load a save by file name; loadMostRecent. quit: ends the game, requires confirm=true.","inputSchema":{"type":"object","properties":{"action":{"type":"string","enum":["state","list_weathers","weather","hour","timescale","freeze","refclock","teleport","console","fasttravel","load","loadMostRecent","quit"]},"id":{"type":"string"},"name":{"type":"string"},"instant":{"type":"boolean"},"lock":{"type":"boolean"},"value":{"type":"number"},"transition":{"type":"boolean"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"rx":{"type":"number"},"rz":{"type":"number"},"command":{"type":"string"},"save":{"type":"string"},"filter":{"type":"string"},"list":{"type":"boolean"},"confirm":{"type":"boolean"}},"required":["action"]}})";
 		dvb->RegisterTool("communityshaders.world", worldDesc, &WorldToolHandler, nullptr);
 
 		static constexpr const char* testbedDesc =

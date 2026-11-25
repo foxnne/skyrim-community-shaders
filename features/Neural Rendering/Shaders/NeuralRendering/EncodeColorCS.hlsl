@@ -7,6 +7,8 @@ Texture2D<float2> VanillaAdaptation : register(t1);
 // Post Processing's Histogram Auto Exposure adapted luminance (a single float).
 StructuredBuffer<float> PostProcessAdaptation : register(t2);
 RWTexture2D<float4> DestinationColor : register(u0);
+
+#define NR_INPUT_GAIN 1.0  // linear gain on the image the model sees (Finished Image only); 1 = off
 SamplerState LinearClampSampler : register(s0);
 
 [numthreads(8, 8, 1)]
@@ -39,5 +41,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 	NeuralDisplayTransform display = MakeNeuralDisplayTransform(DisplayParam, DisplayCinematic, DisplayTint, DisplayExposure,
 		VanillaAdaptation.SampleLevel(LinearClampSampler, float2(0.5, 0.5), 0), PostProcessAdaptation[0], HighlightWhite,
 		ProxyCurve);
-	DestinationColor[dispatchThreadID.xy] = EncodeNeuralColor(float4(color, alpha), ColorDomain, NeuralTransferModelSpace(), display);
+	float4 encoded = EncodeNeuralColor(float4(color, alpha), ColorDomain, NeuralTransferModelSpace(), display);
+	// Model input gain (foxnne 2026-11-24): on the Finished Image placement a sunlit face sits near the top of
+	// the range and the model then adds little structure. Hand the model a dimmer copy; the resolve reads this
+	// same proxy, so its luminance and chroma ratios land on the original at the original brightness.
+	if (ColorDomain == kNeuralColorDomainDisplayGamma)
+		encoded.rgb *= pow(NR_INPUT_GAIN, 1.0 / 2.2);
+	DestinationColor[dispatchThreadID.xy] = encoded;
 }

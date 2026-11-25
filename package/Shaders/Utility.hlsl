@@ -389,6 +389,15 @@ float SampleShadow3x3(Texture2DArray<float4> tex, SamplerComparisonState samp, f
 	return visibility / 9.0;
 }
 
+// Sun shadow softness (foxnne 2026-11-24). The contact-hardening filter below widens a shadow edge with the
+// distance to whatever casts it, using the sun's real size. Stock: only stencil-marked pixels get it and the
+// rest of the world gets a fixed-width edge. SUN_PCSS_ALL 1 gives it to everything in the near cascades.
+#define SUN_PCSS_ALL 1
+#define SUN_SOFT_SCALE 1.0       // multiplier on the sun's angular size for the penumbra (1 = physical)
+#define SUN_PCSS_MAXDIST 1024.0  // furthest caster (game units) searched for; bounds the widest penumbra
+#define SUN_PCSS_STABLE 1          // 1 = caster search pattern fixed per shadow texel (no frame-to-frame boiling)
+#define SUN_PCSS_MAX_SEARCH_TEXELS 24.0  // cap on the caster search radius, in shadow-map texels
+
 float GetSunTanAngularRadius()
 {
 	// Utility is compiled without the general feature defines, so this cannot sit behind PHYSICAL_SKY.
@@ -410,14 +419,27 @@ float SampleShadowPCSS(Texture2DArray<float4> tex, SamplerComparisonState samp, 
 	tex.GetDimensions(width, height, elements);
 	const float2 texSize = float2(width, height);
 	const float minRadius = 1.5 / texSize.x;
-	const float sunTan = GetSunTanAngularRadius();
-	const float searchRadius = max(maxOccluderDistance * sunTan * projectionScale.x, minRadius);
+	const float sunTan = GetSunTanAngularRadius() * SUN_SOFT_SCALE;
+	const float searchRadius = clamp(maxOccluderDistance * sunTan * projectionScale.x, minRadius, SUN_PCSS_MAX_SEARCH_TEXELS / texSize.x);
+
+	// The caster-distance estimate decides how wide the edge is. With the sample pattern rotated every frame the
+	// estimate changed frame to frame and soft edges boiled (user 2026-11-24: "shadows changing frame to frame").
+	// The search pattern is now fixed per shadow-map texel, so the width is stable in time and does not crawl when
+	// the camera moves; only the final soft-edge taps keep their per-frame rotation.
+#if SUN_PCSS_STABLE
+	const float2 searchCell = floor(baseUV * texSize);
+	float searchSin, searchCos;
+	sincos(6.2831853 * frac(sin(dot(searchCell, float2(12.9898, 78.233))) * 43758.5453), searchSin, searchCos);
+	const float2x2 searchRotation = float2x2(searchCos, searchSin, -searchSin, searchCos);
+#else
+	const float2x2 searchRotation = rotationMatrix;
+#endif
 
 	float blockerDepth = 0.0;
 	float blockerCount = 0.0;
 	[unroll] for (uint i = 0; i < 16; i++)
 	{
-		const float2 uv = baseUV + mul(Random::PoissonSampleOffsets16[i], rotationMatrix) * searchRadius;
+		const float2 uv = baseUV + mul(Random::PoissonSampleOffsets16[i], searchRotation) * searchRadius;
 		const int2 texel = clamp(int2(uv * texSize), 0, int2(texSize) - 1);
 		const float depth = tex.Load(int4(texel, (int)layerIndex, 0)).x;
 		if (depth < compareValue) {
@@ -602,8 +624,8 @@ PS_OUTPUT main(PS_INPUT input)
 #			elif SHADOWFILTER == 2
 		shadowVisibility = SampleShadow3x3(TexShadowMapSamplerComp, SampShadowMapSamplerComp, positionLS.xy, cascadeIndex, shadowMapCompareValue, ShadowSampleParam.zw);
 #			elif SHADOWFILTER == 4 || SHADOWFILTER == 8
-		if (stencilValue != 0)
-			shadowVisibility = SampleShadowPCSS(TexShadowMapSamplerComp, SampShadowMapSamplerComp, positionLS.xy, cascadeIndex, shadowMapCompareValue, rotationMatrix, GetShadowProjectionScale(lightProjectionMatrix), 1024.0);
+		if (stencilValue != 0 || SUN_PCSS_ALL)
+			shadowVisibility = SampleShadowPCSS(TexShadowMapSamplerComp, SampShadowMapSamplerComp, positionLS.xy, cascadeIndex, shadowMapCompareValue, rotationMatrix, GetShadowProjectionScale(lightProjectionMatrix), SUN_PCSS_MAXDIST);
 		else
 			shadowVisibility = SampleShadowPCF(TexShadowMapSamplerComp, SampShadowMapSamplerComp, positionLS.xy, cascadeIndex, shadowMapCompareValue, rotationMatrix, ShadowSampleParam.z);
 #			endif
@@ -624,7 +646,7 @@ PS_OUTPUT main(PS_INPUT input)
 #			elif SHADOWFILTER == 2
 			cascade1ShadowVisibility = SampleShadow3x3(TexShadowMapSamplerComp, SampShadowMapSamplerComp, cascade1PositionLS.xy, 1, cascade1ShadowMapCompareValue, ShadowSampleParam.zw);
 #			elif SHADOWFILTER == 4 || SHADOWFILTER == 8
-			if (stencilValue != 0)
+			if (stencilValue != 0 || SUN_PCSS_ALL)
 				cascade1ShadowVisibility = SampleShadowPCSS(TexShadowMapSamplerComp, SampShadowMapSamplerComp, cascade1PositionLS.xy, 1, cascade1ShadowMapCompareValue, rotationMatrix, GetShadowProjectionScale(ShadowMapProj[1]), 1024.0);
 			else
 				cascade1ShadowVisibility = SampleShadowPCF(TexShadowMapSamplerComp, SampShadowMapSamplerComp, cascade1PositionLS.xy, 1, cascade1ShadowMapCompareValue, rotationMatrix, ShadowSampleParam.z);

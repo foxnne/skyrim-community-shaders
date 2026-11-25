@@ -14,6 +14,7 @@
 #include "State.h"
 #include "Utils/DebugSection.h"
 #include "Utils/Logging.h"
+#include "Utils/RenderPassGuard.h"
 
 #include <bit>
 #include <numbers>
@@ -1026,6 +1027,8 @@ void LightLimitFix::Hooks::BSLightingShader_SetupGeometry::thunk(RE::BSShader* T
 
 void LightLimitFix::Hooks::BSEffectShader_SetupGeometry::thunk(RE::BSShader* This, RE::BSRenderPass* Pass, uint32_t RenderFlags)
 {
+	// The engine reads sceneLights[i]->light unchecked (crash at 107527+0x4EA).
+	Util::RenderPassGuard::TrimDeadSceneLights(Pass);
 	func(This, Pass, RenderFlags);
 	auto& singleton = globals::features::lightLimitFix;
 	singleton.BSLightingShader_SetupGeometry_Before(Pass);
@@ -1384,6 +1387,9 @@ void LightLimitFix::AddParticleLightsToBuffer(eastl::vector<LightData>& a_lights
 template <int N>
 void LightLimitFix::Hooks::BSBatchRenderer_RenderPassImmediately<N>::thunk(RE::BSRenderPass* a_pass, uint32_t a_technique, bool a_alphaTest, uint32_t a_renderFlags)
 {
+	// A freed pass must not be read below or drawn (see Utils/RenderPassGuard.h).
+	if (!Util::RenderPassGuard::IsDrawable(a_pass, a_technique)) [[unlikely]]
+		return;
 	if (globals::features::lightLimitFix.CheckParticleLights(a_pass, a_technique))
 		func(a_pass, a_technique, a_alphaTest, a_renderFlags);
 }

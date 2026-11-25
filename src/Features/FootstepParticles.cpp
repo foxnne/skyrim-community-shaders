@@ -813,13 +813,21 @@ void FootstepParticles::UpdateActorBreath(RE::Actor* a_actor, const RE::NiPoint3
 		return;
 	}
 
+	// The way the face points (the head bone's +Y), not the body's heading: with the head turned, the body's
+	// forward put the first puff inside the head, where it showed through the eyes (2026-11-25).
 	const float heading = a_actor->GetAngleZ();
-	const RE::NiPoint3 forward{ std::sin(heading), std::cos(heading), 0.0f };
+	RE::NiPoint3 forward = head->world.rotate * RE::NiPoint3{ 0.0f, 1.0f, 0.0f };
+	forward.z = 0.0f;
+	if (const float len = forward.Length(); std::isfinite(len) && len > 0.2f)
+		forward = forward / len;
+	else
+		forward = { std::sin(heading), std::cos(heading), 0.0f };
 	const float height = a_actor->GetHeight();
 	const float scale = std::clamp(std::isfinite(height) && height > 0.0f ? height / 128.0f : 1.0f, 0.35f, 4.0f);
 	const auto eye = root->GetObjectByName(eyeNode);
-	const RE::NiPoint3 mouth = eye ? eye->world.translate + forward * (2.0f * scale) - RE::NiPoint3{ 0.0f, 0.0f, 5.0f * scale } :
-	                                 head->world.translate + forward * (8.0f * scale) - RE::NiPoint3{ 0.0f, 0.0f, 1.0f * scale };
+	// Out in front of the lips, clear of the face, so the puff never starts inside the head.
+	const RE::NiPoint3 mouth = eye ? eye->world.translate + forward * (6.0f * scale) - RE::NiPoint3{ 0.0f, 0.0f, 5.0f * scale } :
+	                                 head->world.translate + forward * (11.0f * scale) - RE::NiPoint3{ 0.0f, 0.0f, 1.0f * scale };
 
 	if (auto cell = a_actor->GetParentCell()) {
 		float waterHeight = 0.0f;

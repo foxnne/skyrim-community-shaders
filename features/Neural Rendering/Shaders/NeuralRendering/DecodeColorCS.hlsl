@@ -138,6 +138,14 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint groupIndex : SV_Gro
 	// Display-gamma diagnostic: write raw model output with renderer alpha, bypassing the resolve.
 	if (RawModelOutput != 0 && ColorDomain == kNeuralColorDomainDisplayGamma) {
 		float3 rawLinear = NeuralModelToLinear(model.rgb, modelSpace);
+		// 2026-11-24: the direct answer replaces the whole frame and is much softer than the frame it was given (the
+		// model smooths; measured under half the fine detail, and restoring only what the 3/4 size change lost did
+		// nothing). The resolve keeps all the original detail and read as too sharp. NR_RAW_KEEP_ORIGINAL mixes the
+		// original frame back into the direct answer: 0 = pure answer, 1 = original frame.
+#ifndef NR_RAW_KEEP_ORIGINAL
+#	define NR_RAW_KEEP_ORIGINAL 0.0
+#endif
+		rawLinear = lerp(rawLinear, max(NeuralDomainToLinear(original.rgb, ColorDomain), 0.0), NR_RAW_KEEP_ORIGINAL);
 		DestinationColor[dispatchThreadID.xy] = float4(NeuralLinearToDomain(rawLinear, ColorDomain), original.a);
 		return;
 	}

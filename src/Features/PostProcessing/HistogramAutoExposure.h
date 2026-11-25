@@ -44,6 +44,14 @@ struct HistogramAutoExposure : public PostProcessFeature
 		float PurkinjeStrength = 0.f;
 	} settings;
 
+	// Fast-travel flight (camera far faster than any riding): Bright Scene Compression eases off so the
+	// exposure adapts fully to miles of sunlit snow and cloud, then eases back after landing.
+	static constexpr float kFlightSpeedStart = 3000.0f;  // units per second; a horse at full gallop is ~1000
+	static constexpr float kFlightSpeedFull = 8000.0f;
+	RE::NiPoint3 flightLastEye{};
+	bool flightHaveLastEye = false;
+	float flightBlend = 0.0f;  // 0 normal play, 1 in flight
+
 	// buffers
 	struct alignas(16) AutoExposureCB
 	{

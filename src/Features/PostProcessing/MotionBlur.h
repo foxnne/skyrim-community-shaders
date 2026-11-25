@@ -28,6 +28,12 @@ struct MotionBlur : public PostProcessFeature
 
 	// Constants
 	static constexpr float MaxBlurRadius = 40.0f;
+	// Camera speed (units/s) where the blur starts to fade and where it is off: sprinting is ~600, a horse ~1000
+	static constexpr float kFastCameraStart = 1500.0f;
+	static constexpr float kFastCameraEnd = 3000.0f;
+	RE::NiPoint3 lastEye{};
+	bool haveLastEye = false;
+	float fastCameraFade = 1.0f;
 	static constexpr float DepthBiasFactor = 1.5f;
 	static constexpr int UseDepthBounds = 1;
 	static constexpr int FixedGridSize = 20;

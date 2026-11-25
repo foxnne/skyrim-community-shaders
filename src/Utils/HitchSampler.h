@@ -19,4 +19,8 @@ namespace HitchSampler
 
 	/** @brief Per-frame tick from the Present hook, on the render thread. Cheap no-op when inactive. */
 	void OnPresent();
+
+	/** @brief Called from the main-loop hook: the first call makes the sampler watch the game's main thread
+	 *  (where cell loading happens) instead of the render thread, which only waits for it. */
+	void OnMainUpdate();
 }

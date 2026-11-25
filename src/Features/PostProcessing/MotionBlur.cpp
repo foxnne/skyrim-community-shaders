@@ -215,6 +215,20 @@ void MotionBlur::Draw(TextureInfo& inout_tex)
 			return;
 		}
 
+		// Camera speed guard (see UpdateConstantBuffers)
+		{
+			const RE::NiPoint3 eye = Util::GetEyePosition();
+			const float dt = std::max(RE::GetSecondsSinceLastFrame(), 1e-4f);
+			const float speed = haveLastEye ? eye.GetDistance(lastEye) / dt : 0.0f;
+			lastEye = eye;
+			haveLastEye = true;
+			const float target = 1.0f - std::clamp((speed - kFastCameraStart) / (kFastCameraEnd - kFastCameraStart), 0.0f, 1.0f);
+			// Off at once, back on over about half a second (a teleport is one huge frame)
+			fastCameraFade = target < fastCameraFade ? target : fastCameraFade + (target - fastCameraFade) * std::min(1.0f, dt / 0.5f);
+			if (fastCameraFade < 0.01f)
+				return;
+		}
+
 		// Check for resize and update resources if needed
 		CheckAndResizeResources(inout_tex);
 
@@ -395,6 +409,10 @@ bool MotionBlur::UpdateConstantBuffers()
 	if (const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr) {
 		velocityScale = std::clamp(CinematicCamera::kMotionBlurReferenceScale * cam->ShutterAngleDeg / 180.0f, 10.0f, 800.0f);
 	}
+	// Fast camera (fast-travel flights, teleports, override cameras): the per-frame camera translation is far
+	// beyond anything played, and the blur smears the fog/cloud layer into stripes and radial streaks
+	// (2026-11-25, Sky Above arcs through low cloud). Fade the blur out above kFastCameraStart units/s.
+	velocityScale *= fastCameraFade;
 	float2 velocityTextureScale = { 1.0f, 1.0f };
 	float2 targetResolution = { static_cast<float>(lastWidth), static_cast<float>(lastHeight) };
 

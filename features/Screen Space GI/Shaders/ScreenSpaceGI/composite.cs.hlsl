@@ -92,8 +92,8 @@ float3 SampleSSGIILSkin(uint2 pixCoord)
 
 	float3 linAlbedo = ColorManagement::SceneToLinear(AlbedoTexture[dispatchID.xy] / Color::PBRLightingScale);
 	float3 ssgiIl = IsSkinMask(MasksTexture[dispatchID.xy].xy) ? SampleSSGIILSkin(dispatchID.xy) : SampleSSGIIL(dispatchID.xy);
-	// With Physical Sky Fill on, diffuseGI applied IL Saturation to the traced bounce alone: here it would grey the
-	// sky fill too, which is part of what kept sun shadow from reading blue.
+	// With Physical Sky Fill on, diffuseGI applied IL Saturation already (traced bounce in full, the fallback faded out
+	// by sky openness); here it would grey the open-sky fill too, which is part of what kept sun shadow from reading blue.
 	const bool physicalSkyFill = SharedData::ssgiSettings.PhysicalSkyFill != 0 && SharedData::physSkyData.enabled && !SharedData::InInterior;
 	if (!physicalSkyFill)
 		ssgiIl = max(lerp(Color::RGBToLuminance(ssgiIl), ssgiIl, SharedData::ssgiSettings.ILSaturation), 0.0);

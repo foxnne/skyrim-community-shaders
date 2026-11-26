@@ -267,10 +267,10 @@ void ScreenSpaceGI::DrawSettings()
 						if (auto _tt = Util::HoverTooltipWrapper()) {
 							ImGui::Text("%s", T(TKEY("sky_fill_env_weight_tooltip"), "Share of the weather's directional ambient kept on rays that look up at open sky. It is a stand-in for the same sky, so 0 removes the double count; occluded sky (canopy, overhangs) keeps all of it."));
 						}
-					}
-					resetOnChange(ImGui::SliderFloat(T(TKEY("bounce_sky_limit"), "Bounce Limit"), &settings.BounceSkyLimit, 0.0f, 16.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp));
-					if (auto _tt = Util::HoverTooltipWrapper()) {
-						ImGui::Text("%s", T(TKEY("bounce_sky_limit_tooltip"), "Caps traced bounce light at this many times the ambient light the hit geometry hides from the pixel. Keeps bounce colour, trims overestimates (thick-occluder guesses, lit sides seen from shade). 0 = off."));
+						resetOnChange(ImGui::SliderFloat(T(TKEY("bounce_sky_limit"), "Bounce Limit"), &settings.BounceSkyLimit, 0.0f, 16.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp));
+						if (auto _tt = Util::HoverTooltipWrapper()) {
+							ImGui::Text("%s", T(TKEY("bounce_sky_limit_tooltip"), "With Physical Sky Fill, outdoors: caps traced bounce light at this many times the ambient light the hit geometry hides from the pixel, fading out where the sky is occluded. Keeps bounce colour, trims overestimates (thick-occluder guesses, lit sides seen from shade). 0 = off."));
+						}
 					}
 				}
 			}

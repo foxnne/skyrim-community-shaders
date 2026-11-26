@@ -35,6 +35,26 @@ float3 SampleSSGIIL(uint2 pixCoord)
 	return max(0, radiance);
 }
 
+// Near-field occlusion of the traced bounce light. The screen-space tracer sees the camera-facing, lit side of a
+// close occluder (hair over a neck, a brim over a face) and returned that radiance as bounce light, filling the
+// contact shade back in (user 2026-11-25: "hair doesn't shade the back of her neck"). Where the normalised hit
+// distance says an occluder is very close, scale the bounce light down with it; open and far-occluded areas
+// (a forest floor under a high canopy) keep theirs.
+#define SSGI_CONTACT_IL_OCCLUSION 0.85
+
+float SampleSSGIContactAO(uint2 pixCoord)
+{
+#if defined(SSGI_SH)
+	NRD_SG sg = REBLUR_BackEnd_UnpackSh(SsgiTexture[pixCoord], SsgiSH1Texture[pixCoord]);
+	return saturate(sg.normHitDist);
+#else
+	float normHitDist;
+	float3 radiance;
+	REBLUR_BackEnd_UnpackRadianceAndNormHitDist(SsgiTexture[pixCoord], radiance, normHitDist);
+	return saturate(normHitDist);
+#endif
+}
+
 bool IsSkinMask(float2 mask)
 {
 	return mask.x > 0.0 && mask.y < 1.5;
@@ -73,6 +93,7 @@ float3 SampleSSGIILSkin(uint2 pixCoord)
 	float3 linAlbedo = ColorManagement::SceneToLinear(AlbedoTexture[dispatchID.xy] / Color::PBRLightingScale);
 	float3 ssgiIl = IsSkinMask(MasksTexture[dispatchID.xy].xy) ? SampleSSGIILSkin(dispatchID.xy) : SampleSSGIIL(dispatchID.xy);
 	ssgiIl = max(lerp(Color::RGBToLuminance(ssgiIl), ssgiIl, SharedData::ssgiSettings.ILSaturation), 0.0);
+	ssgiIl *= lerp(1.0, pow(max(SampleSSGIContactAO(dispatchID.xy), 1e-4), SharedData::ssgiSettings.AOPower), SSGI_CONTACT_IL_OCCLUSION);
 	// Masks.z is an IL gain here: Lighting's character light fill, or grass transmission albedo relative to reflection albedo.
 	if (SharedData::ssgiSettings.ReplaceAmbient != 0)
 		ssgiIl *= 1.0 + clamp(MasksTexture[dispatchID.xy].z, 0.0, 8.0);

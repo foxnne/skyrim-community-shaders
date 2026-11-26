@@ -297,6 +297,7 @@ namespace globals
 		player = RE::PlayerCharacter::GetSingleton();
 		tes = RE::TES::GetSingleton();
 		sky = RE::Sky::GetSingleton();
+		calendar = RE::Calendar::GetSingleton();  // null at plugin load and renderer setup; DynamicCubemaps/TerrainShadows read this copy
 		utilityShader = RE::BSUtilityShader::GetSingleton();
 		imageSpaceManager = RE::ImageSpaceManager::GetSingleton();
 		bEnableVolumetricLighting = reinterpret_cast<bool*>(REL::RelocationID(527940, 414913).address());

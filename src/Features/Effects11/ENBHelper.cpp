@@ -1,6 +1,7 @@
 #include "ENBHelper.h"
 
 #include "Globals.h"
+#include "Utils/VisualClock.h"
 
 // ENB Helper functionality
 // Based on ENBHelperSE by aers (https://github.com/xSyphel/ENBHelperSE)
@@ -66,7 +67,8 @@ namespace ENBHelper
 		}
 
 		if (const auto* calendar = globals::game::calendar) {
-			cachedTime.gameHour = calendar->GetHour();
+			const auto visual = Util::VisualClock::Current();
+			cachedTime.gameHour = visual.active ? visual.hour : calendar->GetHour();
 			cachedTime.dayOfYear = calendar->GetDay() + (calendar->GetMonth() - 1) * 30.0f;
 		} else {
 			cachedTime.gameHour = 12.0f;

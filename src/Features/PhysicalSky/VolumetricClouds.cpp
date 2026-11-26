@@ -6,6 +6,7 @@
 #include "Features/RemoteControl/ReferenceClock.h"
 #include "Features/TerrainShadows.h"
 #include "Features/ViewAtmosphere.h"
+#include "Utils/VisualClock.h"
 #include "State.h"
 #include "Util.h"
 
@@ -1041,9 +1042,12 @@ void PhysicalSky::UpdateCloudWind()
 		// A hitch frame would otherwise move the clouds a whole step at once; at time-lapse speed that read as
 		// the cloud field jumping mid-flight (user 2026-11-25). A long frame now advances them like a normal one.
 		elapsed = std::min(elapsed, 1.0 / 30.0);
+		// The game's TimeScale, or a flight's visual clock rate while one runs ahead (Utils/VisualClock.h).
+		const auto visual = Util::VisualClock::Current();
 		static auto* timeScale = RE::TESForm::LookupByID<RE::TESGlobal>(0x3A);
-		if (timeScale && std::isfinite(timeScale->value))
-			elapsed *= std::clamp(static_cast<double>(timeScale->value) / 20.0, 1.0, 250.0);
+		const double rate = visual.active ? visual.rate : timeScale ? static_cast<double>(timeScale->value) : 20.0;
+		if (std::isfinite(rate))
+			elapsed *= std::clamp(rate / 20.0, 1.0, 250.0);
 	}
 
 	const auto& layer = settings.cloudLayer;

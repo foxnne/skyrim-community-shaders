@@ -6,6 +6,7 @@
 #include "LinearLighting.h"
 #include "Utils/Climate.h"
 #include "Utils/Game.h"
+#include "Utils/VisualClock.h"
 
 #define I18N_KEY_PREFIX "feature.sky_sync."
 
@@ -204,6 +205,7 @@ void SkySync::PostPostLoad()
 	}
 
 	stl::detour_thunk<Sky_Update>(REL::RelocationID(25682, 26229));
+	Util::VisualClock::SetSkyHookInstalled(true);
 	Util::SetCelestialTransitionHandlerAvailable(true);
 
 	gSunPosition = reinterpret_cast<RE::NiPoint3*>(REL::RelocationID(527924, 414871).address());
@@ -368,6 +370,9 @@ void SkySync::Sky_Update::thunk(RE::Sky* sky, float deltaTime)
 {
 	auto& lightning = globals::features::physicalSky.lightning;
 	lightning.SuppressVanilla(sky);
+	// A fast-travel flight's visual clock (Sky Above) can run ahead of the game's: this frame's snapshot, read by
+	// the colours hook and by our consumers (Utils/VisualClock.h). No engine value is changed here.
+	Util::VisualClock::BeginSkyUpdate();
 	func(sky, deltaTime);
 	lightning.SuppressVanilla(sky);
 	auto& skySync = globals::features::skySync;
@@ -459,7 +464,7 @@ bool SkySync::Update(const RE::Sky* sky)
 	}
 	active = true;
 
-	const float hour = sky->currentGameHour;
+	const float hour = Util::VisualClock::SkyHour(sky);
 
 	RE::NiPoint3 directions[BodyCount] = {};
 	float intensities[BodyCount] = {};
@@ -479,7 +484,8 @@ bool SkySync::Update(const RE::Sky* sky)
 
 	const auto calendar = globals::game::calendar;
 	const auto deltaTime = globals::game::deltaTime;
-	float fadeAdvance = calendar && deltaTime ? std::max(*deltaTime * calendar->GetTimescale(), 0.0f) : 0.0f;
+	const auto visual = Util::VisualClock::Current();
+	float fadeAdvance = calendar && deltaTime ? std::max(*deltaTime * (visual.active ? static_cast<float>(visual.rate) : calendar->GetTimescale()), 0.0f) : 0.0f;
 
 	// The clock can outrun real time (waiting, fast travel) or move while frames are paused
 	// (console, scrubbing), so advance by whichever of the two elapsed more.
@@ -686,7 +692,7 @@ float SkySync::GetSunDistance(const RE::Sky* sky) const
 {
 	if (settings.UseAlternateSunPath) {
 		const auto [sunrise, sunset] = GetSunHorizonHours(sky->currentClimate->timing);
-		const float sinPhi = DirectX::XMScalarSinEst(GetAlternateSunPhase(sky->currentGameHour, sunrise, sunset));
+		const float sinPhi = DirectX::XMScalarSinEst(GetAlternateSunPhase(Util::VisualClock::SkyHour(sky), sunrise, sunset));
 		return std::lerp(SunHorizonDistance, SunPeakDistance, std::max(sinPhi, 0.0f));
 	}
 

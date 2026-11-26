@@ -39,6 +39,7 @@
 #include "Features/ScreenshotFeature.h"
 #include "Features/Skin.h"
 #include "Features/SkySync.h"
+#include "Utils/VisualClock.h"
 #include "Features/Skylighting.h"
 #include "Features/Upscaling.h"
 #include "Features/VolumetricLighting.h"
@@ -420,7 +421,11 @@ namespace WeatherExtensions
 	{
 		static void thunk(RE::Sky* sky, float a_delta)
 		{
-			func(sky, a_delta);
+			{
+				// A flight's visual clock: colours interpolated at the hour the sky shows; the field is restored on return.
+				const Util::VisualClock::ColorsScope visualHour{ sky };
+				func(sky, a_delta);
+			}
 			globals::features::volumetricLighting.BeginSkyUpdate();
 			// Moonlight colours feed Effects11's grading; the dim must follow it, as its colour filter lifts zero
 			globals::features::skySync.ApplyMoonlightColors(sky);
@@ -1400,6 +1405,7 @@ namespace Hooks
 		logger::info("Hooking weather extensions");
 		stl::detour_thunk<WeatherExtensions::Precipitation_Restore>(REL::RelocationID(25640, 26181));
 		stl::detour_thunk<WeatherExtensions::Sky_UpdateColors>(REL::RelocationID(25686, 26233));
+		Util::VisualClock::SetColorsHookInstalled(true);
 		stl::detour_thunk<WeatherExtensions::Sky_UpdateWeather>(REL::RelocationID(25684, 26231));
 		stl::detour_thunk<WeatherExtensions::Sky_SetDirectionalAmbientColors>(REL::RelocationID(98989, 105643));
 

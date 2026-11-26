@@ -8,6 +8,7 @@
 #include "Features/TerrainBlending.h"
 #include "Globals.h"
 #include "ShaderCache.h"
+#include "Utils/VisualClock.h"
 #include "State.h"
 #include "Utils/ColorSpace.h"
 #include "Utils/D3D.h"
@@ -99,7 +100,8 @@ namespace
 	const AuroraPalette& GetNightlyPalette()
 	{
 		const auto* calendar = RE::Calendar::GetSingleton();
-		const float days = calendar ? calendar->GetDaysPassed() : 0.0f;
+		const auto  visual = Util::VisualClock::Current();
+		const float days = visual.active ? visual.daysPassed : calendar ? calendar->GetDaysPassed() : 0.0f;
 		std::uint32_t hash = static_cast<std::uint32_t>(std::floor(days + 0.5f)) * 2654435761u;
 		hash ^= hash >> 16;
 		const std::uint32_t roll = hash % 20u;
@@ -172,7 +174,7 @@ float ProceduralNightSky::GetAuroraVisibility(const RE::Sky* a_sky)
 
 	float timeWeight = 1.0f;
 	if (!current->data.flags.any(RE::TESWeather::WeatherDataFlag::kPermAurora)) {
-		const float hour = a_sky->currentGameHour;
+		const float hour = Util::VisualClock::SkyHour(a_sky);
 		const float inStart = a_sky->auroraInStart;
 		const float inEnd = a_sky->auroraIn;
 		const float outStart = a_sky->auroraOutStart;

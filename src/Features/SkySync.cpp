@@ -247,8 +247,9 @@ void SkySync::OnSkyUpdateColors(RE::Sky* sky)
 		return;
 	}
 
+	// Scaled by the night weight, so a glare graded to black part way through the blend cannot cut the light at once
 	const bool moonsHidden = lightNightWeight > 0.0f && globals::features::effects11.enableEffect && sky->skyColor[RE::TESWeather::ColorTypes::kMoonGlare] == RE::NiColor{};
-	const float moonsVisible = moonsHidden ? 0.0f : 1.0f;
+	const float moonsVisible = moonsHidden ? 1.0f - lightNightWeight : 1.0f;
 
 	auto& dirLight = sky->skyColor[static_cast<uint>(RE::TESWeather::ColorTypes::kSunlight)];
 	// Lightning strikes from overhead rather than the caster, so only the light under the flash is dimmed
@@ -494,13 +495,15 @@ bool SkySync::Update(const RE::Sky* sky)
 	const Caster previousTarget = shadowFader.target;
 	shadowFader.Update(sky, directions, intensities, settings.ShadowTransitionDuration, fadeAdvance, transitionCompleted || resetTransition);
 	// After the fader, so the fade knows whether a moon is the caster this frame
-	UpdateMoonlightFade(fadeAdvance / SecondsPerGameHour, std::exchange(moonlightSnapPending, false) || resetTransition);
+	auto isMoon = [](Caster c) { return c == Caster::Masser || c == Caster::Secunda; };
+	UpdateMoonlightFade(fadeAdvance / SecondsPerGameHour, std::exchange(moonlightSnapPending, false) || resetTransition, !isMoon(previousTarget));
 	// A finished caster fade counts as a completed transition, so cached shadows (terrain) refresh to the new caster.
 	// A swap can also start and finish in one update (zero duration), so a changed target counts too.
 	const bool casterSettled = (wasTransitioning || shadowFader.target != previousTarget) && !shadowFader.transitioning;
 
 	// At night follow the light's own direction, so the dim stays continuous while it swings between moons
 	currentDim = sunBelowHorizon ? moonlightFade * GetHorizonDim(GetHeightAboveHorizon(shadowFader.dimDir)) : GetHorizonDim(sunHeight);
+	lastLightLevel = GetLightFactor(true);
 	ApplyLightColor(sky);
 
 	return transitionCompleted || casterSettled;
@@ -540,21 +543,31 @@ float SkySync::GetHorizonDim(float heightAboveHorizon) const
 	return std::clamp(heightAboveHorizon / fadeRadians, 0.0f, 1.0f);
 }
 
-void SkySync::UpdateMoonlightFade(float advanceHours, bool snap)
+void SkySync::UpdateMoonlightFade(float advanceHours, bool snap, bool noMoonBefore)
 {
 	// The fade starts when a moon actually lights the scene, not at the sun's handover. Counted from the handover,
 	// it was already spent when a moon rose or faded in later, which then popped in at the caster swap's speed
 	// (ShadowTransitionDuration game seconds: one frame at flight time scales, and one step of an hour scrub).
+	// Game hours throughout, so the fade keeps its length in game time at any time scale.
+	const float step = GetMoonlightFadeProgress(advanceHours);
 	const bool moonLit = sunBelowHorizon && (shadowFader.target == Caster::Masser || shadowFader.target == Caster::Secunda);
-	if (!moonLit) {
-		// Follow the light out, so the next moon starts from nothing
-		moonlightFade = sunBelowHorizon && !snap ? std::min(moonlightFade, shadowFader.casterFade) : 0.0f;
+
+	// Light still showing from before the moon took over fades out on its own, so the incoming ramp can start at zero
+	moonlightOut = sunBelowHorizon && !snap ? std::max(moonlightOut - step, 0.0f) : 0.0f;
+
+	if (!sunBelowHorizon || (snap && !moonLit)) {
+		moonlightFade = 0.0f;
+	} else if (!moonLit) {
+		// The zenith fallback fades the light out through casterFade; the ramp restarts when a moon is selected
 	} else if (snap) {
+		// Only a game load or a new space; a long scrub or time jump still ramps from zero
 		moonlightFade = 1.0f;
+	} else if (noMoonBefore) {
+		// First frame with a moon caster: none of this update's elapsed time belongs to it
+		moonlightOut = std::max(moonlightOut, lastLightLevel);
+		moonlightFade = 0.0f;
 	} else {
-		// Game hours, so it keeps its length in game time at any time scale, and an hour scrub advances it by the step;
-		// a time jump (wait, set hour) is not snapped for the same reason, the jump's hours already advance it
-		moonlightFade = std::min(moonlightFade + GetMoonlightFadeProgress(advanceHours), 1.0f);
+		moonlightFade = std::min(moonlightFade + step, 1.0f);
 	}
 	moonlightFade = std::min(moonlightFade, twilightCap);
 }

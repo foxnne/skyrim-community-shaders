@@ -264,7 +264,9 @@ private:
 	RE::NiPoint3 rawDirections[BodyCount] = {};  // sky-local, before shadow elevation locking; zero when not computed this frame
 	float currentDim = 1.0f;
 	std::optional<std::array<RE::NiColor, 3>> workingLightColors = {};
-	float moonlightFade = 0.0f;
+	float moonlightFade = 0.0f;   // incoming moonlight ramp, 0 to 1, from when a moon became the caster
+	float moonlightOut = 0.0f;    // outgoing light level kept on when a moon takes over, fading out over the same duration
+	float lastLightLevel = 0.0f;  // last update's dimmed light factor, for moonlightOut
 	float twilightCap = 0.0f;
 	float moonNightWeight = 0.0f;
 	float lightNightWeight = 0.0f;
@@ -279,7 +281,12 @@ private:
 	bool Update(const RE::Sky* sky);
 
 	/** @brief Scale on the directional light and VL from the caster swap, the zenith fade and, when dimmed, the horizon dim. */
-	float GetLightFactor(bool dimmed) const { return shadowFader.intensityFactor * shadowFader.casterFade * (dimmed ? currentDim : 1.0f); }
+	float GetLightFactor(bool dimmed) const
+	{
+		const float light = shadowFader.intensityFactor * shadowFader.casterFade * (dimmed ? currentDim : 1.0f);
+		// The light left over from before a moon took over, fading out while the moon's own light ramps in from zero
+		return dimmed && sunBelowHorizon ? std::max(light, moonlightOut) : light;
+	}
 
 	/** @brief Writes Physical Sky's caster colour to the sun light, scaled like the weather sunlight in OnSkyUpdateColors. */
 	void ApplyLightColor(const RE::Sky* sky) const;
@@ -296,8 +303,13 @@ private:
 	/** @brief Fraction of the moonlight fade duration that the given hours cover; 1 when the duration is zero. */
 	float GetMoonlightFadeProgress(float hours) const { return settings.HorizonFadeHours > 0.0f ? hours / settings.HorizonFadeHours : 1.0f; }
 
-	/** @brief Ramps moonlightFade in over the fade duration from when a moon becomes the caster, drops it with the light when none is, never above twilightCap. */
-	void UpdateMoonlightFade(float advanceHours, bool snap);
+	/**
+	 * @brief Ramps moonlightFade in from zero over the fade duration once a moon is the caster, never above twilightCap,
+	 * and fades moonlightOut, the light kept on from before that moon took over.
+	 * @param snap Game load or new space: set the fade at once.
+	 * @param noMoonBefore The caster before this update's fader step was not a moon.
+	 */
+	void UpdateMoonlightFade(float advanceHours, bool snap, bool noMoonBefore);
 
 	/** @brief Upper bound on moonlight: zero at the sun's handover, rising over the moonlight fade duration after sunset and falling with the sun's depth before sunrise. */
 	float GetTwilightCap(const RE::TESClimate::Timing& timing, float hour, float sunHeight) const;

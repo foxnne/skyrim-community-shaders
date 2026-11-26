@@ -865,8 +865,9 @@ void Effects11::BlendGradedWeathers(RE::Sky* a_sky, std::span<RE::NiColor, RE::T
 	const bool lastHidesMoons = lastColors[ColorTypes::kMoonGlare] == RE::NiColor{};
 	const bool currentHidesMoons = currentColors[ColorTypes::kMoonGlare] == RE::NiColor{};
 	if (nightSunlight) {
-		nightLightLast = lastHidesMoons ? 0.0f : 1.0f;
-		nightLightCurrent = currentHidesMoons ? 0.0f : 1.0f;
+		// Matches Sky Sync's moon-hidden scale, which follows the night weight
+		nightLightLast = lastHidesMoons ? 1.0f - lightNightWeight : 1.0f;
+		nightLightCurrent = currentHidesMoons ? 1.0f - lightNightWeight : 1.0f;
 		lastColors[ColorTypes::kSunlight] *= nightLightLast;
 		currentColors[ColorTypes::kSunlight] *= nightLightCurrent;
 	}

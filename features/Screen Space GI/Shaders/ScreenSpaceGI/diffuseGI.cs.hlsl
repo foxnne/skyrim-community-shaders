@@ -118,7 +118,7 @@ bool IsSkinPixel(uint2 pxCoord)
 // stand-in for the same sky) was added on top of it on every ray, and IL Saturation in the composite greyed the
 // whole fill, sky included. With the switch on: the sky term keeps its own colour (Sky Fill Saturation), its
 // brightness on open sky is Open Sky Fill Scale, DALC on skyward rays under open sky drops to Ambient On Open Sky,
-// and IL Saturation is applied here to the traced bounce only. All of it is blended in by sky openness
+// and the open-sky fallback is spared IL Saturation (traced bounce keeps it). All of it is blended in by sky openness
 // (Skylighting's visibility above its floor): openness 0 (a canopy, an overhang) is the legacy fill exactly, so
 // forest shade holds. Without Skylighting compiled in the openness is unknown and taken as 0, i.e. legacy.
 bool UsePhysicalSkyFill()
@@ -491,21 +491,34 @@ void CalculateGI(
 	fallbackRadiance /= SSGI_ROTATION_COUNT;
 	hitWeightTotal /= SSGI_ROTATION_COUNT;
 	openWeightTotal /= SSGI_ROTATION_COUNT;
+	fillBlendTotal /= SSGI_ROTATION_COUNT;
 #ifdef SSGI_SH
 	totalDirection /= SSGI_ROTATION_COUNT;
 	fallbackDirection /= SSGI_ROTATION_COUNT;
 #endif
 
-	// foxnne sky-lit shadows: with Physical Sky Fill on, the composite leaves the IL colour alone and IL Saturation
-	// is applied here instead. The traced bounce gets it in full, as before. The fallback gets it faded out by its fill
-	// share: occluded sky (share 0) is greyed exactly as the composite did, open sky keeps the sky's own colour. The
-	// operation is linear in RGB, so applying it before the denoiser equals applying it after.
+	// foxnne sky-lit shadows: the composite still applies IL Saturation (and its clamp) to the whole denoised signal,
+	// as in legacy. On open sky the fallback should keep the sky's own colour instead, i.e. end at saturation
+	// lerp(ILSaturation, 1, fillShare). Saturation is linear and keeps luminance, so pre-scaling the fallback's chroma
+	// (its difference from its own luminance) by k = lerp(ILSaturation, 1, fillShare) / ILSaturation makes the
+	// composite's pass land there. fillShare 0 leaves the signal untouched, so it is legacy exactly. k is limited so no
+	// channel goes below zero, and nothing is done at an IL Saturation near 0 (grey cannot be undone).
 	[branch] if (physicalSkyFill)
 	{
 		const float ilSaturation = SharedData::ssgiSettings.ILSaturation;
 		const float fillShare = openWeightTotal > 0.0 ? saturate(fillBlendTotal / openWeightTotal) : 0.0;
-		totalRadiance = max(lerp(Color::RGBToLuminance(totalRadiance), totalRadiance, ilSaturation), 0.0);
-		fallbackRadiance = max(lerp(Color::RGBToLuminance(fallbackRadiance), fallbackRadiance, lerp(ilSaturation, 1.0, fillShare)), 0.0);
+		[branch] if (fillShare > 0.0 && ilSaturation > 1e-3 && ilSaturation != 1.0)
+		{
+			const float fallbackLum = Color::RGBToLuminance(fallbackRadiance);
+			const float3 chroma = fallbackRadiance - fallbackLum;
+			float chromaScale = lerp(ilSaturation, 1.0, fillShare) / ilSaturation;
+			// lum + chroma * k >= 0 on every channel with negative chroma
+			const float3 negChroma = max(-chroma, 0.0);
+			const float maxNeg = max(negChroma.x, max(negChroma.y, negChroma.z));
+			if (maxNeg > 0.0)
+				chromaScale = min(chromaScale, fallbackLum / maxNeg);
+			fallbackRadiance = fallbackLum + chroma * chromaScale;
+		}
 
 #if defined(DYNAMIC_CUBEMAPS)
 		// Bounce Limit: a traced hit takes the place of the ambient light that direction would have brought. Cap the

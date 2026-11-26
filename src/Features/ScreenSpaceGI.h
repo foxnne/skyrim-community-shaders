@@ -117,6 +117,9 @@ public:
 		float SkyFillEnvWeight = 0.25f;   // DALC/env share on skyward rays under open sky; occluded sky keeps all of it
 		float BounceSkyLimit = 0.0f;      // traced bounce cap, in multiples of the ambient it hides; 0 = off
 		uint SkyFillDebug = 0u;           // 0 off; 1 gates, 2 openness, 3 traced only, 4 fallback only (SSGI radiance)
+		bool SkylightTint = false;         // needs PhysicalSkyFill; see diffuseGI.cs.hlsl
+		float CoplanarBounceReject = 1.0f; // ground-on-ground bounce handed back to the sky on open ground
+		float SkyMatchesSun = 1.0f;        // share of Linear Lighting's directional multiplier also on open sky
 		// NRD REBLUR
 		bool EnableREBLUR = true;
 		NRD::REBLURSettings Reblur;
@@ -186,8 +189,12 @@ public:
 		float SkyFillEnvWeight;
 		float BounceSkyLimit;
 		uint SkyFillDebug;
+		uint SkylightTint;
+		float CoplanarBounceReject;
+		float SkyMatchesSun;
+		float pad1;
 	};
-	static_assert(sizeof(SharedData) == 48);
+	static_assert(sizeof(SharedData) == 64);
 
 	/** @brief Logs the conditions the Physical Sky Fill path depends on whenever they change. */
 	void LogSkyFillGates(const SharedData& a_data);

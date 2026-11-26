@@ -126,6 +126,23 @@ bool UsePhysicalSkyFill()
 	return SharedData::ssgiSettings.PhysicalSkyFill != 0 && SharedData::physSkyData.enabled && !SharedData::InInterior;
 }
 
+// foxnne skylight shadow tint (ssgiSettings.SkylightTint, on top of Physical Sky Fill). Two physical corrections, both
+// faded in by sky openness so a canopy keeps the legacy fill:
+// 1. A plane does not light itself. On open ground the horizon tracer sees the ground around the receiver at coarse
+//    depth mips (and normal-map relief) as occluders just above the tangent plane, takes those bits off the sky and
+//    returns the sunlit ground's warm radiance for them instead. Hits that are coplanar with the receiver (similar
+//    normal, on the tangent plane) give CoplanarBounceReject of their bits back: their bounce is dropped and the open
+//    sky's mean radiance takes their place, and they no longer count as occlusion.
+// 2. Linear Lighting multiplies the sun (directionalLightMult) but not the sky, so sun : sky is off Physical Sky's
+//    own ratio by that factor. SkyMatchesSun applies that share of it to the open-sky term too.
+bool UseSkylightTint()
+{
+	return SharedData::ssgiSettings.SkylightTint != 0 && UsePhysicalSkyFill();
+}
+
+static const float SSGI_COPLANAR_NORMAL_COS = 0.9;  // hit normal within ~25 degrees of the receiver's
+static const float SSGI_COPLANAR_SLOPE = 0.12;      // hit within ~7 degrees of the receiver's tangent plane
+
 // sin/cos of the positive bit-center offsets from the projected receiver normal.
 // The negative half is mirrored, reducing the table and avoiding per-bit sincos.
 static const float2 SSGI_BIT_SIN_COS[SSGI_MAX_RAY / 2] = {
@@ -270,7 +287,9 @@ float3 SampleDiffuseFallbackCubemap(float3 worldPos, float3 worldNormal, float3 
 			[branch] if (fillBlend > 0.0)
 			{
 				// Open sky: the sky term at its own colour and Open Sky Fill Scale, faded in by openness.
-				const float3 fillSkyColor = Color::Saturation(skySample, SharedData::ssgiSettings.SkyFillSaturation) * SharedData::ssgiSettings.SkyFillScale;
+				float3 fillSkyColor = Color::Saturation(skySample, SharedData::ssgiSettings.SkyFillSaturation) * SharedData::ssgiSettings.SkyFillScale;
+				if (UseSkylightTint())
+					fillSkyColor *= lerp(1.0, SharedData::linearLightingSettings.directionalLightMult, SharedData::ssgiSettings.SkyMatchesSun);
 				skyColor = lerp(skyColor, fillSkyColor, fillBlend);
 				// A ray that looks up at open sky is lit by the sky term; the DALC term there counts the same sky twice
 				// in the weather's grey. Rays at and below the horizon keep it as the stand-in for ground bounce.
@@ -338,6 +357,28 @@ void CalculateGI(
 	float hitWeightTotal = 0;   // angular measure of the traced hits (Bounce Limit)
 	float openWeightTotal = 0;  // and of the open bits the fallback lit
 	float fillBlendTotal = 0;   // fallback fill share, weighted by open measure
+	// Skylight tint: the share of coplanar ground hits handed back to the sky (0 = legacy, also under a canopy)
+	float coplanarReject = 0.0;
+#if defined(DYNAMIC_CUBEMAPS) && defined(SKYLIGHTING)
+	[branch] if (UseSkylightTint() && UseDynamicCubemap != 0 && SharedData::ssgiSettings.CoplanarBounceReject > 0.0)
+	{
+		const float3 pixelPosWS = ViewToWorldPosition(pixCenterPos, FrameBuffer::CameraViewInverse);
+		const float3 pixelNormalWS = ViewToWorldVector(viewspaceNormal, FrameBuffer::CameraViewInverse);
+		const float3 skylightingNormal = normalize(float3(pixelNormalWS.xy, max(0, pixelNormalWS.z)) + float3(0, 0, 1e-4));
+		const float visibility = Skylighting::EvaluateDiffuse(Skylighting::Sample(pixelPosWS, pixelNormalWS), skylightingNormal, Skylighting::GetFadeOutFactor(pixelPosWS));
+		const float minVisibility = SharedData::skylightingSettings.MinDiffuseVisibility;
+		const float pixelOpen = saturate((visibility - minVisibility) / max(1.0 - minVisibility, 1e-3));
+		coplanarReject = saturate(SharedData::ssgiSettings.CoplanarBounceReject) * pixelOpen;
+	}
+#endif
+	float3 coplanarRadiance = 0;   // traced bounce from coplanar hits, kept apart
+	float coplanarOpenWeight = 0;  // their angular measure as sky directions
+	float coplanarBits = 0;        // and their share of the occluded bits
+	float coplanarHitWeight = 0;   // their traced-hit measure (Bounce Limit), restored by (1 - reject)
+#ifdef SSGI_SH
+	float3 coplanarDirection = 0;     // traced bounce moment
+	float3 coplanarSkyDirection = 0;  // their open-direction moment, for the reclaimed sky
+#endif
 #ifdef SSGI_SH
 	float3 totalDirection = 0;
 	float3 fallbackDirection = 0;
@@ -414,6 +455,13 @@ void CalculateGI(
 					if (dot(samplePos, normalSample) > 0.0)
 						normalSample = -normalSample;
 
+					bool coplanarHit = false;
+					[branch] if (coplanarReject > 0.0)
+					{
+						const float heightAbovePlane = abs(dot(sampleDelta, viewspaceNormal));
+						coplanarHit = dot(normalSample, viewspaceNormal) > SSGI_COPLANAR_NORMAL_COS && heightAbovePlane < SSGI_COPLANAR_SLOPE * length(sampleDelta);
+					}
+
 					float scalarWeight;
 					float3 directionWeight;
 					IntegrateBitfield(
@@ -427,7 +475,28 @@ void CalculateGI(
 						srcRadiance.SampleLevel(samplerPointClamp, sampleUV * OUT_FRAME_SCALE, mipLevel).rgb,
 						0);
 					float sampleLuminance = _NRD_LinearToYCoCg(sampleRadiance).x;
-					if (scalarWeight > 0.0) {
+					if (coplanarHit) {
+						if (scalarWeight > 0.0) {
+							coplanarRadiance += sampleRadiance * scalarWeight * GIStrength;
+							coplanarHitWeight += scalarWeight;
+#	ifdef SSGI_SH
+							coplanarDirection += directionWeight * sampleLuminance * GIStrength;
+#	endif
+						}
+						float openWeight;
+						float3 openDirectionWeight;
+						IntegrateBitfield(
+							currentOccludedBitfield,
+							projectedNormalNormalized, projectedNormalTangent,
+							projectedNormalLength, sinN, cosN,
+							float3(0, 0, 0), false,
+							openWeight, openDirectionWeight);
+						coplanarOpenWeight += openWeight;
+						coplanarBits += float(countbits(currentOccludedBitfield));
+#	ifdef SSGI_SH
+						coplanarSkyDirection += openDirectionWeight;
+#	endif
+					} else if (scalarWeight > 0.0) {
 						float3 diffuseRadiance = sampleRadiance * scalarWeight * GIStrength;
 						totalRadiance += diffuseRadiance;
 						if (trackFill)
@@ -498,6 +567,39 @@ void CalculateGI(
 	totalDirection /= SSGI_ROTATION_COUNT;
 	fallbackDirection /= SSGI_ROTATION_COUNT;
 #endif
+
+	// Skylight tint: coplanar ground hits go back to the sky by coplanarReject. Their bounce is dropped by that share,
+	// the open sky's mean radiance (per unit measure, before the fallback's multipliers, so it gets them too) fills
+	// their measure, and they stop counting as occlusion. Without any open bit there is no sky estimate: legacy.
+	[branch] if (coplanarReject > 0.0 && coplanarBits > 0.0)
+	{
+		coplanarRadiance /= SSGI_ROTATION_COUNT;
+		coplanarOpenWeight /= SSGI_ROTATION_COUNT;
+		coplanarBits /= SSGI_ROTATION_COUNT;
+		const float reject = openWeightTotal > 0.0 ? coplanarReject : 0.0;
+		const float3 openSkyMean = openWeightTotal > 0.0 ? fallbackRadiance / openWeightTotal : 0.0;
+		const float3 skyForCoplanar = openSkyMean * coplanarOpenWeight * reject;
+		const float fillShareOpen = openWeightTotal > 0.0 ? fillBlendTotal / openWeightTotal : 0.0;
+		fallbackRadiance += skyForCoplanar;
+		fillBlendTotal += fillShareOpen * coplanarOpenWeight * reject;
+		openWeightTotal += coplanarOpenWeight * reject;
+		totalRadiance += coplanarRadiance * (1.0 - reject);
+		if (trackFill)
+			hitWeightTotal += coplanarHitWeight / SSGI_ROTATION_COUNT * (1.0 - reject);
+		normHitDist = max(normHitDist - reject * coplanarBits / float(SSGI_MAX_RAY), 0.0);
+#	ifdef SSGI_SH
+		totalDirection += coplanarDirection / SSGI_ROTATION_COUNT * (1.0 - reject);
+		// The reclaimed sky keeps the open-direction moment of those bits, weighted like the fallback's own samples.
+		fallbackDirection += coplanarSkyDirection / SSGI_ROTATION_COUNT * _NRD_LinearToYCoCg(openSkyMean).x * reject;
+#	endif
+	} else {
+		totalRadiance += coplanarRadiance / SSGI_ROTATION_COUNT;
+		if (trackFill)
+			hitWeightTotal += coplanarHitWeight / SSGI_ROTATION_COUNT;
+#	ifdef SSGI_SH
+		totalDirection += coplanarDirection / SSGI_ROTATION_COUNT;
+#	endif
+	}
 
 	// foxnne sky-lit shadows: the composite still applies IL Saturation (and its clamp) to the whole denoised signal,
 	// as in legacy. On open sky the fallback should keep the sky's own colour instead, i.e. end at saturation

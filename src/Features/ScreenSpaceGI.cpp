@@ -45,6 +45,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	SkyFillEnvWeight,
 	BounceSkyLimit,
 	SkyFillDebug,
+	SkylightTint,
+	CoplanarBounceReject,
+	SkyMatchesSun,
 	EnableREBLUR,
 	Reblur,
 	DiffusePrepassBlurRadius,
@@ -268,6 +271,15 @@ void ScreenSpaceGI::DrawSettings()
 						if (auto _tt = Util::HoverTooltipWrapper()) {
 							ImGui::Text("%s", T(TKEY("sky_fill_env_weight_tooltip"), "Share of the weather's directional ambient kept on rays that look up at open sky. It is a stand-in for the same sky, so 0 removes the double count; occluded sky (canopy, overhangs) keeps all of it."));
 						}
+						resetOnChange(ImGui::Checkbox(T(TKEY("skylight_tint"), "Skylight Shadow Tint"), &settings.SkylightTint));
+						if (auto _tt = Util::HoverTooltipWrapper()) {
+							ImGui::Text("%s", T(TKEY("skylight_tint_tooltip"), "Open ground in sun shadow takes the sky's light instead of warm ground-on-ground bounce (a plane does not light itself), and the open sky gets the same Linear Lighting multiplier as the sun. Faded out under canopies, so forest shade keeps its look."));
+						}
+						{
+							auto tintGuard = Util::DisableGuard(!settings.SkylightTint);
+							resetOnChange(ImGui::SliderFloat(T(TKEY("coplanar_bounce_reject"), "Ground Bounce To Sky"), &settings.CoplanarBounceReject, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp));
+							resetOnChange(ImGui::SliderFloat(T(TKEY("sky_matches_sun"), "Sky Matches Sun Multiplier"), &settings.SkyMatchesSun, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp));
+						}
 						resetOnChange(ImGui::SliderFloat(T(TKEY("bounce_sky_limit"), "Bounce Limit"), &settings.BounceSkyLimit, 0.0f, 16.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp));
 						if (auto _tt = Util::HoverTooltipWrapper()) {
 							ImGui::Text("%s", T(TKEY("bounce_sky_limit_tooltip"), "With Physical Sky Fill, outdoors: caps traced bounce light at this many times the ambient light the hit geometry hides from the pixel, fading out where the sky is occluded. Keeps bounce colour, trims overestimates (thick-occluder guesses, lit sides seen from shade). 0 = off."));
@@ -424,6 +436,8 @@ void ScreenSpaceGI::LoadSettings(json& o_json)
 	settings.SkyFillEnvWeight = Util::ClampFinite(settings.SkyFillEnvWeight, defaults.SkyFillEnvWeight, 0.0f, 1.0f);
 	settings.BounceSkyLimit = Util::ClampFinite(settings.BounceSkyLimit, defaults.BounceSkyLimit, 0.0f, 16.0f);
 	settings.SkyFillDebug = std::min(settings.SkyFillDebug, 4u);
+	settings.CoplanarBounceReject = Util::ClampFinite(settings.CoplanarBounceReject, defaults.CoplanarBounceReject, 0.0f, 1.0f);
+	settings.SkyMatchesSun = Util::ClampFinite(settings.SkyMatchesSun, defaults.SkyMatchesSun, 0.0f, 1.0f);
 	ResetIfOutOfRange(settings.DiffusePrepassBlurRadius, 0.0f, 75.0f, defaults.DiffusePrepassBlurRadius);
 	if (settings.QuarterRes)
 		settings.HalfRes = false;
@@ -1297,6 +1311,9 @@ ScreenSpaceGI::SharedData ScreenSpaceGI::GetCommonBufferData()
 	data.SkyFillEnvWeight = std::clamp(settings.SkyFillEnvWeight, 0.0f, 1.0f);
 	data.BounceSkyLimit = std::clamp(settings.BounceSkyLimit, 0.0f, 16.0f);
 	data.SkyFillDebug = std::min(settings.SkyFillDebug, 4u);
+	data.SkylightTint = settings.SkylightTint ? 1u : 0u;
+	data.CoplanarBounceReject = std::clamp(settings.CoplanarBounceReject, 0.0f, 1.0f);
+	data.SkyMatchesSun = std::clamp(settings.SkyMatchesSun, 0.0f, 1.0f);
 	LogSkyFillGates(data);
 	return data;
 }

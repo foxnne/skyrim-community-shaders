@@ -120,6 +120,7 @@ public:
 		bool SkylightTint = false;         // needs PhysicalSkyFill; see diffuseGI.cs.hlsl
 		float CoplanarBounceReject = 1.0f; // ground-on-ground bounce handed back to the sky on open ground
 		float SkyMatchesSun = 1.0f;        // share of Linear Lighting's directional multiplier also on open sky
+		uint SkyFillSource = 0u;           // open-sky radiance: 0 sky reflection cubemap, 1 Physical Sky sky-view LUT
 		// NRD REBLUR
 		bool EnableREBLUR = true;
 		NRD::REBLURSettings Reblur;
@@ -192,7 +193,7 @@ public:
 		uint SkylightTint;
 		float CoplanarBounceReject;
 		float SkyMatchesSun;
-		float pad1;
+		uint SkyFillSource;
 	};
 	static_assert(sizeof(SharedData) == 64);
 

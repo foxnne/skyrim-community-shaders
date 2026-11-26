@@ -48,6 +48,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	SkylightTint,
 	CoplanarBounceReject,
 	SkyMatchesSun,
+	SkyFillSource,
 	EnableREBLUR,
 	Reblur,
 	DiffusePrepassBlurRadius,
@@ -267,6 +268,17 @@ void ScreenSpaceGI::DrawSettings()
 							ImGui::Text("%s", T(TKEY("sky_fill_scale_tooltip"), "Sky light brightness where Skylighting sees open sky; sets the sun to shade ratio on open ground. Under a canopy the Sky IBL Scale still applies, so forest shade holds."));
 						}
 						resetOnChange(ImGui::SliderFloat(T(TKEY("sky_fill_saturation"), "Sky Fill Saturation"), &settings.SkyFillSaturation, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp));
+						{
+							const char* sources[] = { "Sky reflection cubemap", "Physical Sky clear-sky LUT" };
+							int source = static_cast<int>(std::min(settings.SkyFillSource, 1u));
+							if (ImGui::Combo(T(TKEY("sky_fill_source"), "Open Sky Source"), &source, sources, IM_ARRAYSIZE(sources))) {
+								settings.SkyFillSource = static_cast<uint>(source);
+								resetOnChange(true);
+							}
+							if (auto _tt = Util::HoverTooltipWrapper()) {
+								ImGui::Text("%s", T(TKEY("sky_fill_source_tooltip"), "Where the open-sky light in shade comes from. The cubemap holds clouds, horizon haze and ground; the Physical Sky LUT is the clear sky's own blue (no sun, no clouds): use it on clear and fair days."));
+							}
+						}
 						resetOnChange(ImGui::SliderFloat(T(TKEY("sky_fill_env_weight"), "Ambient On Open Sky"), &settings.SkyFillEnvWeight, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp));
 						if (auto _tt = Util::HoverTooltipWrapper()) {
 							ImGui::Text("%s", T(TKEY("sky_fill_env_weight_tooltip"), "Share of the weather's directional ambient kept on rays that look up at open sky. It is a stand-in for the same sky, so 0 removes the double count; occluded sky (canopy, overhangs) keeps all of it."));
@@ -355,8 +367,8 @@ void ScreenSpaceGI::DrawDebugSection()
 	ImGui::SliderFloat(T(TKEY("view_resize"), "View Resize"), &debugRescale, 0.f, 1.f);
 
 	{
-		const char* skyFillDebugModes[] = { "Off", "Gates (R fallback, G IBL, B fill live)", "Openness (R fill share, G open share, B Skylighting)", "Traced bounce only", "Cubemap fallback only" };
-		int mode = static_cast<int>(std::min(settings.SkyFillDebug, 4u));
+		const char* skyFillDebugModes[] = { "Off", "Gates (R fallback, G IBL, B fill live)", "Openness (R fill share, G open share, B Skylighting)", "Traced bounce only", "Cubemap fallback only", "Fallback sky from Physical Sky LUT", "Fallback sky from cubemap" };
+		int mode = static_cast<int>(std::min(settings.SkyFillDebug, 6u));
 		if (ImGui::Combo(T(TKEY("sky_fill_debug"), "Sky Fill Debug (SSGI radiance)"), &mode, skyFillDebugModes, IM_ARRAYSIZE(skyFillDebugModes))) {
 			settings.SkyFillDebug = static_cast<uint>(mode);
 			userSettings.SkyFillDebug = settings.SkyFillDebug;
@@ -435,7 +447,8 @@ void ScreenSpaceGI::LoadSettings(json& o_json)
 	settings.SkyFillSaturation = Util::ClampFinite(settings.SkyFillSaturation, defaults.SkyFillSaturation, 0.0f, 2.0f);
 	settings.SkyFillEnvWeight = Util::ClampFinite(settings.SkyFillEnvWeight, defaults.SkyFillEnvWeight, 0.0f, 1.0f);
 	settings.BounceSkyLimit = Util::ClampFinite(settings.BounceSkyLimit, defaults.BounceSkyLimit, 0.0f, 16.0f);
-	settings.SkyFillDebug = std::min(settings.SkyFillDebug, 4u);
+	settings.SkyFillDebug = std::min(settings.SkyFillDebug, 6u);
+	settings.SkyFillSource = std::min(settings.SkyFillSource, 1u);
 	settings.CoplanarBounceReject = Util::ClampFinite(settings.CoplanarBounceReject, defaults.CoplanarBounceReject, 0.0f, 1.0f);
 	settings.SkyMatchesSun = Util::ClampFinite(settings.SkyMatchesSun, defaults.SkyMatchesSun, 0.0f, 1.0f);
 	ResetIfOutOfRange(settings.DiffusePrepassBlurRadius, 0.0f, 75.0f, defaults.DiffusePrepassBlurRadius);
@@ -1107,6 +1120,15 @@ void ScreenSpaceGI::DrawSSGI()
 		if (dynamicCubemaps.loaded && skylighting.loaded && skylighting.texProbeArray)
 			srvs.at(6) = skylighting.texProbeArray->srv.get();
 		srvs.at(8) = texNormal->srv.get();
+		// t9: Physical Sky's sky-view LUT (generated in EarlyPrepass, before this pass) for the open-sky fill
+		// (SkyFillSource 1) and the debug reference; t10: its volumetric cloud transmittance cube, which decides per
+		// direction between the clear-sky LUT and the cubemap. srvs has 11 entries and is bound as t0-t10. Null = unused.
+		if (auto& physicalSky = globals::features::physicalSky; physicalSky.IsRendering()) {
+			if (physicalSky.texSvLut)
+				srvs.at(9) = physicalSky.texSvLut->srv.get();
+			if (physicalSky.texVolCubeTr)
+				srvs.at(10) = physicalSky.texVolCubeTr->srv.get();
+		}
 		ID3D11ShaderResourceView* envIBLSrv = ibl.loaded && ibl.envIBLTexture ? ibl.envIBLTexture->srv.get() : nullptr;
 
 		uavs.at(0) = texNRDInput->uav.get();
@@ -1310,7 +1332,8 @@ ScreenSpaceGI::SharedData ScreenSpaceGI::GetCommonBufferData()
 	data.SkyFillSaturation = std::clamp(settings.SkyFillSaturation, 0.0f, 2.0f);
 	data.SkyFillEnvWeight = std::clamp(settings.SkyFillEnvWeight, 0.0f, 1.0f);
 	data.BounceSkyLimit = std::clamp(settings.BounceSkyLimit, 0.0f, 16.0f);
-	data.SkyFillDebug = std::min(settings.SkyFillDebug, 4u);
+	data.SkyFillDebug = std::min(settings.SkyFillDebug, 6u);
+	data.SkyFillSource = std::min(settings.SkyFillSource, 1u);
 	data.SkylightTint = settings.SkylightTint ? 1u : 0u;
 	data.CoplanarBounceReject = std::clamp(settings.CoplanarBounceReject, 0.0f, 1.0f);
 	data.SkyMatchesSun = std::clamp(settings.SkyMatchesSun, 0.0f, 1.0f);

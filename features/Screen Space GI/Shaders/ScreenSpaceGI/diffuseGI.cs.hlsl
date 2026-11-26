@@ -77,6 +77,10 @@ TextureCube<float3> ReflectionCubemap : register(t5);
 #	endif
 #endif
 Texture2D<float2> srcNormal : register(t8);
+// Physical Sky's sky-view LUT (sky radiance only: no sun disc, no clouds, no ground), bound when Physical Sky renders.
+Texture2D<float4> PhysSkyViewLut : register(t9);
+// Physical Sky's volumetric cloud transmittance per direction (1 = clear line of sight to the sky), for weather.
+TextureCube<float> PhysSkyCloudTr : register(t10);
 
 RWTexture2D<float4> outRadianceHitDist : register(u0);
 #ifdef SSGI_SH
@@ -138,6 +142,65 @@ bool UsePhysicalSkyFill()
 bool UseSkylightTint()
 {
 	return SharedData::ssgiSettings.SkylightTint != 0 && UsePhysicalSkyFill();
+}
+
+// foxnne skylight colour (ssgiSettings.SkyFillSource 1): the open-sky term of the fill read from Physical Sky's
+// sky-view LUT instead of the sky reflection cubemap. The cubemap holds what the reflection pass drew (clouds, the
+// horizon haze, the ground below the horizon) and read neutral grey at the Whiterun road on a clear noon; the LUT is the
+// clear sky's own scattered radiance, i.e. the physically right fill for open-sky shade on a clear day. Rays at or below
+// the horizon keep the cubemap (the ground). Same scene units as the cubemap's sky (Sky.hlsl writes the LUT straight out).
+// Clouds are not in the LUT, so this suits clear and fair weather; under overcast keep source 0.
+float2 PhysSkyViewLutUv(float3 rayDir, uint lutHeight)
+{
+	const float radius = SharedData::physSkyData.rPlanet;
+	const float viewRadius = max(SharedData::physSkyData.zCameraPlanet, radius);
+	const float horizonDistance = sqrt(max(0.0, (viewRadius - radius) * (viewRadius + radius)));
+	const float horizon = acos(clamp(-horizonDistance / viewRadius, -1.0, 0.0));
+	const float u = atan2(rayDir.y, rayDir.x) * 0.5 * Math::INV_PI;
+	const float zenith = acos(clamp(rayDir.z, -1.0, 1.0));
+	const float v = zenith <= horizon ?
+	                    0.5 * (1.0 - sqrt(saturate(1.0 - zenith / horizon))) :
+	                    0.5 + 0.5 * sqrt(saturate((zenith - horizon) / (Math::PI - horizon)));
+	return float2(frac(u), (0.5 + v * (lutHeight - 1.0)) / lutHeight);
+}
+
+/** @brief Physical Sky's clear-sky radiance toward rayDir; false when the ray is at/below the horizon or the LUT is unbound.
+ *  Same mapping as PhysSky::SkyViewCoord / SkyViewLutTexel (the producer inverts it in InvSkyViewLutUv). Bilinear by hand
+ *  so the azimuth wraps across the u = 0/1 seam (the shared sampler clamps). */
+bool SamplePhysSkyLut(float3 rayDir, out float3 o_radiance)
+{
+	o_radiance = 0;
+	if (rayDir.z <= 0.0 || !SharedData::physSkyData.enabled)
+		return false;
+	uint width, height;
+	PhysSkyViewLut.GetDimensions(width, height);
+	if (width == 0 || height == 0)
+		return false;
+	const float2 texel = PhysSkyViewLutUv(rayDir, height) * float2(width, height) - 0.5;
+	const float2 base = floor(texel);
+	const float2 f = texel - base;
+	const uint x0 = (uint)((int)base.x + (int)width) % width;
+	const uint x1 = (x0 + 1) % width;
+	const uint y0 = (uint)clamp((int)base.y, 0, (int)height - 1);
+	const uint y1 = min(y0 + 1, height - 1);
+	const float3 top = lerp(PhysSkyViewLut.Load(int3(x0, y0, 0)).rgb, PhysSkyViewLut.Load(int3(x1, y0, 0)).rgb, f.x);
+	const float3 bottom = lerp(PhysSkyViewLut.Load(int3(x0, y1, 0)).rgb, PhysSkyViewLut.Load(int3(x1, y1, 0)).rgb, f.x);
+	o_radiance = max(lerp(top, bottom, f.y), 0.0);
+	return true;
+}
+
+/** @brief Share of the clear sky (the LUT) in the open-sky fill toward rayDir: Physical Sky's volumetric cloud transmittance
+ *  that way. Clouds in front of the sky (any weather, any transition) hand that direction back to the cubemap, which holds
+ *  the lit clouds. No volumetric clouds or no cube: 0, i.e. the cubemap as before. */
+float GetClearSkyShare(float3 rayDir)
+{
+	if (rayDir.z <= 0.0 || !SharedData::physSkyData.enabled || !SharedData::physSkyData.enableVolumetricClouds)
+		return 0.0;
+	uint width, height, levels;
+	PhysSkyCloudTr.GetDimensions(0, width, height, levels);
+	if (width == 0)
+		return 0.0;
+	return saturate(PhysSkyCloudTr.SampleLevel(samplerLinearClamp, rayDir, 0));
 }
 
 static const float SSGI_COPLANAR_NORMAL_COS = 0.9;  // hit normal within ~25 degrees of the receiver's
@@ -282,12 +345,43 @@ float3 SampleDiffuseFallbackCubemap(float3 worldPos, float3 worldNormal, float3 
 
 		float3 reflectionColor = 0;
 		if (!SharedData::InInterior) {
+			const uint skyFillDebug = SharedData::ssgiSettings.SkyFillDebug;
+			[branch] if (skyFillDebug == 5 || skyFillDebug == 6)
+			{
+				// Debug: the fallback's open-sky radiance alone (rays above the horizon only), from the LUT (5) or the
+				// cubemap (6), unsaturated and unscaled, with Skylighting visibility; no DALC/env. Compare their hue in the
+				// same graded capture.
+				float3 debugSky = 0.0;
+				[branch] if (worldDir.z > 0.0)
+				{
+					if (skyFillDebug == 5) {
+						float3 lutSample;
+						if (SamplePhysSkyLut(worldDir, lutSample))
+							debugSky = lutSample;
+					} else
+						debugSky = ReflectionCubemap.SampleLevel(samplerLinearClamp, worldDir, SSGI_FALLBACK_MIP);
+				}
+#		if defined(SKYLIGHTING)
+				debugSky *= skylightingDiffuse;
+#		endif
+				o_fillBlend = 0.0;
+				return ColorManagement::SceneToLinear(debugSky);
+			}
 			float3 skySample = ReflectionCubemap.SampleLevel(samplerLinearClamp, worldDir, SSGI_FALLBACK_MIP);
 			float3 skyColor = Color::Saturation(skySample, SharedData::iblSettings.SkyIBLSaturation) * SharedData::iblSettings.SkyIBLScale;
 			[branch] if (fillBlend > 0.0)
 			{
 				// Open sky: the sky term at its own colour and Open Sky Fill Scale, faded in by openness.
-				float3 fillSkyColor = Color::Saturation(skySample, SharedData::ssgiSettings.SkyFillSaturation) * SharedData::ssgiSettings.SkyFillScale;
+				float3 fillSkySample = skySample;
+				[branch] if (SharedData::ssgiSettings.SkyFillSource == 1)
+				{
+					// Clear sky from the LUT where the line of sight is cloud-free, the cubemap (lit clouds) where it is not.
+					const float clearShare = GetClearSkyShare(worldDir);
+					float3 lutSample;
+					if (clearShare > 0.0 && SamplePhysSkyLut(worldDir, lutSample))
+						fillSkySample = lerp(skySample, lutSample, clearShare);
+				}
+				float3 fillSkyColor = Color::Saturation(fillSkySample, SharedData::ssgiSettings.SkyFillSaturation) * SharedData::ssgiSettings.SkyFillScale;
 				if (UseSkylightTint())
 					fillSkyColor *= lerp(1.0, SharedData::linearLightingSettings.directionalLightMult, SharedData::ssgiSettings.SkyMatchesSun);
 				skyColor = lerp(skyColor, fillSkyColor, fillBlend);
@@ -686,7 +780,7 @@ void CalculateGI(
 		} else if (skyFillDebug == 3) {
 			o_radiance = totalRadiance;
 		} else {
-			o_radiance = fallbackRadiance;
+			o_radiance = fallbackRadiance;  // 4, and 5/6 (the fallback was built from the debug sky term)
 		}
 	}
 #ifdef SSGI_SH

@@ -2200,7 +2200,9 @@ void PhysicalSky::Reset()
 	const float shadowBottomKm = settings.cloudLayer.low.GetShadowBottomKm(lowCloudBaseKm, settings.shadowVolumeRange, kShadowVolW);
 	const float lowCloudThicknessKm = lowCloudTopKm - shadowBottomKm;
 	auto& skySync = globals::features::skySync;
-	skySync.workingLightColors = std::nullopt;
+	// Sky Sync's light colours for this frame: one packet, published on every exit of Reset (Codex #3); never Sky Sync's
+	// own working copy, which its main-thread Update owns.
+	SkySync::LightColorPacket lightColors;
 
 	auto& linearLighting = globals::features::linearLighting;
 
@@ -2235,8 +2237,7 @@ void PhysicalSky::Reset()
 
 	if (!allGood) {
 		lightning.Update(*this, worldspaceID, false, false);
-		if (skySync.loaded && skySync.settings.Enabled)
-			skySync.workingLightColors = std::nullopt;
+		skySync.PublishLightColors(lightColors);  // no override colours this frame
 		// Some shader paths read cloud shadow and lightning fields without checking enabled, so clear them all
 		cbData = {};
 		volMainHistoryValid = false;
@@ -2249,9 +2250,10 @@ void PhysicalSky::Reset()
 	float2 dynres = Util::ConvertToDynamic(res);
 	dynres = { floor(dynres.x), floor(dynres.y) };
 
-	auto sunDir = skySync.rawDirections[static_cast<int>(SkySync::Caster::Sun)];
-	auto masserDir = skySync.rawDirections[static_cast<int>(SkySync::Caster::Masser)];
-	auto secundaDir = skySync.rawDirections[static_cast<int>(SkySync::Caster::Secunda)];
+	const auto bodyDirections = skySync.TakeDirections();  // the main thread's packet of this frame, not its live array (Codex #3)
+	auto sunDir = bodyDirections.directions[static_cast<int>(SkySync::Caster::Sun)];
+	auto masserDir = bodyDirections.directions[static_cast<int>(SkySync::Caster::Masser)];
+	auto secundaDir = bodyDirections.directions[static_cast<int>(SkySync::Caster::Secunda)];
 
 	// Wide gamut support: when ACEScg is active, transform color parameters
 	// from sRGB gamut to AP1 gamut so that the LUTs are natively generated in AP1 space.
@@ -2344,12 +2346,13 @@ void PhysicalSky::Reset()
 			color /= pbrCompensationMult;
 			return RE::NiColor(color.x, color.y, color.z);
 		};
-		skySync.workingLightColors = std::array{
+		lightColors = std::array{
 			LightConvFn(cbData.sunlightColor),
 			LightConvFn(cbData.masserColor),
 			LightConvFn(cbData.secundaColor)
 		};
 	}
+	skySync.PublishLightColors(lightColors);
 
 	RE::NiPoint3 posCam = { 0, 0, 0 };
 	if (auto cam = RE::PlayerCamera::GetSingleton(); cam && cam->cameraRoot) {

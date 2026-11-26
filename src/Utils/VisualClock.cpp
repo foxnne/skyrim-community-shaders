@@ -5,9 +5,11 @@
 #include <chrono>
 #include <cmath>
 #include <mutex>
+#include <string>
 
 #include "Features/SkySync.h"
 #include "Globals.h"
+#include "Utils/Format.h"
 #include "Utils/Game.h"
 
 namespace
@@ -29,6 +31,82 @@ namespace
 	std::atomic_bool gColorsHook{ false };
 	std::atomic_bool gCalendarOk{ false };     // main-thread snapshot, per frame
 	std::atomic_bool gSkySyncEnabled{ false };  // main-thread snapshot, per frame
+	std::atomic_bool gSkyUpdateSeen{ false };   // our Sky::Update hook has actually run at least once
+	std::atomic_int  gLastRefusal{ -1 };        // last refusal reason logged (once per change)
+
+	enum Refusal : int
+	{
+		kOk = 0,
+		kNoSkyHook,
+		kNoColorsHook,
+		kSkyHookNeverRan,
+		kNoCalendar,
+		kSkySyncOff,
+		kBadArgs,
+	};
+
+	const char* RefusalText(int a_reason)
+	{
+		switch (a_reason) {
+		case kNoSkyHook:
+			return "Sky Sync's Sky::Update hook is not installed (Sky Sync not loaded, EVLaS conflict, or detour failed)";
+		case kNoColorsHook:
+			return "the Sky::UpdateColors hook is not installed (detour failed)";
+		case kSkyHookNeverRan:
+			return "the Sky::Update hook is installed but has never run (another plugin may have replaced Sky::Update after us)";
+		case kNoCalendar:
+			return "the calendar (GameHour/GameDaysPassed/TimeScale) is not available";
+		case kSkySyncOff:
+			return "Sky Sync is disabled";
+		case kBadArgs:
+			return "the caller passed a non-finite time or rate";
+		default:
+			return "ok";
+		}
+	}
+
+	// Where the first instruction of Sky::Update jumps (Detours and SKSE branches start with E9 rel32 or FF25),
+	// and which module that is in: tells whether our detour or another plugin's sits on the function.
+	std::string SkyUpdateEntry()
+	{
+		const auto addr = REL::RelocationID(25682, 26229).address();
+		const auto* code = reinterpret_cast<const std::uint8_t*>(addr);
+		std::uintptr_t target = 0;
+		if (code[0] == 0xE9)
+			target = addr + 5 + *reinterpret_cast<const std::int32_t*>(code + 1);
+		else if (code[0] == 0xFF && code[1] == 0x25)
+			target = *reinterpret_cast<const std::uintptr_t*>(addr + 6 + *reinterpret_cast<const std::int32_t*>(code + 2));
+		if (!target)
+			return fmt::format("starts with {:02X} {:02X} (not a jump: unhooked)", code[0], code[1]);
+		// A Detours trampoline jumps again from its own page; follow one more E9 / FF25 hop.
+		const auto* hop = reinterpret_cast<const std::uint8_t*>(target);
+		if (hop[0] == 0xFF && hop[1] == 0x25)
+			target = *reinterpret_cast<const std::uintptr_t*>(target + 6 + *reinterpret_cast<const std::int32_t*>(hop + 2));
+		else if (hop[0] == 0xE9)
+			target = target + 5 + *reinterpret_cast<const std::int32_t*>(hop + 1);
+		HMODULE module = nullptr;
+		wchar_t name[MAX_PATH]{};
+		if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCWSTR>(target), &module) &&
+			module) {
+			GetModuleFileNameW(module, name, MAX_PATH);
+		}
+		const std::wstring path = name;
+		const auto slash = path.find_last_of(L"\\/");
+		const std::wstring file = slash == std::wstring::npos ? path : path.substr(slash + 1);
+		return fmt::format("jumps to 0x{:X} in {}", target, file.empty() ? std::string("(no module: a trampoline page)") : Util::WStringToString(file));
+	}
+
+	void LogRefusal(int a_reason)
+	{
+		if (gLastRefusal.exchange(a_reason) == a_reason)
+			return;
+		if (a_reason == kOk) {
+			logger::info("[Visual Clock] accepted: the sky follows the visual clock");
+			return;
+		}
+		logger::warn("[Visual Clock] refused: {} (Sky::Update {})", RefusalText(a_reason), SkyUpdateEntry());
+	}
 
 	// Main thread only.
 	bool  gWasActive = false;
@@ -37,6 +115,21 @@ namespace
 	constexpr int64_t kStaleMs = 2000;
 	constexpr double  kMinAheadDays = 1.0 / (24.0 * 60.0 * 60.0);  // one game second
 	constexpr float   kJumpHours = 1.0f / 120.0f;                   // a discontinuity over half a game minute resyncs the sky
+
+	int Reason()
+	{
+		if (!gSkyHook.load(std::memory_order_acquire))
+			return kNoSkyHook;
+		if (!gColorsHook.load(std::memory_order_acquire))
+			return kNoColorsHook;
+		if (!gSkyUpdateSeen.load(std::memory_order_acquire))
+			return kSkyHookNeverRan;
+		if (!gCalendarOk.load(std::memory_order_acquire))
+			return kNoCalendar;
+		if (!gSkySyncEnabled.load(std::memory_order_acquire))
+			return kSkySyncOff;
+		return kOk;
+	}
 
 	int64_t NowMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
@@ -67,20 +160,28 @@ namespace Util::VisualClock
 		return frame.active ? frame.hour : (a_sky ? a_sky->currentGameHour : 12.0f);
 	}
 
-	bool Supported()
+	bool Supported() { return Reason() == kOk; }
+
+	void SetSkyHookInstalled(bool a_installed)
 	{
-		return gSkyHook.load(std::memory_order_acquire) && gColorsHook.load(std::memory_order_acquire) &&
-		       gCalendarOk.load(std::memory_order_acquire) && gSkySyncEnabled.load(std::memory_order_acquire);
+		gSkyHook.store(a_installed, std::memory_order_release);
+		logger::info("[Visual Clock] Sky::Update hook (Sky Sync) {}; Sky::Update {}", a_installed ? "installed" : "NOT installed", SkyUpdateEntry());
 	}
 
-	void SetSkyHookInstalled(bool a_installed) { gSkyHook.store(a_installed, std::memory_order_release); }
-
-	void SetColorsHookInstalled(bool a_installed) { gColorsHook.store(a_installed, std::memory_order_release); }
+	void SetColorsHookInstalled(bool a_installed)
+	{
+		gColorsHook.store(a_installed, std::memory_order_release);
+		logger::info("[Visual Clock] Sky::UpdateColors hook {}", a_installed ? "installed" : "NOT installed");
+	}
 
 	void BeginSkyUpdate()
 	{
-		gSkySyncEnabled.store(globals::features::skySync.settings.Enabled, std::memory_order_release);
+		if (!gSkyUpdateSeen.exchange(true, std::memory_order_acq_rel))
+			logger::info("[Visual Clock] Sky::Update hook is live (first call)");
+		const bool skySyncEnabled = globals::features::skySync.settings.Enabled;
 		const auto* calendar = Calendar();
+		if (gSkySyncEnabled.exchange(skySyncEnabled, std::memory_order_acq_rel) != skySyncEnabled || gCalendarOk.load() != (calendar != nullptr))
+			logger::info("[Visual Clock] Sky Sync {}, calendar {}", skySyncEnabled ? "enabled" : "disabled", calendar ? "available" : "NOT available");
 		gCalendarOk.store(calendar != nullptr, std::memory_order_release);
 
 		Published published;
@@ -155,7 +256,9 @@ extern "C" __declspec(dllexport) int BottledShaders_VisualClockVersion()
 
 extern "C" __declspec(dllexport) bool BottledShaders_SetVisualClock2(double a_daysPassed, float a_rate)
 {
-	if (!Util::VisualClock::Supported() || !std::isfinite(a_daysPassed) || !std::isfinite(a_rate)) {
+	const int reason = !std::isfinite(a_daysPassed) || !std::isfinite(a_rate) ? kBadArgs : Reason();
+	LogRefusal(reason);
+	if (reason != kOk) {
 		BottledShaders_ClearVisualClock();
 		return false;
 	}
@@ -178,5 +281,7 @@ extern "C" __declspec(dllexport) void BottledShaders_ClearVisualClock()
 
 extern "C" __declspec(dllexport) bool BottledShaders_VisualClockSupported()
 {
-	return Util::VisualClock::Supported();
+	const int reason = Reason();
+	LogRefusal(reason);
+	return reason == kOk;
 }

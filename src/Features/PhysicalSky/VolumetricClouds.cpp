@@ -438,7 +438,7 @@ void PhysicalSky::SetupVolumetricResources()
 
 	// Volumetric cloud constants
 	{
-		volCloudCb = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<VolumetricCloudCB>());
+		volCloudCb = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<VolumetricCloudCB>(), "PhysicalSky::VolumetricCloudCB");
 		cloudDispatchCb = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<std::array<uint32_t, 4>>(), "PhysicalSky::CloudDispatch");
 	}
 
@@ -463,7 +463,7 @@ void PhysicalSky::SetupVolumetricResources()
 		uav.Format = desc.Format;
 		uav.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
 		texCloudCrossSection->CreateUAV(uav);
-		cloudCrossSectionCB = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<CloudCrossSectionCB>());
+		cloudCrossSectionCB = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<CloudCrossSectionCB>(), "PhysicalSky::CloudCrossSectionCB");
 		cloudCrossSectionReady = false;
 		cloudCrossSectionDirty = true;
 	}
@@ -535,7 +535,7 @@ void PhysicalSky::SetupVolumetricResources()
 		rtv.Format = desc.Format;
 		rtv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
 		texCloudBoundary->CreateRTV(rtv);
-		cloudBoundaryCB = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<CloudBoundaryCB>());
+		cloudBoundaryCB = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<CloudBoundaryCB>(), "PhysicalSky::CloudBoundaryCB");
 
 		std::vector<uint32_t> indices;
 		indices.reserve(kCloudBoundaryCells * kCloudBoundaryCells * 6u);
@@ -554,6 +554,7 @@ void PhysicalSky::SetupVolumetricResources()
 		indexData.pSysMem = indices.data();
 		cloudBoundaryIndices = nullptr;
 		DX::ThrowIfFailed(device->CreateBuffer(&indexDesc, &indexData, cloudBoundaryIndices.put()));
+		Util::SetResourceName(cloudBoundaryIndices.get(), "PhysicalSky::CloudBoundaryIndices");
 
 		D3D11_BLEND_DESC blend{};
 		auto& target = blend.RenderTarget[0];

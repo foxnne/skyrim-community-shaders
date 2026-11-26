@@ -63,7 +63,7 @@ void LocalNdfManager::RefreshAssets()
 
 void LocalNdfManager::SetupResources()
 {
-	cb = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<Parameters>());
+	cb = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<Parameters>(), "PhysicalSky::LocalNdfParameters");
 	height = CreateLocalTexture(1, 1, "PhysicalSky::LocalNdfHeight");
 	modeling = CreateLocalTexture(1, 1, "PhysicalSky::LocalNdfModeling");
 	maximum = CreateLocalTexture(1, 1, "PhysicalSky::LocalNdfMaximum");

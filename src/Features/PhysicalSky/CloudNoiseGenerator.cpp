@@ -33,7 +33,7 @@ namespace
 
 void CloudNoiseGenerator::SetupResources()
 {
-	parameters = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<Parameters>());
+	parameters = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<Parameters>(), "PhysicalSky::CloudNoiseParameters");
 	shape = nullptr;
 	pendingShape = nullptr;
 	adjustment = nullptr;

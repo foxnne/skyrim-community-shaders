@@ -485,10 +485,17 @@ bool SkySync::Update(const RE::Sky* sky)
 	const auto calendar = Util::Climate::GetCalendar();  // globals::game::calendar is cached before the calendar exists
 	const auto deltaTime = globals::game::deltaTime;
 	const auto visual = Util::VisualClock::Current();
-	float fadeAdvance = calendar && deltaTime ? std::max(*deltaTime * (visual.active ? static_cast<float>(visual.rate) : calendar->GetTimescale()), 0.0f) : 0.0f;
+	// Fade advance in game seconds. On the game's own clock: frame time x TimeScale. Under a visual clock (a Sky Above
+	// flight) the published visual time itself is the measure, taken from the change in `hour` below: its publisher caps
+	// the accrual per frame, so a loading hitch moves the sun like a normal frame, and the fades must take that same
+	// step. Frame time x visual rate did not: a 1 s hitch at rate 5000 advanced the fades by 1.39 h while the clock
+	// moved 0.07 h, enough to run an established moonlight ramp to its end in one frame (Codex review 2026-11-25, #9).
+	float fadeAdvance = !visual.active && calendar && deltaTime ? std::max(*deltaTime * calendar->GetTimescale(), 0.0f) : 0.0f;
 
-	// The clock can outrun real time (waiting, fast travel) or move while frames are paused
-	// (console, scrubbing), so advance by whichever of the two elapsed more.
+	// The clock can outrun real time (waiting, fast travel) or move while frames are paused (console, scrubbing), so
+	// advance by whichever of the two elapsed more. This is also the intentional time jump's path: a wait, a scrub or the
+	// visual clock ending on a jump moves `hour` at once (the latter also requests an immediate transition through
+	// VisualClock, which snaps the fader below), and the fades follow the shown hour.
 	if (lastGameHour >= 0.0f) {
 		const float hourDelta = std::remainder(hour - lastGameHour, HoursPerDay);  // shortest way round the clock
 		fadeAdvance = std::max(fadeAdvance, std::abs(hourDelta) * SecondsPerGameHour);

@@ -89,37 +89,10 @@ void LookGrade::SaveSettings(json& o_json)
 
 void LookGrade::SetupResources()
 {
-	auto renderer = globals::game::renderer;
-
 	lookCB = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<LookGradeCB>(), "LookGrade::Constants");
 
-	{
-		auto gameTexMainCopy = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
-
-		D3D11_TEXTURE2D_DESC texDesc;
-		gameTexMainCopy.texture->GetDesc(&texDesc);
-
-		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
-			.Format = texDesc.Format,
-			.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D,
-			.Texture2D = { .MostDetailedMip = 0, .MipLevels = 1 }
-		};
-
-		D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = {
-			.Format = texDesc.Format,
-			.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D,
-			.Texture2D = { .MipSlice = 0 }
-		};
-
-		texDesc.MipLevels = srvDesc.Texture2D.MipLevels = 1;
-		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-		texDesc.MiscFlags = 0;
-
-		texOutput = eastl::make_unique<Texture2D>(texDesc, "LookGrade::Output");
-		texOutput->CreateSRV(srvDesc);
-		texOutput->CreateRTV(rtvDesc);
-	}
-
+	// The output comes from the owner's shared colour scratch pool (as LUT, Vignette and DoF do), so an idle
+	// Look Grade holds no screen-sized target of its own.
 	CompileRasterShaders();
 }
 
@@ -211,6 +184,10 @@ void LookGrade::Draw(TextureInfo& inout_tex)
 	if (!owner || !owner->GetFullscreenVS())
 		return;
 	if (!AllShadersReady({ &lookPS }))
+		return;
+
+	auto* texOutput = owner->GetColorTarget(inout_tex.tex);
+	if (!texOutput)
 		return;
 
 	globals::profiler->BeginPass("PostProcessing::LookGrade");

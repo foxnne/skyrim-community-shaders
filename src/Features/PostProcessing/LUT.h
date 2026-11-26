@@ -19,6 +19,17 @@ struct LUT : PostProcessFeature
 	/// Source of the last disk read, so scene applies reload only when the path or active pack changes.
 	std::string attemptedPath;
 	std::string attemptedPackId;
+	uint32_t disabledFrames = 0;
+
+	/// Drops the loaded texture but keeps the path, so the next UpdateTexture while enabled reads it again.
+	void ReleaseTexture()
+	{
+		LutType = -1;
+		attemptedPath.clear();
+		attemptedPackId.clear();
+		texLUT2D.reset();
+		texLUT3D.reset();
+	}
 
 	struct Settings
 	{
@@ -49,6 +60,7 @@ struct LUT : PostProcessFeature
 	virtual void LoadSettings(json&) override;
 	virtual void SaveSettings(json&) override;
 	void UpdateTexture();
+	virtual void ReleaseIdleResources() override;
 
 	virtual void DrawSettings() override;
 	void inline Clear()

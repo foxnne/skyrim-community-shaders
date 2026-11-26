@@ -1016,6 +1016,10 @@ void PostProcessing::Prepass()
 	if (auto* grading = GetPipelineFeature<ColorGrading>(FeaturePipelineIndex::ColorGrading))
 		grading->ServicePendingRecompile();
 	ReleaseIdleColorTargets();
+	for (auto& pipe : pipeline) {
+		if (pipe)
+			pipe->ReleaseIdleResources();
+	}
 
 	{
 		auto graphicsState = globals::game::graphicsState;

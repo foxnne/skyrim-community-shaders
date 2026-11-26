@@ -368,7 +368,6 @@ void DoF::UpdateProceduralBokehSamples(int bladeCount, float bladeRoundness, boo
 void DoF::SetupResources()
 {
 	focusFrame = ~0u;
-	auto renderer = globals::game::renderer;
 	auto device = globals::d3d::device;
 
 	logger::debug("Creating buffers...");
@@ -380,126 +379,9 @@ void DoF::SetupResources()
 		UpdateProceduralBokehSamples(settings.BokehBladeCount, settings.BokehBladeRoundness, true);
 	}
 
-	logger::debug("Creating 2D textures...");
-	{
-		auto gameTexMainCopy = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
-
-		D3D11_TEXTURE2D_DESC texDesc;
-		gameTexMainCopy.texture->GetDesc(&texDesc);
-
-		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
-			.Format = texDesc.Format,
-			.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D,
-			.Texture2D = { .MostDetailedMip = 0, .MipLevels = 1 }
-		};
-
-		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {
-			.Format = texDesc.Format,
-			.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D,
-			.Texture2D = { .MipSlice = 0 }
-		};
-
-		texDesc.MipLevels = srvDesc.Texture2D.MipLevels = 1;
-		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-		texDesc.MiscFlags = 0;
-
-		D3D11_TEXTURE2D_DESC texDescHalf = texDesc;
-		texDescHalf.Width = std::max(1u, texDescHalf.Width / 2u);
-		texDescHalf.Height = std::max(1u, texDescHalf.Height / 2u);
-
-		// Both the near layer and its postfilter destination carry coverage in
-		// alpha. Scene formats such as R11G11B10_FLOAT discard it and sample 1,
-		// causing the half-resolution layer to overwrite even in-focus pixels.
-		auto nearDesc = texDescHalf;
-		auto nearSRV = srvDesc;
-		auto nearUAV = uavDesc;
-		nearDesc.Format = nearSRV.Format = nearUAV.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-		texPreBlurred = eastl::make_unique<Texture2D>(nearDesc, "DoF::SetupColor");
-		texPreBlurred->CreateSRV(nearSRV);
-		texPreBlurred->CreateUAV(nearUAV);
-
-		texFarBlurred = eastl::make_unique<Texture2D>(texDescHalf, "DoF::FarLayer");
-		texFarBlurred->CreateSRV(srvDesc);
-		texFarBlurred->CreateUAV(uavDesc);
-
-		texNearBlurred = eastl::make_unique<Texture2D>(nearDesc, "DoF::NearLayer");
-		texNearBlurred->CreateSRV(nearSRV);
-		texNearBlurred->CreateUAV(nearUAV);
-
-		texBlurredFiltered = eastl::make_unique<Texture2D>(texDescHalf, "DoF::FarFiltered");
-		texBlurredFiltered->CreateSRV(srvDesc);
-		texBlurredFiltered->CreateUAV(uavDesc);
-
-		D3D11_TEXTURE2D_DESC texDescGather = texDescHalf;
-		for (size_t i = 0; i < texGatherColor.size(); ++i) {
-			texDescGather.Width = std::max(1u, (texDescGather.Width + 1u) / 2u);
-			texDescGather.Height = std::max(1u, (texDescGather.Height + 1u) / 2u);
-			texGatherColor[i] = eastl::make_unique<Texture2D>(texDescGather, std::format("DoF::GatherColor{}", i + 1).c_str());
-			texGatherColor[i]->CreateSRV(srvDesc);
-			texGatherColor[i]->CreateUAV(uavDesc);
-		}
-
-		// CoC buffers. R16_FLOAT is plenty: the CoC is a screen width fraction clamped to ~0.025, so
-		// half float resolves it to better than 1/40th of a pixel.
-		texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R16_FLOAT;
-		texDescHalf.Format = DXGI_FORMAT_R16_FLOAT;
-
-		texCoC = eastl::make_unique<Texture2D>(texDesc, "DoF::FullCoC");
-		texCoC->CreateSRV(srvDesc);
-		texCoC->CreateUAV(uavDesc);
-
-		texCoCHalf = eastl::make_unique<Texture2D>(texDescHalf, "DoF::SetupCoC");
-		texCoCHalf->CreateSRV(srvDesc);
-		texCoCHalf->CreateUAV(uavDesc);
-
-		texDescGather = texDescHalf;
-		for (size_t i = 0; i < texGatherCoC.size(); ++i) {
-			texDescGather.Width = std::max(1u, (texDescGather.Width + 1u) / 2u);
-			texDescGather.Height = std::max(1u, (texDescGather.Height + 1u) / 2u);
-			texDescGather.Format = DXGI_FORMAT_R16_FLOAT;
-			texGatherCoC[i] = eastl::make_unique<Texture2D>(texDescGather, std::format("DoF::GatherCoC{}", i + 1).c_str());
-			texGatherCoC[i]->CreateSRV(srvDesc);
-			texGatherCoC[i]->CreateUAV(uavDesc);
-		}
-
-		// CoC tile buffers: one texel per 16x16 full res pixels, holding (min, max) signed CoC.
-		// RGBA16F rather than RG16F because only the RGBA/R/RG32 families are guaranteed to support
-		// typed UAV stores on D3D11 feature level 11_0 hardware.
-		D3D11_TEXTURE2D_DESC texDescTile = texDesc;
-		texDescTile.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-		texDescTile.Width = std::max(1u, (texDesc.Width / 2 + 7) / 8);
-		texDescTile.Height = std::max(1u, (texDesc.Height / 2 + 7) / 8);
-
-		D3D11_SHADER_RESOURCE_VIEW_DESC srvDescTile = srvDesc;
-		srvDescTile.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDescTile = uavDesc;
-		uavDescTile.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-
-		texCoCTile = eastl::make_unique<Texture2D>(texDescTile, "DoF::CoCTile");
-		texCoCTile->CreateSRV(srvDescTile);
-		texCoCTile->CreateUAV(uavDescTile);
-
-		texCoCTileTmp = eastl::make_unique<Texture2D>(texDescTile, "DoF::CoCTileTemporary");
-		texCoCTileTmp->CreateSRV(srvDescTile);
-		texCoCTileTmp->CreateUAV(uavDescTile);
-
-		texCoCTileDilated = eastl::make_unique<Texture2D>(texDescTile, "DoF::CoCTileDilated");
-		texCoCTileDilated->CreateSRV(srvDescTile);
-		texCoCTileDilated->CreateUAV(uavDescTile);
-
-		// The 1x1 focus texture stores a distance in km and wants the full float range.
-		texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
-		texDesc.Width = 1;
-		texDesc.Height = 1;
-
-		texFocus = eastl::make_unique<Texture2D>(texDesc, "DoF::Focus");
-		texFocus->CreateSRV(srvDesc);
-		texFocus->CreateUAV(uavDesc);
-
-		texPreFocus = eastl::make_unique<Texture2D>(texDesc, "DoF::PreviousFocus");
-		texPreFocus->CreateSRV(srvDesc);
-		texPreFocus->CreateUAV(uavDesc);
-	}
+	// The screen-sized targets are created by EnsureTargets on the first Draw and dropped again by
+	// ReleaseIdleResources when the effect has not drawn for a while, so a disabled DoF costs no video memory.
+	ReleaseTargets();
 
 	// Bokeh shapes are loaded by PostProcessing::bokehResources (shared with LensFlare)
 
@@ -592,6 +474,181 @@ void DoF::CompileComputeShaders()
 // TDM lookup) lives in CinematicCamera::FocusResolver, shared with the
 // Cinematic Camera focus modes. See CinematicCamera.cpp.
 
+bool DoF::EnsureTargets()
+{
+	auto renderer = globals::game::renderer;
+	auto gameTexMainCopy = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
+	if (!gameTexMainCopy.texture)
+		return false;
+
+	D3D11_TEXTURE2D_DESC colorDesc;
+	gameTexMainCopy.texture->GetDesc(&colorDesc);
+	if (texCoC && texFocus && texPreFocus) {
+		if (texCoC->desc.Width == colorDesc.Width && texCoC->desc.Height == colorDesc.Height && texFarBlurred && texFarBlurred->desc.Format == colorDesc.Format)
+			return true;
+		ReleaseTargets();  // the scene target changed size or format
+	}
+
+	const auto now = std::chrono::steady_clock::now();
+	if (now < nextTargetsAttempt)
+		return false;
+
+	try {
+		CreateTargets(colorDesc);
+	} catch (const std::exception& e) {
+		logger::error("[PostProcessing] Could not create the DoF targets: {}", e.what());
+		ReleaseTargets();
+		nextTargetsAttempt = now + std::chrono::seconds(5);
+		return false;
+	}
+	return true;
+}
+
+void DoF::CreateTargets(const D3D11_TEXTURE2D_DESC& colorDesc)
+{
+	D3D11_TEXTURE2D_DESC texDesc = colorDesc;
+	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
+		.Format = texDesc.Format,
+		.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D,
+		.Texture2D = { .MostDetailedMip = 0, .MipLevels = 1 }
+	};
+
+	D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {
+		.Format = texDesc.Format,
+		.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D,
+		.Texture2D = { .MipSlice = 0 }
+	};
+
+	texDesc.MipLevels = srvDesc.Texture2D.MipLevels = 1;
+	texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+	texDesc.MiscFlags = 0;
+
+	D3D11_TEXTURE2D_DESC texDescHalf = texDesc;
+	texDescHalf.Width = std::max(1u, texDescHalf.Width / 2u);
+	texDescHalf.Height = std::max(1u, texDescHalf.Height / 2u);
+
+	// Both the near layer and its postfilter destination carry coverage in
+	// alpha. Scene formats such as R11G11B10_FLOAT discard it and sample 1,
+	// causing the half-resolution layer to overwrite even in-focus pixels.
+	auto nearDesc = texDescHalf;
+	auto nearSRV = srvDesc;
+	auto nearUAV = uavDesc;
+	nearDesc.Format = nearSRV.Format = nearUAV.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+	texPreBlurred = eastl::make_unique<Texture2D>(nearDesc, "DoF::SetupColor");
+	texPreBlurred->CreateSRV(nearSRV);
+	texPreBlurred->CreateUAV(nearUAV);
+
+	texFarBlurred = eastl::make_unique<Texture2D>(texDescHalf, "DoF::FarLayer");
+	texFarBlurred->CreateSRV(srvDesc);
+	texFarBlurred->CreateUAV(uavDesc);
+
+	texNearBlurred = eastl::make_unique<Texture2D>(nearDesc, "DoF::NearLayer");
+	texNearBlurred->CreateSRV(nearSRV);
+	texNearBlurred->CreateUAV(nearUAV);
+
+	texBlurredFiltered = eastl::make_unique<Texture2D>(texDescHalf, "DoF::FarFiltered");
+	texBlurredFiltered->CreateSRV(srvDesc);
+	texBlurredFiltered->CreateUAV(uavDesc);
+
+	D3D11_TEXTURE2D_DESC texDescGather = texDescHalf;
+	for (size_t i = 0; i < texGatherColor.size(); ++i) {
+		texDescGather.Width = std::max(1u, (texDescGather.Width + 1u) / 2u);
+		texDescGather.Height = std::max(1u, (texDescGather.Height + 1u) / 2u);
+		texGatherColor[i] = eastl::make_unique<Texture2D>(texDescGather, std::format("DoF::GatherColor{}", i + 1).c_str());
+		texGatherColor[i]->CreateSRV(srvDesc);
+		texGatherColor[i]->CreateUAV(uavDesc);
+	}
+
+	// CoC buffers. R16_FLOAT is plenty: the CoC is a screen width fraction clamped to ~0.025, so
+	// half float resolves it to better than 1/40th of a pixel.
+	texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R16_FLOAT;
+	texDescHalf.Format = DXGI_FORMAT_R16_FLOAT;
+
+	texCoC = eastl::make_unique<Texture2D>(texDesc, "DoF::FullCoC");
+	texCoC->CreateSRV(srvDesc);
+	texCoC->CreateUAV(uavDesc);
+
+	texCoCHalf = eastl::make_unique<Texture2D>(texDescHalf, "DoF::SetupCoC");
+	texCoCHalf->CreateSRV(srvDesc);
+	texCoCHalf->CreateUAV(uavDesc);
+
+	texDescGather = texDescHalf;
+	for (size_t i = 0; i < texGatherCoC.size(); ++i) {
+		texDescGather.Width = std::max(1u, (texDescGather.Width + 1u) / 2u);
+		texDescGather.Height = std::max(1u, (texDescGather.Height + 1u) / 2u);
+		texDescGather.Format = DXGI_FORMAT_R16_FLOAT;
+		texGatherCoC[i] = eastl::make_unique<Texture2D>(texDescGather, std::format("DoF::GatherCoC{}", i + 1).c_str());
+		texGatherCoC[i]->CreateSRV(srvDesc);
+		texGatherCoC[i]->CreateUAV(uavDesc);
+	}
+
+	// CoC tile buffers: one texel per 16x16 full res pixels, holding (min, max) signed CoC.
+	// RGBA16F rather than RG16F because only the RGBA/R/RG32 families are guaranteed to support
+	// typed UAV stores on D3D11 feature level 11_0 hardware.
+	D3D11_TEXTURE2D_DESC texDescTile = texDesc;
+	texDescTile.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+	texDescTile.Width = std::max(1u, (texDesc.Width / 2 + 7) / 8);
+	texDescTile.Height = std::max(1u, (texDesc.Height / 2 + 7) / 8);
+
+	D3D11_SHADER_RESOURCE_VIEW_DESC srvDescTile = srvDesc;
+	srvDescTile.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+	D3D11_UNORDERED_ACCESS_VIEW_DESC uavDescTile = uavDesc;
+	uavDescTile.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+	texCoCTile = eastl::make_unique<Texture2D>(texDescTile, "DoF::CoCTile");
+	texCoCTile->CreateSRV(srvDescTile);
+	texCoCTile->CreateUAV(uavDescTile);
+
+	texCoCTileTmp = eastl::make_unique<Texture2D>(texDescTile, "DoF::CoCTileTemporary");
+	texCoCTileTmp->CreateSRV(srvDescTile);
+	texCoCTileTmp->CreateUAV(uavDescTile);
+
+	texCoCTileDilated = eastl::make_unique<Texture2D>(texDescTile, "DoF::CoCTileDilated");
+	texCoCTileDilated->CreateSRV(srvDescTile);
+	texCoCTileDilated->CreateUAV(uavDescTile);
+
+	// The 1x1 focus texture stores a distance in km and wants the full float range.
+	texDesc.Format = srvDesc.Format = uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
+	texDesc.Width = 1;
+	texDesc.Height = 1;
+
+	texFocus = eastl::make_unique<Texture2D>(texDesc, "DoF::Focus");
+	texFocus->CreateSRV(srvDesc);
+	texFocus->CreateUAV(uavDesc);
+
+	texPreFocus = eastl::make_unique<Texture2D>(texDesc, "DoF::PreviousFocus");
+	texPreFocus->CreateSRV(srvDesc);
+	texPreFocus->CreateUAV(uavDesc);
+}
+
+void DoF::ReleaseTargets()
+{
+	texPreBlurred.reset();
+	texFarBlurred.reset();
+	texNearBlurred.reset();
+	texBlurredFiltered.reset();
+	texPostSmooth.reset();
+	texPostSmooth2.reset();
+	texFocus.reset();
+	texPreFocus.reset();
+	texCoC.reset();
+	texCoCHalf.reset();
+	texCoCTile.reset();
+	texCoCTileTmp.reset();
+	texCoCTileDilated.reset();
+	for (auto& texture : texGatherColor)
+		texture.reset();
+	for (auto& texture : texGatherCoC)
+		texture.reset();
+	focusFrame = ~0u;
+}
+
+void DoF::ReleaseIdleResources()
+{
+	if (texCoC && globals::state->frameCount - lastDrawFrame > kIdleResourceFrames)
+		ReleaseTargets();
+}
+
 bool DoF::EnsurePostSmoothingTargets(const D3D11_TEXTURE2D_DESC& colorDesc)
 {
 	if (texPostSmooth && texPostSmooth2)
@@ -636,6 +693,9 @@ void DoF::Draw(TextureInfo& inout_tex)
 	if (!depthSRV) {
 		return;
 	}
+	if (!EnsureTargets())
+		return;
+	lastDrawFrame = state->frameCount;
 
 	float2 res = { (float)texCoC->desc.Width, (float)texCoC->desc.Height };
 	float focusLen = renderSettings.FocalLength;

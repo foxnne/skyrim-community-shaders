@@ -18,4 +18,11 @@ namespace VramTracker
 
 	/** @brief Per-frame tick; writes a report line about once per second. Cheap no-op when inactive. */
 	void OnPresent();
+
+	/**
+	 * @brief Records the debug name of a tracked resource (called by Util::SetResourceName), so that
+	 * `VramTrackNames.txt`, rewritten every ten seconds while tracking, lists the live render targets, UAV textures,
+	 * volumes and UAV buffers by name and size. Cheap no-op when inactive.
+	 */
+	void OnNamed(ID3D11DeviceChild* a_resource, const char* a_name);
 }

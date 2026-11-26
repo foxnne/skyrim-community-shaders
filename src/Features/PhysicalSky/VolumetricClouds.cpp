@@ -607,11 +607,13 @@ void PhysicalSky::SetupVolumetricResources()
 		}
 		middleBoundsDirty = true;
 	}
-	texVoxelTraceTr = CreateCloudTexture(lowW, lowH, DXGI_FORMAT_R16_FLOAT, "PhysicalSky::VoxelTraceTr");
-	texVoxelTraceLum = CreateCloudTexture(lowW, lowH, kHistoryRadianceFormat, "PhysicalSky::VoxelTraceLum");
-	texVoxelTraceAux = CreateCloudTexture(lowW, lowH, DXGI_FORMAT_R16G16B16A16_FLOAT, "PhysicalSky::VoxelTraceAux");
-	texVoxelTraceMotion = CreateCloudTexture(lowW, lowH, DXGI_FORMAT_R16G16B16A16_FLOAT, "PhysicalSky::VoxelTraceMotion");
-	texVoxelTraceLightning = CreateCloudTexture(lowW, lowH, DXGI_FORMAT_R16G16_FLOAT, "PhysicalSky::VoxelTraceLightning");
+	// The voxel trace set is created by EnsureVoxelTraceResources the first time a voxel cloud is on screen.
+	ReleaseVoxelTraceResources();
+	voxelTraceResourcesFailed = false;
+	voxelTraceIdleFrames = 0;
+	ReleaseLightningScreenResources();
+	lightningScreenResourcesFailed = false;
+	lightningIdleFrames = 0;
 
 	auto createCube = [](uint32_t size, DXGI_FORMAT format, const char* name) {
 		D3D11_TEXTURE2D_DESC desc = {
@@ -714,15 +716,22 @@ void PhysicalSky::SetupVolumetricResources()
 }
 
 /** @brief Full-resolution cloud targets, created together on first use. */
-static constexpr struct
+struct ScreenTarget
 {
 	eastl::unique_ptr<Texture2D> PhysicalSky::* texture;
 	DXGI_FORMAT format;
 	const char* name;
-} kScreenTargets[] = {
+};
+
+/** @brief Lightning mask, its history and the composited channels: full-resolution, but only needed while a
+    storm can flash. They are created on demand (EnsureLightningScreenResources) and released after a quiet spell. */
+static constexpr ScreenTarget kLightningTargets[] = {
 	{ &PhysicalSky::texLightningMask, DXGI_FORMAT_R16G16_FLOAT, "PhysicalSky::LightningMask" },
 	{ &PhysicalSky::texLightningHistory, DXGI_FORMAT_R16G16_FLOAT, "PhysicalSky::LightningHistory" },
 	{ &PhysicalSky::texLightningChannels, kHistoryRadianceFormat, "PhysicalSky::LightningChannels" },
+};
+
+static constexpr ScreenTarget kScreenTargets[] = {
 	{ &PhysicalSky::texVolFilteredTr, DXGI_FORMAT_R16_FLOAT, "PhysicalSky::CloudFilteredTr" },
 	{ &PhysicalSky::texVolFilteredLum, kHistoryRadianceFormat, "PhysicalSky::CloudFilteredLum" },
 	{ &PhysicalSky::texVolFilteredAux, DXGI_FORMAT_R16G16B16A16_FLOAT, "PhysicalSky::CloudFilteredAux" },
@@ -758,6 +767,73 @@ bool PhysicalSky::EnsureVolumetricScreenResources()
 	ClearVolumetricToNeutral();
 	volMainHistoryValid = false;
 	return true;
+}
+
+bool PhysicalSky::EnsureLightningScreenResources()
+{
+	if (texLightningMask && texLightningHistory && texLightningChannels)
+		return true;
+	if (lightningScreenResourcesFailed)
+		return false;
+
+	D3D11_TEXTURE2D_DESC mainDesc;
+	globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture->GetDesc(&mainDesc);
+	try {
+		for (const auto& target : kLightningTargets)
+			this->*target.texture = CreateCloudTexture(mainDesc.Width, mainDesc.Height, target.format, target.name);
+	} catch (const std::exception& e) {
+		logger::error("[PhysicalSky] Failed to create the lightning screen targets ({}), lightning masks stay off for this session", e.what());
+		ReleaseLightningScreenResources();
+		lightningScreenResourcesFailed = true;
+		return false;
+	}
+
+	// Fresh targets start as "no lightning", which is what an idle mask holds anyway.
+	auto context = globals::d3d::context;
+	for (const auto& target : kLightningTargets)
+		context->ClearUnorderedAccessViewFloat((this->*target.texture)->uav.get(), kClearLuminance);
+	return true;
+}
+
+void PhysicalSky::ReleaseLightningScreenResources()
+{
+	for (const auto& target : kLightningTargets)
+		(this->*target.texture).reset();
+}
+
+/** @brief The voxel-cloud trace set: low-resolution, but only read while a voxel cloud is on screen. Created on
+    demand and released after a quiet spell, like the lightning targets. */
+bool PhysicalSky::EnsureVoxelTraceResources()
+{
+	if (texVoxelTraceTr && texVoxelTraceLum && texVoxelTraceAux && texVoxelTraceMotion && texVoxelTraceLightning)
+		return true;
+	if (voxelTraceResourcesFailed || !texVolLowTr)
+		return false;
+
+	const uint32_t lowW = texVolLowTr->desc.Width;
+	const uint32_t lowH = texVolLowTr->desc.Height;
+	try {
+		texVoxelTraceTr = CreateCloudTexture(lowW, lowH, DXGI_FORMAT_R16_FLOAT, "PhysicalSky::VoxelTraceTr");
+		texVoxelTraceLum = CreateCloudTexture(lowW, lowH, kHistoryRadianceFormat, "PhysicalSky::VoxelTraceLum");
+		texVoxelTraceAux = CreateCloudTexture(lowW, lowH, DXGI_FORMAT_R16G16B16A16_FLOAT, "PhysicalSky::VoxelTraceAux");
+		texVoxelTraceMotion = CreateCloudTexture(lowW, lowH, DXGI_FORMAT_R16G16B16A16_FLOAT, "PhysicalSky::VoxelTraceMotion");
+		texVoxelTraceLightning = CreateCloudTexture(lowW, lowH, DXGI_FORMAT_R16G16_FLOAT, "PhysicalSky::VoxelTraceLightning");
+	} catch (const std::exception& e) {
+		logger::error("[PhysicalSky] Failed to create the voxel cloud trace targets ({}), the voxel pass is skipped for this session", e.what());
+		ReleaseVoxelTraceResources();
+		voxelTraceResourcesFailed = true;
+		return false;
+	}
+	return true;
+}
+
+void PhysicalSky::ReleaseVoxelTraceResources()
+{
+	texVoxelTraceTr.reset();
+	texVoxelTraceLum.reset();
+	texVoxelTraceAux.reset();
+	texVoxelTraceMotion.reset();
+	texVoxelTraceLightning.reset();
 }
 
 bool PhysicalSky::EnsureCloudAmbientTransportResources()
@@ -1756,7 +1832,27 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 		context->PSSetShaderResources(24, 1, nullOutputs);
 		texVolCubeTr.swap(texVolCubeHistoryTr);
 		const auto voxelRect = voxelCloudManager.ScreenRect(cloudData.bottomZ, lowW, lowH);
-		const bool voxelVisible = voxelRect[2] > voxelRect[0] && voxelRect[3] > voxelRect[1] && !state->isMapMenuOpen;
+		bool voxelVisible = voxelRect[2] > voxelRect[0] && voxelRect[3] > voxelRect[1] && !state->isMapMenuOpen;
+		// The voxel trace set only exists while a voxel cloud is on screen (plus a quiet spell), see EnsureVoxelTraceResources.
+		if (voxelVisible) {
+			voxelTraceIdleFrames = 0;
+			voxelVisible = EnsureVoxelTraceResources();
+		} else if (texVoxelTraceTr && ++voxelTraceIdleFrames > kLazyTargetIdleFrames) {
+			ReleaseVoxelTraceResources();
+		}
+		// Likewise the full-resolution lightning mask, history and channels: kept only while a storm can flash.
+		// Without them the reproject pass reads zero history and drops its mask write, which is what a mask
+		// with no lightning holds anyway.
+		{
+			const bool lightningWanted = cbData.lightningColorIntensity.w > 0.f || cbData.lightningControl.y > 0.f || cbData.lightningControl.z > 0.f ||
+			                             cbData.lightningPreparationControl.w > 0.f || lightning.HasSource() || lightning.Transient() || lightning.LastReadout().thunderWeather;
+			if (lightningWanted) {
+				lightningIdleFrames = 0;
+				EnsureLightningScreenResources();
+			} else if (texLightningMask && ++lightningIdleFrames > kLazyTargetIdleFrames) {
+				ReleaseLightningScreenResources();
+			}
+		}
 		texVolCubeLum.swap(texVolCubeHistoryLum);
 		texVolCubeAux.swap(texVolCubeHistoryAux);
 		texLightningCubeMask.swap(texLightningCubeHistory);
@@ -1956,9 +2052,9 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 			context->CSSetShaderResources(17, (uint)historySrvs.size(), historySrvs.data());
 			ID3D11UnorderedAccessView* nullLightning = nullptr;
 			context->CSSetUnorderedAccessViews(3, 1, &nullLightning, nullptr);
-			ID3D11ShaderResourceView* lightningInputs[] = { texLightningTrace->srv.get(), texLightningHistory->srv.get() };
+			ID3D11ShaderResourceView* lightningInputs[] = { texLightningTrace->srv.get(), texLightningHistory ? texLightningHistory->srv.get() : nullptr };
 			context->CSSetShaderResources(90, 2, lightningInputs);
-			lightningOutput = texLightningMask->uav.get();
+			lightningOutput = texLightningMask ? texLightningMask->uav.get() : nullptr;
 			context->CSSetUnorderedAccessViews(3, 1, &lightningOutput, nullptr);
 			context->CSSetShaderResources(20, (uint)traceSrvs.size(), traceSrvs.data());
 			uavs = { texVolTr->uav.get(), texVolLum->uav.get(), texVolAux->uav.get() };
@@ -2010,7 +2106,7 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 		}
 		outputSrvs[0] = texVolFilteredTr->srv.get();
 		outputSrvs[1] = texVolFilteredLum->srv.get();
-		if (!state->isMapMenuOpen && cbData.lightningColorIntensity.w > 0.f) {
+		if (!state->isMapMenuOpen && cbData.lightningColorIntensity.w > 0.f && texLightningMask && texLightningChannels) {
 			ID3D11ShaderResourceView* inputs[] = { lightning.Segments(), texLightningMask->srv.get() };
 			context->CSSetShaderResources(94, 2, inputs);
 			ID3D11UnorderedAccessView* outputs[] = { texLightningChannels->uav.get(), texVolFilteredLum->uav.get() };
@@ -2109,7 +2205,7 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 
 		// Make results available to any later pixel-shader passes that sample PhysicalSky/Common.hlsli.
 		context->PSSetShaderResources(32, (uint)outputSrvs.size(), outputSrvs.data());
-		auto* channels = texLightningChannels->srv.get();
+		auto* channels = texLightningChannels ? texLightningChannels->srv.get() : nullptr;
 		auto* reflection = texLightningCubeLum->srv.get();
 		context->PSSetShaderResources(54, 1, &channels);
 		context->PSSetShaderResources(24, 1, &reflection);

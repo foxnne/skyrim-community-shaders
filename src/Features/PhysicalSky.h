@@ -724,6 +724,16 @@ struct PhysicalSky final : public Feature
 	/** @brief Creates the full-resolution cloud targets on first use; on failure disables volumetric clouds for the session. @return True when they exist. */
 	bool EnsureVolumetricScreenResources();
 	bool volumetricScreenResourcesFailed = false;
+	// Targets that exist only while needed (storm lightning, on-screen voxel clouds); released after this many idle cloud frames.
+	static constexpr uint32_t kLazyTargetIdleFrames = 1800;
+	bool EnsureLightningScreenResources();
+	void ReleaseLightningScreenResources();
+	bool lightningScreenResourcesFailed = false;
+	uint32_t lightningIdleFrames = 0;
+	bool EnsureVoxelTraceResources();
+	void ReleaseVoxelTraceResources();
+	bool voxelTraceResourcesFailed = false;
+	uint32_t voxelTraceIdleFrames = 0;
 	/** @brief Clears every cloud output to white transmittance and black luminance. */
 	void ClearVolumetricToNeutral();
 	bool volumetricNeutralCleared = false;  ///< Disabled-cloud targets already hold neutral values.

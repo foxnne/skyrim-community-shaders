@@ -60,7 +60,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	NearTreeScreenShadow,
 	NearTreeTransmissionSaturation,
 	TreeLeafChromaMin,
-	TreeLeafChromaMax)
+	TreeLeafChromaMax,
+	LodBendDataBudgetMB,
+	NearTreeDataBudgetMB)
 
 namespace
 {
@@ -79,9 +81,11 @@ void TreeWind::DrawSettings()
 						  std::make_format_args(statusWind, statusStorminess, statusGust))
 						  .c_str());
 	const size_t shapeCount = bendWeights.Count();
-	ImGui::Text("%s", std::vformat(T(TKEY("status_shapes"), "Tree LOD shapes with bend data: {}"), std::make_format_args(shapeCount)).c_str());
+	const double lodMB = bendWeights.Bytes() / (1024.0 * 1024.0);
+	ImGui::Text("%s", std::vformat(T(TKEY("status_shapes"), "Tree LOD shapes with bend data: {}   video memory {:.0f} MB"), std::make_format_args(shapeCount, lodMB)).c_str());
 	const size_t nearCount = nearTrees.Count();
-	ImGui::Text("%s", std::vformat(T(TKEY("status_near"), "Nearby tree shapes that sway: {}"), std::make_format_args(nearCount)).c_str());
+	const double nearMB = nearTrees.Bytes() / (1024.0 * 1024.0);
+	ImGui::Text("%s", std::vformat(T(TKEY("status_near"), "Nearby tree shapes that sway: {}   video memory {:.0f} MB"), std::make_format_args(nearCount, nearMB)).c_str());
 	const size_t profileCount = bespokeProfiles.Count();
 	const size_t bespokeCount = nearTrees.BespokeCount();
 	ImGui::Text("%s", std::vformat(T(TKEY("status_bespoke"), "Bespoke tree profiles: {}   shapes moving with one: {}"), std::make_format_args(profileCount, bespokeCount)).c_str());
@@ -242,6 +246,17 @@ void TreeWind::DrawSettings()
 			T(TKEY("gust_wind_calm_tooltip"), "Weather wind at or below this counts as calm."));
 		SliderWithTooltip(T(TKEY("gust_wind_storm"), "Storm Wind Above"), &settings.GustWindStorm, 0.0f, 1.0f, "%.2f",
 			T(TKEY("gust_wind_storm_tooltip"), "Weather wind at or above this counts as a storm."));
+
+		ImGui::SliderInt(T(TKEY("lod_bend_budget"), "Tree LOD Wind Data Budget"), &settings.LodBendDataBudgetMB, 64, 2048, "%d MB", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("%s", T(TKEY("lod_bend_budget_tooltip"),
+								  "Most video memory the per-vertex sway and crown data of the distant trees may hold. The data of LOD blocks the game has unloaded is freed on its own; beyond this budget the trees drawn longest ago go too, and are rebuilt when they come back into view (plain shading for a moment). The status line above shows the current use."));
+		}
+		ImGui::SliderInt(T(TKEY("near_tree_budget"), "Nearby Tree Wind Data Budget"), &settings.NearTreeDataBudgetMB, 16, 512, "%d MB", ImGuiSliderFlags_AlwaysClamp);
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("%s", T(TKEY("near_tree_budget_tooltip"),
+								  "Most video memory the sway data of the fully loaded trees may hold. Beyond it the trees drawn longest ago are freed and measured again when they come back into view."));
+		}
 	}
 }
 
@@ -580,19 +595,64 @@ void TreeWind::Reset()
 	data.Params.w = nearActive ? 2.0f : 0.0f;
 	windBespokeCB->Update(data);
 
+	// Bend data the game no longer draws goes about once a second: the LOD blocks outside the loaded rings (so a
+	// fast travel frees the old region within a second), shapes not drawn for a while, and the least recently drawn
+	// beyond the memory budget
 	if (bendWeightsTreeModSupport != settings.TreeModSupport) {
 		bendWeights.Clear();
 		bendWeightsTreeModSupport = settings.TreeModSupport;
-	} else if (globals::state->frameCount % 300 == 0) {
-		bendWeights.Evict(globals::state->frameCount);
+	} else if (globals::state->frameCount % 60 == 0) {
+		bendWeights.Evict(globals::state->frameCount, GetLodBounds(), static_cast<uint64_t>(std::max(settings.LodBendDataBudgetMB, 1)) << 20);
 	}
 
 	if (nearTreesMinHeight != settings.NearTreeMinHeight) {
 		nearTrees.Clear();
 		nearTreesMinHeight = settings.NearTreeMinHeight;
-	} else if (globals::state->frameCount % 300 == 150) {
-		nearTrees.Evict(globals::state->frameCount);
+	} else if (globals::state->frameCount % 60 == 30) {
+		nearTrees.Evict(globals::state->frameCount, static_cast<uint64_t>(std::max(settings.NearTreeDataBudgetMB, 1)) << 20);
 	}
+}
+
+TreeShapes::LodBounds TreeWind::GetLodBounds()
+{
+	TreeShapes::LodBounds bounds;
+	const auto tes = globals::game::tes;
+	const auto player = globals::game::player;
+	if (!tes || !player || tes->interiorCell || !tes->GetRuntimeData2().worldSpace)
+		return bounds;
+
+	// Another worldspace: its LOD blocks share nothing with the last one's, and the position test says nothing about them
+	const RE::FormID worldSpace = tes->GetRuntimeData2().worldSpace->GetFormID();
+	if (lastWorldSpace != 0 && worldSpace != lastWorldSpace) {
+		logger::info("[TreeWind] worldspace changed, tree LOD bend data freed");
+		bendWeights.Clear();
+	}
+	lastWorldSpace = worldSpace;
+
+	if (!ringSettingsLooked) {
+		ringSettingsLooked = true;
+		const char* names[3] = { "fBlockLevel0Distance:TerrainManager", "fBlockLevel1Distance:TerrainManager", "fBlockMaximumDistance:TerrainManager" };
+		for (int i = 0; i < 3; ++i) {
+			ringSettings[i] = globals::game::iniPrefSettingCollection ? globals::game::iniPrefSettingCollection->GetSetting(names[i]) : nullptr;
+			if (!ringSettings[i] && globals::game::iniSettingCollection)
+				ringSettings[i] = globals::game::iniSettingCollection->GetSetting(names[i]);
+		}
+		logger::info("[TreeWind] object LOD rings: LOD4 to {:.0f}, LOD8 to {:.0f}, LOD16 to {:.0f}{}",
+			ringSettings[0] ? ringSettings[0]->GetFloat() : bounds.ringDistance[0], ringSettings[1] ? ringSettings[1]->GetFloat() : bounds.ringDistance[1],
+			ringSettings[2] ? ringSettings[2]->GetFloat() : bounds.ringDistance[2], ringSettings[0] && ringSettings[1] && ringSettings[2] ? "" : " (defaults for the settings not found)");
+	}
+	for (int i = 0; i < 3; ++i)
+		if (ringSettings[i] && ringSettings[i]->GetFloat() > 0.0f)
+			bounds.ringDistance[i] = ringSettings[i]->GetFloat();
+	// The rings nest: a coarser ring never ends before the finer one
+	bounds.ringDistance[1] = std::max(bounds.ringDistance[1], bounds.ringDistance[0]);
+	bounds.ringDistance[2] = std::max(bounds.ringDistance[2], bounds.ringDistance[1]);
+
+	const auto position = player->GetPosition();
+	bounds.playerX = position.x;
+	bounds.playerY = position.y;
+	bounds.valid = true;
+	return bounds;
 }
 
 void TreeWind::SetShaderResources(ID3D11DeviceContext* a_context)

@@ -20,6 +20,11 @@
  *
  * A tree whose model is named in a bespoke profile (BespokeProfiles) with a painted wind mask (a sidecar file, the
  * mesh itself is not changed) gets its own motion instead: still trunk, slow branches, leaf flutter, swinging strands.
+ *
+ * Video memory: every buffer here is an immutable raw buffer (TreeWind.hlsli VertexData, t120) or a typed one
+ * (CrownData, t121), owned by a shared record keyed by the shape's content, so the copies the game makes of one
+ * mesh share it. Records go when their LOD block leaves the loaded rings (LodBounds), when a shape has not been
+ * drawn for a while, and least-recently-drawn first when the total passes the budget the caller hands to Evict.
  */
 namespace TreeShapes
 {
@@ -71,6 +76,18 @@ namespace TreeShapes
 	 * few units between a LOD trunk card and the placed tree's origin change it by at most one level.
 	 */
 	uint8_t GetTintCode(float a_worldX, float a_worldY);
+
+	/**
+	 * @brief Where the player stands and how far each object LOD ring reaches, for freeing the data of LOD blocks the
+	 * game has unloaded. ringDistance[0] is fBlockLevel0Distance (LOD4 blocks), [1] fBlockLevel1Distance (LOD8),
+	 * [2] fBlockMaximumDistance (LOD16). Not valid in interiors: the position there says nothing about the LOD.
+	 */
+	struct LodBounds
+	{
+		float playerX = 0.0f, playerY = 0.0f;
+		float ringDistance[3] = { 100000.0f, 180500.0f, 327680.0f };
+		bool valid = false;
+	};
 
 	/**
 	 * @brief Motion of one hand-masked tree model. Lengths are in units of the nif root node, angles in radians,
@@ -148,12 +165,11 @@ namespace TreeShapes
 	 * @brief Bend data for loaded trees, one buffer per mesh shape, shared by every placed copy of the tree.
 	 *
 	 * The data is measured in the space of the tree root: height above the tree base and distance from the trunk.
-	 * Buffer layout (R32G32_FLOAT), mirrored by TreeWind.hlsli GetNearTree:
-	 *   [0] tree origin x, y in the shape's own space
-	 *   [1] tree origin z in the shape's own space, tree height in the shape's units
-	 *   [2 + i] bend weight (0 base, 1 top), distance from the trunk (0 trunk, 1 crown edge) of vertex i
+	 * Raw buffer layout, mirrored by TreeWind.hlsli GetNearTree:
+	 *   bytes 0-15   tree origin xyz in the shape's own space, tree height in the shape's units (four floats)
+	 *   16 + 4 i     vertex i as R16G16_UNORM: bend weight (0 base, 1 top), distance from the trunk (0 trunk, 1 crown edge)
 	 *
-	 * Bespoke trees (R32G32B32A32_FLOAT), mirrored by TreeWind.hlsli GetBespokeTree:
+	 * Bespoke trees, one float4 (16 bytes) per element, mirrored by TreeWind.hlsli GetBespokeTree:
 	 *   [0] tree origin xyz in the shape's own space, tree height in the shape's units
 	 *   [1] shape units per root unit, branch amplitude, branch speed, branch spread
 	 *   [2] branch gust, branch lift, leaf amplitude, leaf speed
@@ -161,6 +177,10 @@ namespace TreeShapes
 	 *   [4] ivy gust, ivy reference length, ivy max angle, unused
 	 *   [5 + i] branch weight, flutter weight (or minus the strand's free length in root units), strand swing
 	 *           parameter, phase id / 128 of vertex i
+	 *
+	 * A shape's data is keyed by its content (the tree's model, the shape's place in it, its vertex count and three of
+	 * its positions), so a tree loaded again after its cell unloaded finds its data instead of being measured again,
+	 * and two copies alive at once share one buffer.
 	 */
 	class NearTrees
 	{
@@ -172,8 +192,11 @@ namespace TreeShapes
 		 */
 		ID3D11ShaderResourceView* Get(RE::BSGeometry* a_geometry, RE::NiNode* a_root, uint a_frame, float a_minHeight, const BespokeProfiles& a_profiles, bool& a_bespoke);
 
-		/** @brief Frees the bend data of shapes not drawn for a while. */
-		void Evict(uint a_frame);
+		/**
+		 * @brief Frees the bend data of shapes not drawn for a while, then the least recently drawn until the buffers
+		 * fit a_budgetBytes. Data drawn in the last few frames is never freed for the budget.
+		 */
+		void Evict(uint a_frame, uint64_t a_budgetBytes);
 
 		/** @brief Frees all bend data, so it is rebuilt with new settings. */
 		void Clear();
@@ -184,33 +207,64 @@ namespace TreeShapes
 		/** @brief Shapes that move with a bespoke profile (counted in Count too). */
 		size_t BespokeCount() const { return bespokeCount; }
 
+		/** @brief Video memory held by the bend data of loaded trees. */
+		uint64_t Bytes() const { return sharedBytes; }
+
 	private:
 		struct Entry
 		{
-			winrt::com_ptr<ID3D11Buffer> buffer;
 			winrt::com_ptr<ID3D11ShaderResourceView> srv;  // nullptr for a shape checked once and left still
 			uint32_t vertexCount = 0;
 			float firstVertex[3]{};
 			uint lastFrame = 0;
+			uint64_t signature = 0;
 			bool bespoke = false;  // srv holds bespoke data
 		};
 
-		void Build(RE::NiNode* a_root, uint a_frame, float a_minHeight, const BespokeProfiles& a_profiles);
+		// One buffer per distinct shape content; the entries of the game's copies of the shape point at it
+		struct Shared
+		{
+			winrt::com_ptr<ID3D11Buffer> buffer;
+			winrt::com_ptr<ID3D11ShaderResourceView> srv;  // nullptr for a shape left still
+			uint64_t bytes = 0;
+			uint lastFrame = 0;
+			bool bespoke = false;
+		};
+
+		void Build(RE::NiNode* a_root, uint64_t a_modelHash, uint a_frame, float a_minHeight, const BespokeProfiles& a_profiles);
 		void Forget(const Entry& a_entry);
+		void Store(uint64_t a_signature, Shared a_record);
+		void Drop(uint64_t a_signature);
 
 		std::unordered_map<const void*, Entry> entries;  // key = the shape's vertex buffer
+		std::unordered_map<uint64_t, Shared> shared;     // key = the shape's content signature
+		uint64_t sharedBytes = 0;
 		size_t swayCount = 0;
 		size_t bespokeCount = 0;
 		std::unordered_set<std::string> warnedModels;  // profiles whose mask does not fit the loaded mesh, logged once
 		uint budgetFrame = 0;
 		int64_t budgetSpentNs = 0;
-		uint64_t builtTrees = 0, loggedBuiltTrees = 0;
+		uint64_t builtTrees = 0, loggedBuiltTrees = 0, reusedShapes = 0, loggedReusedShapes = 0;
 		int64_t buildNs = 0, loggedBuildNs = 0;
+		// Scratch for Evict, kept so the sweep allocates nothing
+		std::vector<std::pair<uint, uint64_t>> evictOrder;
+		std::unordered_set<uint64_t> evicted;
 	};
 
+	/**
+	 * @brief Bend data for tree LOD shapes.
+	 *
+	 * Raw buffer layout, one R8G8B8A8_UNORM element (4 bytes) per vertex, mirrored by TreeWind.hlsli GetOffset:
+	 *   bend weight (0 base, 1 top), tree random, tree sway scale / kLodScaleRange, distance from the trunk (0 trunk,
+	 *   1 crown edge). Random and scale are the same for every vertex of a tree, so their 8 bits move a whole tree a
+	 *   little, never one vertex against its neighbours.
+	 */
 	class BendWeights
 	{
 	public:
+		/** @brief The sway scale is stored as scale / this; TreeScale never exceeds 1.5 at the object LOD scales (4, 8, 16). */
+		static constexpr float kLodScaleRange = 2.0f;
+
 		/**
 		 * @brief Returns the bend data for a shape, built on first sight.
 		 * @return nullptr when the shape has nothing to sway or its block's trunks have not been drawn yet.
@@ -230,13 +284,20 @@ namespace TreeShapes
 		 */
 		ID3D11ShaderResourceView* GetCrownData(RE::BSGeometry* a_geometry, uint a_frame, float& a_weight) const;
 
-		/** @brief Frees the bend data of shapes not drawn for a while, and the blocks left without shapes. */
-		void Evict(uint a_frame);
+		/**
+		 * @brief Frees the data of LOD blocks outside the loaded rings (a_bounds, when valid), of shapes not drawn for
+		 * a while, and the blocks left without shapes; then the least recently drawn data until the buffers fit
+		 * a_budgetBytes. Data drawn in the last few frames is never freed for the budget.
+		 */
+		void Evict(uint a_frame, const LodBounds& a_bounds, uint64_t a_budgetBytes);
 
 		/** @brief Frees all bend data, so it is rebuilt with new settings. */
 		void Clear();
 
 		size_t Count() const { return entries.size(); }
+
+		/** @brief Video memory held by the bend and crown data of tree LOD. */
+		uint64_t Bytes() const { return sharedBytes; }
 
 		struct TrunkCard
 		{
@@ -259,7 +320,6 @@ namespace TreeShapes
 	private:
 		struct Entry
 		{
-			winrt::com_ptr<ID3D11Buffer> buffer;
 			winrt::com_ptr<ID3D11ShaderResourceView> srv;  // nullptr for a shape checked once and left still
 			uint32_t vertexCount = 0;
 			float firstVertex[3]{};
@@ -268,14 +328,14 @@ namespace TreeShapes
 			uint64_t signature = 0;
 			uint32_t generation = 0;
 			bool crown = false;
-			winrt::com_ptr<ID3D11Buffer> crownBuffer;
 			winrt::com_ptr<ID3D11ShaderResourceView> crownSrv;  // nullptr without crown data
 			bool crownFade = false;                             // the shape was drawn without crown data before the build
 			uint crownFadeFrame = 0;                            // ... and this is the frame the data arrived
 		};
 
 		// Bend data by shape content. The game re-creates the render data of object LOD shapes (new vertex buffer,
-		// same vertices) whenever the loaded cell grid moves, so the data built for the old buffer is reused.
+		// same vertices) whenever the loaded cell grid moves, so the data built for the old buffer is reused. The
+		// record owns the buffers; its entries hold views of them.
 		struct Shared
 		{
 			winrt::com_ptr<ID3D11Buffer> buffer;
@@ -284,13 +344,21 @@ namespace TreeShapes
 			uint lastFrame = 0;
 			winrt::com_ptr<ID3D11Buffer> crownBuffer;
 			winrt::com_ptr<ID3D11ShaderResourceView> crownSrv;
+			uint64_t bytes = 0;
+			float blockX = 0.0f, blockY = 0.0f;  // world position of the block's origin
+			float worldScale = 4.0f;             // 4, 8 or 16: the LOD level of the block
 		};
+
+		void Store(uint64_t a_signature, Shared a_record);
+		void Drop(uint64_t a_signature);
 
 		std::unordered_map<uint64_t, Block> blocks;      // key = the block's world translate
 		std::unordered_map<const void*, Entry> entries;  // key = the shape's vertex buffer
 		std::unordered_map<uint64_t, Shared> shared;     // key = the shape's content signature
 		std::unordered_set<const void*> waiting;         // vertex buffers of crowns drawn without crown data so far
+		uint64_t sharedBytes = 0;
 		uint64_t builtCount = 0, reusedCount = 0, loggedBuilt = 0, loggedReused = 0;
+		uint64_t unloadedCount = 0, loggedUnloaded = 0, budgetCount = 0, loggedBudget = 0;
 		// Builds scan every vertex of a merged LOD shape on the render thread. When the LOD grid moves, hundreds of
 		// shapes arrive in one frame, so only a few milliseconds of builds run per frame and the rest wait
 		// (drawn with their previous data, or still) for the following frames.
@@ -298,5 +366,9 @@ namespace TreeShapes
 		int64_t budgetSpentNs = 0;
 		uint64_t deferredCount = 0, loggedDeferred = 0, staleBuiltCount = 0, loggedStaleBuilt = 0;
 		int64_t buildNs = 0, loggedBuildNs = 0, worstFrameNs = 0;
+		// Scratch for Evict, kept so the sweep allocates nothing
+		std::vector<std::pair<uint, uint64_t>> evictOrder;
+		std::unordered_set<uint64_t> evicted;
+		std::unordered_set<uint64_t> liveBlocks;
 	};
 }

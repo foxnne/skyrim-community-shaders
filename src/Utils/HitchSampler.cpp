@@ -18,8 +18,10 @@ namespace HitchSampler
 		// Frames this long also get every sample written to SKSE/HitchSamples. 120 ms (was 300) so the fast-travel
 		// move frame at the top of the arc (220-300 ms since spread attach, 2026-11-25) and the frames after it are kept.
 		constexpr double kDumpMs = 120.0;
-		constexpr size_t kStackWords = 768;  // 6 KB of stack above the stack pointer
-		constexpr size_t kChain = 6;         // return addresses into this module kept per sample
+		constexpr size_t kStackWords = 4096;  // 32 KB of stack above the stack pointer (6 KB missed the grid-attach callers)
+		constexpr size_t kChain = 6;          // return addresses into this module kept per sample
+		constexpr size_t kExeChain = 24;      // into SkyrimSE.exe: deep enough to reach Main::Update from a Havok/IO wait
+		constexpr size_t kReportExe = 6;      // the log line groups by the innermost few only (the dumps keep all)
 		constexpr size_t kMaxSamples = 4096;
 
 		struct Sample
@@ -27,7 +29,7 @@ namespace HitchSampler
 			uint64_t frame = 0;
 			uintptr_t rip = 0;
 			uintptr_t chain[kChain]{};  // innermost first, 0 = none
-			uintptr_t exeChain[kChain]{};  // return addresses into SkyrimSE.exe, innermost first (2026-11-25: waits)
+			uintptr_t exeChain[kExeChain]{};  // return addresses into SkyrimSE.exe, innermost first (2026-11-25: waits)
 		};
 
 		std::atomic<bool> g_active{ false };
@@ -81,7 +83,7 @@ namespace HitchSampler
 			const bool ok = GetThreadContext(target, &context) != 0;
 			if (ok) {
 				const auto* stack = reinterpret_cast<const uintptr_t*>(context.Rsp & ~uintptr_t{ 7 });
-				// Copy at most 6 KB above the stack pointer, and never past the end of the committed region it is in
+				// Copy at most kStackWords above the stack pointer, and never past the end of the committed region it is in
 				// (VirtualQuery is a plain system call: it takes no user-mode lock).
 				MEMORY_BASIC_INFORMATION info;
 				if (VirtualQuery(stack, &info, sizeof(info)) != 0 && info.State == MEM_COMMIT) {
@@ -107,12 +109,12 @@ namespace HitchSampler
 			for (; found < kChain; ++found)
 				sample.chain[found] = 0;
 			size_t exeFound = 0;
-			for (size_t i = 0; i < words && exeFound < kChain; ++i) {
+			for (size_t i = 0; i < words && exeFound < kExeChain; ++i) {
 				const uintptr_t value = g_stackCopy[i];
 				if (value > g_exeBegin + 8 && value < g_exeEnd && FollowsCall(value))
 					sample.exeChain[exeFound++] = value;
 			}
-			for (; exeFound < kChain; ++exeFound)
+			for (; exeFound < kExeChain; ++exeFound)
 				sample.exeChain[exeFound] = 0;
 		}
 
@@ -147,7 +149,8 @@ namespace HitchSampler
 				}
 				if (sample.exeChain[0]) {
 					key += " | exe";
-					for (const auto address : sample.exeChain) {
+					for (size_t k = 0; k < kReportExe; ++k) {
+						const auto address = sample.exeChain[k];
 						if (!address)
 							break;
 						key += std::format(" < {:X}", address - g_exeBegin);

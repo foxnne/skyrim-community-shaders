@@ -8,6 +8,7 @@
 #include "Features/TerrainBlending.h"
 #include "Globals.h"
 #include "ShaderCache.h"
+#include "Utils/VisualClock.h"
 #include "State.h"
 #include "Utils/ColorSpace.h"
 #include "Utils/D3D.h"
@@ -99,7 +100,7 @@ namespace
 	const AuroraPalette& GetNightlyPalette()
 	{
 		const auto* calendar = RE::Calendar::GetSingleton();
-		const float days = calendar ? calendar->GetDaysPassed() : 0.0f;
+		const float days = calendar ? Util::VisualClock::DaysPassed() : 0.0f;
 		std::uint32_t hash = static_cast<std::uint32_t>(std::floor(days + 0.5f)) * 2654435761u;
 		hash ^= hash >> 16;
 		const std::uint32_t roll = hash % 20u;

@@ -6,6 +6,7 @@
 #include "LinearLighting.h"
 #include "Utils/Climate.h"
 #include "Utils/Game.h"
+#include "Utils/VisualClock.h"
 
 #define I18N_KEY_PREFIX "feature.sky_sync."
 
@@ -204,6 +205,7 @@ void SkySync::PostPostLoad()
 	}
 
 	stl::detour_thunk<Sky_Update>(REL::RelocationID(25682, 26229));
+	Util::VisualClock::SetSkyHookInstalled(true);
 	Util::SetCelestialTransitionHandlerAvailable(true);
 
 	gSunPosition = reinterpret_cast<RE::NiPoint3*>(REL::RelocationID(527924, 414871).address());
@@ -361,7 +363,11 @@ void SkySync::Sky_Update::thunk(RE::Sky* sky, float deltaTime)
 {
 	auto& lightning = globals::features::physicalSky.lightning;
 	lightning.SuppressVanilla(sky);
-	func(sky, deltaTime);
+	{
+		// A fast-travel flight's visual clock (Sky Above) runs ahead of the game's: the sky shows that time.
+		const Util::VisualClock::SkyScope visualTime;
+		func(sky, deltaTime);
+	}
 	lightning.SuppressVanilla(sky);
 	auto& skySync = globals::features::skySync;
 	if (sky && sky->sun)
@@ -471,7 +477,7 @@ bool SkySync::Update(const RE::Sky* sky)
 
 	const auto calendar = globals::game::calendar;
 	const auto deltaTime = globals::game::deltaTime;
-	float fadeAdvance = calendar && deltaTime ? std::max(*deltaTime * calendar->GetTimescale(), 0.0f) : 0.0f;
+	float fadeAdvance = calendar && deltaTime ? std::max(*deltaTime * static_cast<float>(Util::VisualClock::TimeRate()), 0.0f) : 0.0f;
 
 	// The clock can outrun real time (waiting, fast travel) or move while frames are paused
 	// (console, scrubbing), so advance by whichever of the two elapsed more.

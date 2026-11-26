@@ -6,6 +6,7 @@
 #include "Features/RemoteControl/ReferenceClock.h"
 #include "Features/TerrainShadows.h"
 #include "Features/ViewAtmosphere.h"
+#include "Utils/VisualClock.h"
 #include "State.h"
 #include "Util.h"
 
@@ -1025,9 +1026,10 @@ void PhysicalSky::UpdateCloudWind()
 	// Time-lapse: when time runs faster than the vanilla TimeScale of 20 (a fast-travel flight that shows
 	// the hours passing), the clouds drift and develop that much faster too. Normal play is unchanged.
 	if (!reference) {
-		static auto* timeScale = RE::TESForm::LookupByID<RE::TESGlobal>(0x3A);
-		if (timeScale && std::isfinite(timeScale->value))
-			elapsed *= std::clamp(static_cast<double>(timeScale->value) / 20.0, 1.0, 250.0);
+		// The game's TimeScale, or a flight's visual clock rate while one runs ahead (Utils/VisualClock.h).
+		const double rate = Util::VisualClock::TimeRate();
+		if (std::isfinite(rate))
+			elapsed *= std::clamp(rate / 20.0, 1.0, 250.0);
 	}
 
 	const auto& layer = settings.cloudLayer;

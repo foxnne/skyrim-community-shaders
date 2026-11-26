@@ -181,6 +181,15 @@ Texture3D<unorm float4> TexCloudShapeNoise : register(t4);
 #	define CLOUD_FRINGE_LOW 0.10  // profile below this carries no cloud
 #	define CLOUD_FRINGE_HIGH 0.32  // profile above this is untouched
 #endif
+#ifndef CLOUD_LOBE_DOME
+#	define CLOUD_LOBE_DOME 0.3  // how far both lobe thresholds climb toward the layer top (domed turrets); 0 = vertical-walled turrets
+#endif
+#ifndef CLOUD_TOP_FADE
+#	define CLOUD_TOP_FADE 0.15  // soft ceiling: the profile fades out over this top share of each column; 0 = original hard shelf
+#endif
+#ifndef CLOUD_SMOOTH_PROFILE_MIP
+#	define CLOUD_SMOOTH_PROFILE_MIP 1  // continuous noise mip from the profile (no flat seams at profile 1/3, 2/3); 0 = original floor()
+#endif
 #ifndef CLOUD_DETILE_TILT
 #	define CLOUD_DETILE_TILT 1.0  // lean of the vertical noise repeat (tall layers); 0 = off
 #endif
@@ -842,6 +851,13 @@ float CloudNdfProfile(inout NDFInfo ndf)
 	float topProfile = ndf.stormVolume && IsVolcanic(CloudStorms[ndf.stormIndex]) ? top : lerp(top, max(top, expandedTop), info.topExpansion);
 	[branch] if (ndf.storm > 0.15 && (!ndf.stormVolume || !IsVolcanic(CloudStorms[ndf.stormIndex])))
 		topProfile = max(top, TexCloudProfileLUT.SampleLevel(TransmittanceSampler, float2(ndf.top_type, 1.0 - ndf.height_fraction), 0).g);
+	// foxnne: the Nubis top profile for high top types still holds 0.3-0.45 at 90-95 % of the column and only drops
+	// to 0 in the last few percent, and the global map gives every column the same top (procedural baseHeight.y), so
+	// where the map's top type saturates the deck ended in one flat shelf at the layer ceiling (2026-11-25). Fade the
+	// profile out over the top CLOUD_TOP_FADE of the column. Low and mid types already reach 0 below that and are
+	// unchanged. Storm columns keep their own (mirrored) top.
+	else if (CLOUD_TOP_FADE > 0.0 && !ndf.stormVolume)
+		topProfile *= smoothstep(0.0, CLOUD_TOP_FADE, 1.0 - ndf.height_fraction);
 	const float verticalProfile = max(topProfile * bottom, 0.0);
 	const float heightFade = saturate(ndf.height_fraction / info.coverageHeightRange);
 	const float exponent = lerp(lerp(lerp(info.coverageBottomPower, 1.0, heightFade), 1.0, saturate((ndf.storm - 0.15) * 20.0)), 1.0, heightFade);
@@ -1020,10 +1036,20 @@ float sampleCloudDensityFromContext(
 	// Density is nonlinear in noise; coarse averages must not erase the cloud shape.
 	// The dense eruption needs its cellular surface at full detail. Cone/footprint
 	// filtering still applies, but density alone must not blur the noise first.
-#ifdef NO_CLOUD_STORMS
-	const float biasedMip = floor(profileMip) + mipBias;
+#if CLOUD_SMOOTH_PROFILE_MIP
+	// foxnne: floor() switched the noise mip in whole steps at profile 1/3 and 2/3. Where the weather map saturates
+	// (the same coverage and top type over kilometres) those iso-profile surfaces are flat planes, and the noise,
+	// hence the density, jumped across them: flat shelves and terraces in the deck (2026-11-25). Same mip at the
+	// edges (0 below 1/3, where the billows are) and in the core (3 at profile 1), continuous in between; the
+	// sampler is trilinear, so it costs nothing extra.
+	const float weatherMipBase = max(profileMip - 1.0, 0.0) * 1.5;
 #else
-	const float biasedMip = risingBillows ? mipBias : (ndf.stormVolume ? floor(profileMip + mipBias) : floor(profileMip) + mipBias);
+	const float weatherMipBase = floor(profileMip);
+#endif
+#ifdef NO_CLOUD_STORMS
+	const float biasedMip = weatherMipBase + mipBias;
+#else
+	const float biasedMip = risingBillows ? mipBias : (ndf.stormVolume ? floor(profileMip + mipBias) : weatherMipBase + mipBias);
 #endif
 	const float mip = max(biasedMip, min(minimumMip, biasedMip + 1.0));
 	// Storms have their own channel-dependent deformation and keep their noise.
@@ -1054,7 +1080,12 @@ float sampleCloudDensityFromContext(
 		const float3 lobeCoordinates = density_context.noise_coordinates * CLOUD_LOBE_SCALE + float3(0.37, 0.61, 0.19);
 		const float lobe = TexCloudShapeNoise.SampleLevel(TileableSampler, lobeCoordinates, 0.0).g;
 		const float lift = saturate((ndf.height_fraction - 0.15) * 3.0);
-		profile = saturate(profile - CLOUD_LOBE_STRENGTH * lift * (1.0 - smoothstep(CLOUD_LOBE_LOW, CLOUD_LOBE_HIGH, lobe)));
+		// The lobe field is nearly columnar over a deck (its vertical period is ~2.9 km), so a cut that was the same at
+		// every height above the ramp gave turrets with vertical walls under the flat top of the weather profile: the
+		// "flat plateaued towers" over the deck (user 2026-11-25). Both thresholds now climb with height, so a turret
+		// narrows upward and its top height follows its own lobe value: rounded domes of different heights.
+		const float dome = CLOUD_LOBE_DOME * smoothstep(0.3, 1.0, ndf.height_fraction);
+		profile = saturate(profile - CLOUD_LOBE_STRENGTH * lift * (1.0 - smoothstep(CLOUD_LOBE_LOW + dome, CLOUD_LOBE_HIGH + dome, lobe)));
 	}
 #endif
 #ifndef NO_CLOUD_STORMS
@@ -1082,7 +1113,7 @@ float sampleCloudDensityFromContext(
 			const float3 pos = density_context.noise_coordinates;
 			const float2 field = CloudFieldPosition(pos.xy - info.noiseWindOffset * GAME_UNIT_TO_M, info.cloudEvolution.xy);
 			const float3 coordinates = WeatherCloudNoisePosition(pos.z, field, ndf.height_fraction, info);
-			const float weatherBias = floor(profileMip) + mipBias;
+			const float weatherBias = weatherMipBase + mipBias;
 			const float weatherMip = max(weatherBias, min(minimumMip, weatherBias + 1.0));
 			float weatherErosion;
 			if (info.useVoxelNoise != 0u) {

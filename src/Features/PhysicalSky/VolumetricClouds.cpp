@@ -25,7 +25,10 @@ namespace
 
 	// The low cloud deck as last drawn (world Z, game units), for other plugins: Sky Above plans its
 	// fast-travel arc through and above it. Published once per cloud frame; stale after a few seconds.
-	std::atomic<float> gDeckBaseZ{ 0.f }, gDeckTopZ{ 0.f };
+	// Base/top are the band the weather map actually fills (not the whole altitude window), directly under
+	// the camera. The deck follows a camera-centred shell: at horizontal distance d it sits d^2 / R lower
+	// (R = gDeckCurvature, game units), which is why it looks far lower around distant peaks.
+	std::atomic<float> gDeckBaseZ{ 0.f }, gDeckTopZ{ 0.f }, gDeckCurvature{ 0.f };
 	std::atomic<int64_t> gDeckStampMs{ 0 };
 	int64_t NowMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 }
@@ -38,6 +41,16 @@ extern "C" __declspec(dllexport) bool BottledShaders_GetCloudDeck(float* a_baseZ
 	*a_baseZ = gDeckBaseZ.load(std::memory_order_relaxed);
 	*a_topZ = gDeckTopZ.load(std::memory_order_relaxed);
 	return true;
+}
+
+// The radius (game units) of the camera-centred shell the deck follows: at horizontal distance d from the
+// camera the deck's base and top are d * d / radius lower than BottledShaders_GetCloudDeck reports.
+extern "C" __declspec(dllexport) bool BottledShaders_GetCloudDeckCurvature(float* a_radius)
+{
+	if (!a_radius || NowMs() - gDeckStampMs.load(std::memory_order_relaxed) > 3000)
+		return false;
+	*a_radius = gDeckCurvature.load(std::memory_order_relaxed);
+	return *a_radius > 0.f;
 }
 
 namespace
@@ -1025,6 +1038,9 @@ void PhysicalSky::UpdateCloudWind()
 	// Time-lapse: when time runs faster than the vanilla TimeScale of 20 (a fast-travel flight that shows
 	// the hours passing), the clouds drift and develop that much faster too. Normal play is unchanged.
 	if (!reference) {
+		// A hitch frame would otherwise move the clouds a whole step at once; at time-lapse speed that read as
+		// the cloud field jumping mid-flight (user 2026-11-25). A long frame now advances them like a normal one.
+		elapsed = std::min(elapsed, 1.0 / 30.0);
 		static auto* timeScale = RE::TESForm::LookupByID<RE::TESGlobal>(0x3A);
 		if (timeScale && std::isfinite(timeScale->value))
 			elapsed *= std::clamp(static_cast<double>(timeScale->value) / 20.0, 1.0, 250.0);
@@ -1205,9 +1221,26 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 	const float2 lowAltitudeRange = low.GetNdfAltitudeRangeKm();
 	const float lowCloudBaseKm = lowAltitudeRange.x;
 	const float lowCloudTopKm = lowAltitudeRange.y;
-	gDeckBaseZ.store(cbData.zBottom + KilometersToGameUnits(lowCloudBaseKm), std::memory_order_relaxed);
-	gDeckTopZ.store(cbData.zBottom + KilometersToGameUnits(lowCloudTopKm), std::memory_order_relaxed);
-	gDeckStampMs.store(NowMs(), std::memory_order_relaxed);
+	{
+		// The altitude window is only the range the height map is scaled into. A procedural map fills
+		// baseHeight.x .. baseHeight.y of it (default 0 .. 0.95), plus at most the bottom variation; the top
+		// profile then reaches 0 a little below the map top (CLOUD_TOP_FADE in Volumetrics.cs.hlsl).
+		// Imported/local height maps can use the whole window, so they keep 0 .. 1.
+		float2 fill = { 0.f, 1.f };
+		const auto& map = settings.cloudMap;
+		if (map.type == NdfType::Procedural && map.procedural.local.heightPath.empty()) {
+			const auto& p = map.procedural.parameters;
+			const auto finite = [](float v, float fallback) { return std::isfinite(v) ? std::clamp(v, 0.f, 1.f) : fallback; };
+			fill = { finite(p.baseHeight.x, 0.f), finite(p.baseHeight.y, 0.95f) };
+			if (fill.y <= fill.x)
+				fill = { 0.f, 1.f };
+		}
+		const float spanKm = lowCloudTopKm - lowCloudBaseKm;
+		gDeckBaseZ.store(cbData.zBottom + KilometersToGameUnits(lowCloudBaseKm + spanKm * fill.x), std::memory_order_relaxed);
+		gDeckTopZ.store(cbData.zBottom + KilometersToGameUnits(lowCloudBaseKm + spanKm * fill.y), std::memory_order_relaxed);
+		gDeckCurvature.store(KilometersToGameUnits(low.GetCurvatureRadiusKm()), std::memory_order_relaxed);
+		gDeckStampMs.store(NowMs(), std::memory_order_relaxed);
+	}
 	const float cloudCurvatureRadius = KilometersToGameUnits(low.GetCurvatureRadiusKm());
 	const auto localRect = localNdfManager.GetRect();
 	const auto localAltitude = localNdfManager.GetAltitude();

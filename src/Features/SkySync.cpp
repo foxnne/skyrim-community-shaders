@@ -379,8 +379,34 @@ void SkySync::Sky_Update::thunk(RE::Sky* sky, float deltaTime)
 	if (sky && sky->sun)
 		globals::features::linearLighting.ClearSunlightColor(sky->sun->light.get());
 	skySync.PreparePendingTransitions();
-	if (skySync.Update(sky))
+	const bool completed = skySync.Update(sky);
+	skySync.PublishDirections();  // this frame's packet for Physical Sky's Reset (zeros when Update did not compute them)
+	if (completed)
 		Util::CompleteCelestialTransition();
+}
+
+void SkySync::PublishDirections()
+{
+	std::lock_guard lock{ exchangeMutex };
+	std::copy(std::begin(rawDirections), std::end(rawDirections), std::begin(publishedDirections.directions));
+}
+
+SkySync::DirectionPacket SkySync::TakeDirections() const
+{
+	std::lock_guard lock{ exchangeMutex };
+	return publishedDirections;
+}
+
+void SkySync::PublishLightColors(const LightColorPacket& colors)
+{
+	std::lock_guard lock{ exchangeMutex };
+	publishedLightColors = colors;
+}
+
+SkySync::LightColorPacket SkySync::TakeLightColors() const
+{
+	std::lock_guard lock{ exchangeMutex };
+	return publishedLightColors;
 }
 
 void SkySync::PreparePendingTransitions()
@@ -404,6 +430,7 @@ void SkySync::PreparePendingTransitions()
 bool SkySync::Update(const RE::Sky* sky)
 {
 	std::fill(std::begin(rawDirections), std::end(rawDirections), RE::NiPoint3{});
+	workingLightColors = TakeLightColors();  // frame boundary: Physical Sky's last published colours, used by ApplyLightColor below
 	active = false;
 	currentDim = 1.0f;
 

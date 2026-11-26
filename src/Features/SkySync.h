@@ -274,9 +274,30 @@ private:
 	bool moonlightSnapPending = false;  // a game load sets the moonlight fade at once instead of ramping it
 
 	float4 colors[BodyCount] = {};
-	RE::NiPoint3 rawDirections[BodyCount] = {};  // sky-local, before shadow elevation locking; zero when not computed this frame
+	RE::NiPoint3 rawDirections[BodyCount] = {};  // sky-local, before shadow elevation locking; zero when not computed this frame. Main thread's copy.
 	float currentDim = 1.0f;
-	std::optional<std::array<RE::NiColor, 3>> workingLightColors = {};
+	std::optional<std::array<RE::NiColor, 3>> workingLightColors = {};  // main thread's copy, taken from the exchange at the start of Update
+
+	// Main <-> render exchange (Codex review 2026-11-25, #3). Update() runs in the Sky::Update hook (game main thread);
+	// Physical Sky's Reset() runs from the Present hook (State::Reset) and used to read rawDirections and write
+	// workingLightColors in place, between this side's optional check and dereference. Whether or not the engine
+	// serialises the two call sites, neither side touches the other's live state any more: Update publishes this frame's
+	// body directions as one packet and takes the last published light colours as one packet at its start; Reset takes
+	// the directions packet and publishes one colours packet. Each packet is copied whole under the exchange mutex.
+	struct DirectionPacket
+	{
+		RE::NiPoint3 directions[BodyCount] = {};
+	};
+	using LightColorPacket = std::optional<std::array<RE::NiColor, 3>>;
+
+	void PublishDirections();                               // main thread, after Update: rawDirections -> packet
+	DirectionPacket TakeDirections() const;                 // render side (Physical Sky Reset)
+	void PublishLightColors(const LightColorPacket& colors);  // render side, once per Reset
+	LightColorPacket TakeLightColors() const;               // main thread, start of Update
+
+	mutable std::mutex exchangeMutex;
+	DirectionPacket publishedDirections;      // guarded by exchangeMutex
+	LightColorPacket publishedLightColors;    // guarded by exchangeMutex
 	float moonlightFade = 0.0f;   // incoming moonlight ramp, 0 to 1, from when a moon became the caster
 	float moonlightOut = 0.0f;    // outgoing light level kept on when a moon takes over, fading out over the same duration
 	float lastLightLevel = 0.0f;  // last update's dimmed light factor, for moonlightOut

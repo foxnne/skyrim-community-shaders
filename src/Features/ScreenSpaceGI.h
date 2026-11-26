@@ -116,6 +116,7 @@ public:
 		float SkyFillSaturation = 1.0f;   // sky term saturation (replaces Sky IBL Saturation); 1 = the sky's own blue
 		float SkyFillEnvWeight = 0.25f;   // DALC/env share on skyward rays under open sky; occluded sky keeps all of it
 		float BounceSkyLimit = 0.0f;      // traced bounce cap, in multiples of the ambient it hides; 0 = off
+		uint SkyFillDebug = 0u;           // 0 off; 1 gates, 2 openness, 3 traced only, 4 fallback only (SSGI radiance)
 		// NRD REBLUR
 		bool EnableREBLUR = true;
 		NRD::REBLURSettings Reblur;
@@ -184,9 +185,13 @@ public:
 		float SkyFillSaturation;
 		float SkyFillEnvWeight;
 		float BounceSkyLimit;
-		float pad0;
+		uint SkyFillDebug;
 	};
 	static_assert(sizeof(SharedData) == 48);
+
+	/** @brief Logs the conditions the Physical Sky Fill path depends on whenever they change. */
+	void LogSkyFillGates(const SharedData& a_data);
+	uint32_t lastSkyFillGates = 0xFFFFFFFFu;
 
 	SharedData GetCommonBufferData();
 

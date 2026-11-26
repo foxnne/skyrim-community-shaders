@@ -44,6 +44,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	SkyFillSaturation,
 	SkyFillEnvWeight,
 	BounceSkyLimit,
+	SkyFillDebug,
 	EnableREBLUR,
 	Reblur,
 	DiffusePrepassBlurRadius,
@@ -341,6 +342,18 @@ void ScreenSpaceGI::DrawDebugSection()
 	static float debugRescale = .3f;
 	ImGui::SliderFloat(T(TKEY("view_resize"), "View Resize"), &debugRescale, 0.f, 1.f);
 
+	{
+		const char* skyFillDebugModes[] = { "Off", "Gates (R fallback, G IBL, B fill live)", "Openness (R fill share, G open share, B Skylighting)", "Traced bounce only", "Cubemap fallback only" };
+		int mode = static_cast<int>(std::min(settings.SkyFillDebug, 4u));
+		if (ImGui::Combo(T(TKEY("sky_fill_debug"), "Sky Fill Debug (SSGI radiance)"), &mode, skyFillDebugModes, IM_ARRAYSIZE(skyFillDebugModes))) {
+			settings.SkyFillDebug = static_cast<uint>(mode);
+			userSettings.SkyFillDebug = settings.SkyFillDebug;
+			resetReblurHistory = true;
+		}
+		if (auto _tt = Util::HoverTooltipWrapper())
+			ImGui::Text("%s", T(TKEY("sky_fill_debug_tooltip"), "Replaces the SSGI radiance with diagnostics; view it with the deferred debug view SSGI (8). The gate log line [SSGI] sky fill gates in the log says which condition is off."));
+	}
+
 	BUFFER_VIEWER_NODE(texNoise, debugRescale)
 	BUFFER_VIEWER_NODE(texWorkingDepth, debugRescale)
 	BUFFER_VIEWER_NODE(texHistoryGeo[0], debugRescale)
@@ -410,6 +423,7 @@ void ScreenSpaceGI::LoadSettings(json& o_json)
 	settings.SkyFillSaturation = Util::ClampFinite(settings.SkyFillSaturation, defaults.SkyFillSaturation, 0.0f, 2.0f);
 	settings.SkyFillEnvWeight = Util::ClampFinite(settings.SkyFillEnvWeight, defaults.SkyFillEnvWeight, 0.0f, 1.0f);
 	settings.BounceSkyLimit = Util::ClampFinite(settings.BounceSkyLimit, defaults.BounceSkyLimit, 0.0f, 16.0f);
+	settings.SkyFillDebug = std::min(settings.SkyFillDebug, 4u);
 	ResetIfOutOfRange(settings.DiffusePrepassBlurRadius, 0.0f, 75.0f, defaults.DiffusePrepassBlurRadius);
 	if (settings.QuarterRes)
 		settings.HalfRes = false;
@@ -985,8 +999,9 @@ void ScreenSpaceGI::DrawSSGI()
 	//////////////////////////////////////////////////////
 
 	context->CSSetConstantBuffers(1, 1, &cb);
-	auto* sharedDataBuf = globals::state->sharedDataCB->CB();
-	context->CSSetConstantBuffers(5, 1, &sharedDataBuf);
+	// b5 SharedData and b6 FeatureData: diffuseGI reads ssgiSettings, iblSettings, skylightingSettings and physSkyData
+	// from b6, which no pass here bound before (it used whatever an earlier dispatch left there).
+	globals::state->BindSharedDataCS(context, true);
 	context->CSSetSamplers(0, (uint)samplers.size(), samplers.data());
 
 	// prefilter depths
@@ -1218,8 +1233,8 @@ void ScreenSpaceGI::Composite()
 	ID3D11UnorderedAccessView* mainUAV = main.UAV;
 	context->CSSetUnorderedAccessViews(0, 1, &mainUAV, nullptr);
 
-	auto* sharedDataBuf = globals::state->sharedDataCB->CB();
-	context->CSSetConstantBuffers(5, 1, &sharedDataBuf);
+	// b5 SharedData and b6 FeatureData (ssgiSettings, physSkyData live in b6).
+	globals::state->BindSharedDataCS(context, true);
 	context->CSSetShader(compositeCompute.get(), nullptr, 0);
 
 	auto dispatchCount = Util::GetScreenDispatchCount(true);
@@ -1281,7 +1296,30 @@ ScreenSpaceGI::SharedData ScreenSpaceGI::GetCommonBufferData()
 	data.SkyFillSaturation = std::clamp(settings.SkyFillSaturation, 0.0f, 2.0f);
 	data.SkyFillEnvWeight = std::clamp(settings.SkyFillEnvWeight, 0.0f, 1.0f);
 	data.BounceSkyLimit = std::clamp(settings.BounceSkyLimit, 0.0f, 16.0f);
+	data.SkyFillDebug = std::min(settings.SkyFillDebug, 4u);
+	LogSkyFillGates(data);
 	return data;
+}
+
+void ScreenSpaceGI::LogSkyFillGates(const SharedData& a_data)
+{
+	auto& ibl = globals::features::ibl;
+	auto& skylighting = globals::features::skylighting;
+	const bool iblOn = ibl.loaded && ibl.GetCommonBufferData().EnableIBL != 0;
+	const bool iblENB = ibl.loaded && ibl.IsManagedByENB();
+	const bool physSky = globals::features::physicalSky.IsRendering();
+	const bool skyProbes = skylighting.loaded && skylighting.texProbeArray;
+	const bool interior = Util::IsInterior();
+	const bool fallback = UsesCubemapFallback();
+	const uint32_t gates = (a_data.PhysicalSkyFill ? 1u : 0u) | (a_data.EnableIL ? 2u : 0u) | (fallback ? 4u : 0u) |
+	                       (a_data.ReplaceAmbient ? 8u : 0u) | (iblOn ? 16u : 0u) | (iblENB ? 32u : 0u) |
+	                       (physSky ? 64u : 0u) | (skyProbes ? 128u : 0u) | (interior ? 256u : 0u);
+	if (gates == lastSkyFillGates)
+		return;
+	lastSkyFillGates = gates;
+	logger::info("[SSGI] sky fill gates: PhysicalSkyFill={} EnableIL={} cubemapFallback={} ReplaceAmbient={} IBL={} IBLbyE11={} PhysicalSky={} SkylightingProbes={} interior={} -> fill path {}",
+		a_data.PhysicalSkyFill != 0, a_data.EnableIL != 0, fallback, a_data.ReplaceAmbient != 0, iblOn, iblENB, physSky, skyProbes, interior,
+		(a_data.PhysicalSkyFill && a_data.EnableIL && fallback && iblOn && physSky && skyProbes && !interior) ? "LIVE" : "INACTIVE");
 }
 
 #undef I18N_KEY_PREFIX

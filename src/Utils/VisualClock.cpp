@@ -148,7 +148,12 @@ namespace Util::VisualClock
 	}
 }
 
-extern "C" __declspec(dllexport) bool BottledShaders_SetVisualClock(double a_daysPassed, float a_rate)
+extern "C" __declspec(dllexport) int BottledShaders_VisualClockVersion()
+{
+	return kVisualClockVersion;
+}
+
+extern "C" __declspec(dllexport) bool BottledShaders_SetVisualClock2(double a_daysPassed, float a_rate)
 {
 	if (!Util::VisualClock::Supported() || !std::isfinite(a_daysPassed) || !std::isfinite(a_rate)) {
 		BottledShaders_ClearVisualClock();

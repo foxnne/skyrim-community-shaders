@@ -133,10 +133,21 @@ namespace
 
 	int64_t NowMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
+	// Resolved on every call: RE::Calendar::GetSingleton() dereferences the engine's Calendar* global, which is null
+	// until the game has created the calendar. globals::game::calendar is cached once in globals::ReInit (plugin load /
+	// renderer init, before that) and so stays null: the cause of "calendar NOT available" in game (2026-11-25).
+	// What was missing is logged once per change.
 	RE::Calendar* Calendar()
 	{
-		auto* calendar = globals::game::calendar;
-		return calendar && calendar->gameHour && calendar->gameDaysPassed && calendar->timeScale ? calendar : nullptr;
+		auto*     calendar = RE::Calendar::GetSingleton();
+		const int missing = !calendar ? 1 : !calendar->gameHour ? 2 : !calendar->gameDaysPassed ? 3 : !calendar->timeScale ? 4 : 0;
+		static std::atomic_int lastMissing{ -1 };
+		if (lastMissing.exchange(missing) != missing) {
+			static constexpr const char* kWhat[] = { "available", "Calendar singleton null", "GameHour global null",
+				"GameDaysPassed global null", "TimeScale global null" };
+			logger::info("[Visual Clock] calendar: {}", kWhat[missing]);
+		}
+		return missing == 0 ? calendar : nullptr;
 	}
 
 	void Store(const Util::VisualClock::Frame& a_frame)

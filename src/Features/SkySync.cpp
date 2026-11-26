@@ -482,7 +482,7 @@ bool SkySync::Update(const RE::Sky* sky)
 	if (!sunBelowHorizon)
 		HoldLowSunDirection(climate->timing, hour, sunDir, directions[static_cast<int>(Caster::Sun)]);
 
-	const auto calendar = globals::game::calendar;
+	const auto calendar = Util::Climate::GetCalendar();  // globals::game::calendar is cached before the calendar exists
 	const auto deltaTime = globals::game::deltaTime;
 	const auto visual = Util::VisualClock::Current();
 	float fadeAdvance = calendar && deltaTime ? std::max(*deltaTime * (visual.active ? static_cast<float>(visual.rate) : calendar->GetTimescale()), 0.0f) : 0.0f;

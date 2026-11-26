@@ -13,6 +13,7 @@
 #include "Overlays/PresetOverlays.h"
 #include "State.h"
 #include "Utils/Game.h"
+#include "Utils/VisualClock.h"
 
 #include "PresetManager.h"
 #include "SettingManager.h"
@@ -944,7 +945,7 @@ void EffectManager::UpdateCommonData()
 			commonData.weather[0] = static_cast<float>(currentWeatherID);
 			commonData.weather[1] = static_cast<float>(previousWeatherID);
 			commonData.weather[2] = sky->currentWeatherPct;
-			commonData.weather[3] = sky->currentGameHour;
+			commonData.weather[3] = Util::VisualClock::SkyHour(sky);
 
 			commonData.enbWeather[0] = static_cast<float>(weatherManager.GetWeatherIndex(currentWeatherID));
 			commonData.enbWeather[1] = static_cast<float>(weatherManager.GetWeatherIndex(previousWeatherID));
@@ -958,7 +959,7 @@ void EffectManager::UpdateCommonData()
 		auto& settingManager = SettingManager::GetSingleton();
 
 		// Clamp current time to valid range
-		float currentTime = sky ? std::clamp(sky->currentGameHour, 0.0f, 24.0f) : 12.0f;
+		float currentTime = sky ? std::clamp(Util::VisualClock::SkyHour(sky), 0.0f, 24.0f) : 12.0f;
 
 		// Load time of day settings using cached IDs
 		const float nightTime = settingManager.GetValue<float>(ids.nightTime);

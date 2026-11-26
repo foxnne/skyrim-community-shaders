@@ -7,14 +7,14 @@
 // game's TimeScale normal, publishes a visual clock that runs ahead of the game's own, and steps the real
 // clock up to it at the landing.
 //
-// The calendar globals are never written here. Only the sky's own hour field (Sky::currentGameHour) shows the
-// visual hour, and only between the engine's reads of it:
-//   - BeginSkyUpdate (before Sky::Update): puts back the value the engine itself left last frame, so
-//     Sky::Update always starts from its own state, and takes this frame's snapshot;
-//   - ApplyToSky before Sky::UpdateColors (the time-of-day colour interpolation) and after Sky::Update
-//     (Sky Sync's sun and shadow direction, exposure, Effects11, night sky and the renderers read it then).
-// Weather timing, the moons' phases and everything outside the sky keep the real clock. Consumers read one
-// coherent per-frame snapshot (Current()). Normal play is untouched.
+// Nothing outside this module ever sees a changed game value:
+//   - the calendar globals are never written;
+//   - Sky::currentGameHour holds the visual hour only for the duration of the engine's Sky::UpdateColors
+//     call (ColorsScope: saved before, restored after, main thread), so the time-of-day colours follow it;
+//   - our own consumers (Sky Sync's sun/shadow direction and fades, exposure, Effects11, night sky, ground fog,
+//     ENB helper, clouds) read the visual time from the per-frame snapshot (Current(), SkyHour()) instead of
+//     the engine's fields, and only while a visual clock is active; otherwise their original code runs.
+// The snapshot is taken once per frame on the main thread at the start of Sky::Update.
 
 #pragma once
 
@@ -27,26 +27,43 @@ namespace Util::VisualClock
 	{
 		bool          active = false;  // fresh, supported, and ahead of the game's clock
 		float         hoursAhead = 0.0f;
-		float         hour = 12.0f;    // the hour the sky shows (0-24); the game's when inactive
+		float         hour = 12.0f;    // the hour the sky shows (0-24); only meaningful while active
 		float         daysPassed = 0.0f;
-		double        rate = 20.0;     // time rate sky motion follows (TimeScale-like)
+		double        rate = 20.0;     // time rate sky motion follows (TimeScale-like); only meaningful while active
 		std::uint32_t sequence = 0;    // publication the frame was taken from
 	};
 
-	/** @brief The current frame's snapshot (any thread). Take it once per calculation. */
+	/** @brief The current frame's snapshot (any thread, no game reads). Use its values only when active. */
 	[[nodiscard]] Frame Current();
 
-	/** @brief Whether the sky can follow a visual clock (hooks installed and Sky Sync enabled). */
+	/** @brief The hour our sky consumers should use: the visual hour while active, else the sky's own field. */
+	[[nodiscard]] float SkyHour(const RE::Sky* a_sky);
+
+	/** @brief Hooks installed (Sky::Update and Sky::UpdateColors), calendar usable, Sky Sync enabled (as of the last frame). */
 	[[nodiscard]] bool Supported();
 
 	/** @brief Set once Sky Sync's Sky::Update hook is installed. */
 	void SetSkyHookInstalled(bool a_installed);
 
-	/** @brief Main thread, before the engine's Sky::Update: restore the sky's own hour and take this frame's snapshot. */
-	void BeginSkyUpdate(RE::Sky* a_sky);
+	/** @brief Set once the Sky::UpdateColors hook is installed. */
+	void SetColorsHookInstalled(bool a_installed);
 
-	/** @brief Main thread, inside Sky::Update before Sky::UpdateColors, and after Sky::Update: show the visual hour. */
-	void ApplyToSky(RE::Sky* a_sky);
+	/** @brief Main thread, before the engine's Sky::Update: takes this frame's snapshot. */
+	void BeginSkyUpdate();
+
+	/** @brief Main thread, around the engine's Sky::UpdateColors: the visual hour in Sky::currentGameHour for that call only. */
+	class ColorsScope
+	{
+	public:
+		explicit ColorsScope(RE::Sky* a_sky);
+		~ColorsScope();
+		ColorsScope(const ColorsScope&) = delete;
+		ColorsScope& operator=(const ColorsScope&) = delete;
+
+	private:
+		RE::Sky* sky = nullptr;
+		float    savedHour = 0.0f;
+	};
 }
 
 // Exports for other plugins (resolved with GetProcAddress, like BottledShaders_GetCloudDeck).

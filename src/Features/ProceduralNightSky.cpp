@@ -174,7 +174,7 @@ float ProceduralNightSky::GetAuroraVisibility(const RE::Sky* a_sky)
 
 	float timeWeight = 1.0f;
 	if (!current->data.flags.any(RE::TESWeather::WeatherDataFlag::kPermAurora)) {
-		const float hour = a_sky->currentGameHour;
+		const float hour = Util::VisualClock::SkyHour(a_sky);
 		const float inStart = a_sky->auroraInStart;
 		const float inEnd = a_sky->auroraIn;
 		const float outStart = a_sky->auroraOutStart;

@@ -1,4 +1,5 @@
 #include "HistogramAutoExposure.h"
+#include "Utils/VisualClock.h"
 
 #include "Features/LinearLighting.h"
 #include "Features/PhysicalSky.h"
@@ -69,7 +70,7 @@ HistogramAutoExposure::ExposureParameters HistogramAutoExposure::GetExposurePara
 	};
 	float night = 0.f, interior = 0.f;
 	if (const auto* sky = RE::Sky::GetSingleton()) {
-		const float hour = sky->currentGameHour;
+		const float hour = Util::VisualClock::SkyHour(sky);
 		night = hour < 5.f ? 1.f : hour < 7.f ? 1.f - smooth(5.f, 7.f, hour) : hour < 19.f ? 0.f : hour < 21.f ? smooth(19.f, 21.f, hour) : 1.f;
 	}
 	if (const auto* player = RE::PlayerCharacter::GetSingleton()) {

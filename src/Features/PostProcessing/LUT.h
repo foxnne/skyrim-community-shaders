@@ -60,6 +60,7 @@ struct LUT : PostProcessFeature
 	virtual void LoadSettings(json&) override;
 	virtual void SaveSettings(json&) override;
 	void UpdateTexture();
+	virtual void ReleaseIdleResources() override;
 
 	virtual void DrawSettings() override;
 	void inline Clear()

@@ -819,7 +819,7 @@ bool PhysicalSky::EnsureVoxelTraceResources()
 		texVoxelTraceMotion = CreateCloudTexture(lowW, lowH, DXGI_FORMAT_R16G16B16A16_FLOAT, "PhysicalSky::VoxelTraceMotion");
 		texVoxelTraceLightning = CreateCloudTexture(lowW, lowH, DXGI_FORMAT_R16G16_FLOAT, "PhysicalSky::VoxelTraceLightning");
 	} catch (const std::exception& e) {
-		logger::error("[PhysicalSky] Failed to create the voxel cloud trace targets ({}), voxel clouds stay off for this session", e.what());
+		logger::error("[PhysicalSky] Failed to create the voxel cloud trace targets ({}), the voxel pass is skipped for this session", e.what());
 		ReleaseVoxelTraceResources();
 		voxelTraceResourcesFailed = true;
 		return false;

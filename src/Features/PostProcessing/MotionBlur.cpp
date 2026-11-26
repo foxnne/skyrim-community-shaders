@@ -229,8 +229,9 @@ void MotionBlur::Draw(TextureInfo& inout_tex)
 				return;
 		}
 
-		// Check for resize and update resources if needed
-		CheckAndResizeResources(inout_tex);
+		// Check for resize and (re)create the grid textures; stop if they could not be made.
+		if (!CheckAndResizeResources(inout_tex))
+			return;
 		lastDrawFrame = globals::state->frameCount;
 
 		// Compute dynamic resolution dimensions for dispatch (without overwriting lastWidth/lastHeight
@@ -274,9 +275,10 @@ bool MotionBlur::CheckAndResizeResources(const TextureInfo& inout_tex)
 		uint32_t width = texDesc.Width;
 		uint32_t height = texDesc.Height;
 
-		// Check if dimensions changed
-		if (width == lastWidth && height == lastHeight && verticalPassTexture) {
-			return false;
+		// Nothing to do: the grid textures exist for this size. (The return value says whether the
+		// resources are usable, so Draw can stop when an allocation fails.)
+		if (width == lastWidth && height == lastHeight && horizontalPassTexture && verticalPassTexture && neighborMaxTexture) {
+			return true;
 		}
 
 		// Update tracking

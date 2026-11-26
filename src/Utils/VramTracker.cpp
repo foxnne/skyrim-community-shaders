@@ -11,6 +11,7 @@
 #include <intrin.h>
 #include <format>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <nlohmann/json.hpp>
@@ -370,6 +371,33 @@ namespace VramTracker
 		}
 	}
 
+	namespace
+	{
+		struct NameRow
+		{
+			int64_t bytes;
+			int cat;
+			std::string name;
+		};
+		constexpr size_t kNameRowsMax = 1024;
+		constexpr int64_t kNameMinBytes = 1024 * 1024;
+
+		void WriteNames(const std::filesystem::path& a_path, std::vector<NameRow>& a_rows, size_t a_skipped)
+		{
+			constexpr double kMB = 1.0 / (1024.0 * 1024.0);
+			std::sort(a_rows.begin(), a_rows.end(), [](const NameRow& a, const NameRow& b) { return a.bytes > b.bytes; });
+			int64_t namedBytes = 0, unnamedBytes = 0;
+			for (const auto& row : a_rows)
+				(row.name.empty() ? unnamedBytes : namedBytes) += row.bytes;
+			std::ofstream names(a_path, std::ios::trunc);
+			names << std::format("# live tracked targets >= {} MB: {} listed, {} beyond the cap, named {:.1f} MB, unnamed {:.1f} MB\n",
+				kNameMinBytes / (1024 * 1024), a_rows.size(), a_skipped, namedBytes * kMB, unnamedBytes * kMB);
+			names << "# MB\tcategory\tname\n";
+			for (const auto& row : a_rows)
+				names << std::format("{:.1f}\t{}\t{}\n", row.bytes * kMB, kCatNames[row.cat], row.name.empty() ? "<unnamed>" : row.name);
+		}
+	}
+
 	void OnPresent()
 	{
 		if (!g_active)
@@ -464,37 +492,32 @@ namespace VramTracker
 		std::ofstream out(g_outPath, std::ios::app);
 		out << j.dump() << '\n';
 
-		// Every ten seconds: the live targets, UAV textures, volumes and UAV buffers by debug name and size, largest
-		// first, so a target can be attributed by name and not only by module and call site.
+		// Every 30 s: the live targets, UAV textures, volumes and UAV buffers by debug name and size, largest first,
+		// so a target can be attributed by name and not only by module and call site. The snapshot under the mutex
+		// is a bounded copy of (bytes, category, name); sorting and the file write run on a helper thread.
 		static auto lastNames = clock::now() - std::chrono::seconds(60);
-		if (now - lastNames >= std::chrono::seconds(10)) {
+		static std::atomic_bool namesBusy = false;
+		if (now - lastNames >= std::chrono::seconds(30) && !namesBusy.exchange(true)) {
 			lastNames = now;
-			struct Row
-			{
-				int64_t bytes;
-				int cat;
-				std::string name;
-			};
-			std::vector<Row> rows;
+			std::vector<NameRow> rows;
+			size_t skipped = 0;
 			{
 				std::lock_guard lock(g_liveMutex);
-				rows.reserve(g_live.size());
-				for (const Tag* tag : g_live)
+				rows.reserve(std::min(g_live.size(), kNameRowsMax));
+				for (const Tag* tag : g_live) {
+					if (tag->bytes < kNameMinBytes)
+						continue;
+					if (rows.size() >= kNameRowsMax) {
+						++skipped;
+						continue;
+					}
 					rows.push_back({ tag->bytes, tag->cat, tag->name });
+				}
 			}
-			std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.bytes > b.bytes; });
-			int64_t namedBytes = 0, unnamedBytes = 0;
-			for (const auto& row : rows)
-				(row.name.empty() ? unnamedBytes : namedBytes) += row.bytes;
-			std::ofstream names(g_outPath.parent_path() / "VramTrackNames.txt", std::ios::trunc);
-			names << std::format("# live tracked targets >= {} KB: {} entries, named {:.1f} MB, unnamed {:.1f} MB\n", kLiveMinBytes / 1024, rows.size(), namedBytes * kMB, unnamedBytes * kMB);
-			names << "# MB\tcategory\tname\n";
-			size_t listed = 0;
-			for (const auto& row : rows) {
-				if (listed++ >= 400)
-					break;
-				names << std::format("{:.1f}\t{}\t{}\n", row.bytes * kMB, kCatNames[row.cat], row.name.empty() ? "<unnamed>" : row.name);
-			}
+			std::thread([rows = std::move(rows), skipped, path = g_outPath.parent_path() / "VramTrackNames.txt"]() mutable {
+				WriteNames(path, rows, skipped);
+				namesBusy = false;
+			}).detach();
 		}
 	}
 

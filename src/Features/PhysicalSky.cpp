@@ -2148,8 +2148,9 @@ bool PhysicalSky::ShadersOK()
 								   texVolCubeAux && texVolCubeHistoryTr && texVolCubeHistoryLum && texVolCubeHistoryAux &&
 								   texVolCubeTraceTr && texVolCubeTraceLum && texVolCubeTraceAux &&
 								   texShadowVolume && baseShapeNoiseSrv && cloudProfileLutSrv && cloudAdjustmentLutSrv && ndfReady && cirrusMapsReady);
-	// The voxel trace targets are created on first use (EnsureVoxelTraceResources), so only the shaders gate readiness.
-	const bool voxelShadersOk = !voxelCloudManager.Count() || (cloudDispatchCb && csVoxelView && csVoxelLighting && csVolCubemapVoxel && csVolShadowVoxel && csCloudShadowMeanVoxel && !voxelTraceResourcesFailed);
+	// The voxel trace targets are created on first use (EnsureVoxelTraceResources); a failure there only skips the
+	// voxel pass and must not gate the sky as a whole, so only the shaders count here.
+	const bool voxelShadersOk = !voxelCloudManager.Count() || (cloudDispatchCb && csVoxelView && csVoxelLighting && csVolCubemapVoxel && csVolShadowVoxel && csCloudShadowMeanVoxel);
 	return baseShadersOk && volumetricShadersOk && voxelShadersOk;
 }
 

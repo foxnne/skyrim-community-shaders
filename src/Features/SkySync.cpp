@@ -247,9 +247,10 @@ void SkySync::OnSkyUpdateColors(RE::Sky* sky)
 		return;
 	}
 
-	// Scaled by the night weight, so a glare graded to black part way through the blend cannot cut the light at once
-	const bool moonsHidden = lightNightWeight > 0.0f && globals::features::effects11.enableEffect && sky->skyColor[RE::TESWeather::ColorTypes::kMoonGlare] == RE::NiColor{};
-	const float moonsVisible = moonsHidden ? 1.0f - lightNightWeight : 1.0f;
+	// Continuous in both the night weight and the glare, so neither the blend nor a glare graded down to black cuts the light at once
+	const float moonsVisible = globals::features::effects11.enableEffect ?
+	                               GetNightMoonVisibility(sky->skyColor[RE::TESWeather::ColorTypes::kMoonGlare], lightNightWeight) :
+	                               1.0f;
 
 	auto& dirLight = sky->skyColor[static_cast<uint>(RE::TESWeather::ColorTypes::kSunlight)];
 	// Lightning strikes from overhead rather than the caster, so only the light under the flash is dimmed
@@ -495,8 +496,7 @@ bool SkySync::Update(const RE::Sky* sky)
 	const Caster previousTarget = shadowFader.target;
 	shadowFader.Update(sky, directions, intensities, settings.ShadowTransitionDuration, fadeAdvance, transitionCompleted || resetTransition);
 	// After the fader, so the fade knows whether a moon is the caster this frame
-	auto isMoon = [](Caster c) { return c == Caster::Masser || c == Caster::Secunda; };
-	UpdateMoonlightFade(fadeAdvance / SecondsPerGameHour, std::exchange(moonlightSnapPending, false) || resetTransition, !isMoon(previousTarget));
+	UpdateMoonlightFade(fadeAdvance / SecondsPerGameHour, std::exchange(moonlightSnapPending, false) || resetTransition, previousTarget);
 	// A finished caster fade counts as a completed transition, so cached shadows (terrain) refresh to the new caster.
 	// A swap can also start and finish in one update (zero duration), so a changed target counts too.
 	const bool casterSettled = (wasTransitioning || shadowFader.target != previousTarget) && !shadowFader.transitioning;
@@ -543,7 +543,7 @@ float SkySync::GetHorizonDim(float heightAboveHorizon) const
 	return std::clamp(heightAboveHorizon / fadeRadians, 0.0f, 1.0f);
 }
 
-void SkySync::UpdateMoonlightFade(float advanceHours, bool snap, bool noMoonBefore)
+void SkySync::UpdateMoonlightFade(float advanceHours, bool snap, Caster previousTarget)
 {
 	// The fade starts when a moon actually lights the scene, not at the sun's handover. Counted from the handover,
 	// it was already spent when a moon rose or faded in later, which then popped in at the caster swap's speed
@@ -562,9 +562,12 @@ void SkySync::UpdateMoonlightFade(float advanceHours, bool snap, bool noMoonBefo
 	} else if (snap) {
 		// Only a game load or a new space; a long scrub or time jump still ramps from zero
 		moonlightFade = 1.0f;
-	} else if (noMoonBefore) {
-		// First frame with a moon caster: none of this update's elapsed time belongs to it
-		moonlightOut = std::max(moonlightOut, lastLightLevel);
+	} else if (shadowFader.target != previousTarget) {
+		// First frame of a new moon caster, from the zenith or the other moon: none of this update's elapsed time
+		// belongs to it. The old caster's light is kept on and faded out, but never daylight: nothing carries over
+		// from the sun, and the carry-over is capped like the moonlight, which is zero at the sun's handover.
+		const bool fromNight = previousTarget != Caster::Sun;
+		moonlightOut = std::max(moonlightOut, fromNight ? std::min(lastLightLevel, twilightCap) : 0.0f);
 		moonlightFade = 0.0f;
 	} else {
 		moonlightFade = std::min(moonlightFade + step, 1.0f);

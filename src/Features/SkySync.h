@@ -98,6 +98,18 @@ public:
 	/** @brief How far this frame's sunlight was blended to the night colour, 0 to 1, so light grading can follow it; above 0 only while the sun is below the horizon. */
 	float GetLightNightWeight() const { return lightNightWeight; }
 
+	/**
+	 * @brief Share of the night light kept for a weather whose moon glare is at or near black (it hides the moons).
+	 * Fades smoothly with the glare's brightness near zero and with the night weight, so it never switches in one update.
+	 */
+	static float GetNightMoonVisibility(const RE::NiColor& moonGlare, float nightWeight)
+	{
+		const float glare = std::max({ moonGlare.red, moonGlare.green, moonGlare.blue, 0.0f });
+		const float shown = std::clamp(glare / HiddenMoonGlareThreshold, 0.0f, 1.0f);
+		const float hidden = 1.0f - shown * shown * (3.0f - 2.0f * shown);
+		return 1.0f - std::clamp(nightWeight, 0.0f, 1.0f) * hidden;
+	}
+
 	/** @brief Installs rendering hooks and detects conflicting mods after plugin load. */
 	virtual void PostPostLoad() override;
 	/** @brief Checks for conflicting ESP files after game data is loaded. */
@@ -226,6 +238,7 @@ private:
 	static constexpr float NorthernSunAngle = 90.0f + 35.0f;
 	static constexpr float VanillaSunAngle = 90.0f + 5.0f;
 	static constexpr float SecondsPerGameHour = 3600.0f;
+	static constexpr float HiddenMoonGlareThreshold = 4.0f / 255.0f;  // glare at or above this counts as showing the moons
 	static constexpr float AlignmentFadeStartAngle = 2.0f;
 	static constexpr float AlignmentFadeEndAngle = 15.0f;
 	static constexpr float ShadowDirectionHoldAngle = 0.0f;  // fork: no hold. 0.1 made shadows step every ~1.2 s at timescale 20 (user 2026-11-25); shimmer is handled by the 4096 shadow map
@@ -307,9 +320,9 @@ private:
 	 * @brief Ramps moonlightFade in from zero over the fade duration once a moon is the caster, never above twilightCap,
 	 * and fades moonlightOut, the light kept on from before that moon took over.
 	 * @param snap Game load or new space: set the fade at once.
-	 * @param noMoonBefore The caster before this update's fader step was not a moon.
+	 * @param previousTarget The caster before this update's fader step; any change to a moon restarts the ramp.
 	 */
-	void UpdateMoonlightFade(float advanceHours, bool snap, bool noMoonBefore);
+	void UpdateMoonlightFade(float advanceHours, bool snap, Caster previousTarget);
 
 	/** @brief Upper bound on moonlight: zero at the sun's handover, rising over the moonlight fade duration after sunset and falling with the sun's depth before sunrise. */
 	float GetTwilightCap(const RE::TESClimate::Timing& timing, float hour, float sunHeight) const;

@@ -86,6 +86,8 @@ namespace TreeShapes
 	{
 		float playerX = 0.0f, playerY = 0.0f;
 		float ringDistance[3] = { 100000.0f, 180500.0f, 327680.0f };
+		RE::FormID worldSpace = 0;  // the worldspace the player stands in; records of another one are freed
+		bool interior = false;      // the player is in an interior: no LOD is drawn, and the position tests wait
 		bool valid = false;
 	};
 
@@ -178,9 +180,11 @@ namespace TreeShapes
 	 *   [5 + i] branch weight, flutter weight (or minus the strand's free length in root units), strand swing
 	 *           parameter, phase id / 128 of vertex i
 	 *
-	 * A shape's data is keyed by its content (the tree's model, the shape's place in it, its vertex count and three of
-	 * its positions), so a tree loaded again after its cell unloaded finds its data instead of being measured again,
-	 * and two copies alive at once share one buffer.
+	 * The data of a tree is one record, keyed by the whole tree (its model, its bespoke profile and every shape under
+	 * its root with name, counts and place); each shape in it is identified by name, counts, place and the hash of all
+	 * its positions. A tree loaded again after its cell unloaded finds its record instead of being measured again, two
+	 * copies alive at once share one, and a record is built, kept and freed as a whole, so a tree never sways in parts.
+	 * A tree with a bespoke profile is never served from a record: it is measured and mask-matched on its own vertices.
 	 */
 	class NearTrees
 	{
@@ -188,15 +192,19 @@ namespace TreeShapes
 		/**
 		 * @brief Returns the bend data for a shape of the tree under a_root, built for the whole tree on first sight.
 		 * @param a_bespoke Set when the data is that of a bespoke tree (other buffer layout, other shader path).
-		 * @return nullptr for a tree left still: shorter than a_minHeight, engine-animated (skinned) or unreadable.
+		 * @return nullptr for a tree left still: shorter than a_minHeight, engine-animated (skinned) or unreadable,
+		 * or not measured yet because the frame's build time, the memory budget or the shape cap is spent.
 		 */
 		ID3D11ShaderResourceView* Get(RE::BSGeometry* a_geometry, RE::NiNode* a_root, uint a_frame, float a_minHeight, const BespokeProfiles& a_profiles, bool& a_bespoke);
 
+		/** @brief Video memory the records may hold. At or above it no new tree is measured until the sweep frees room. */
+		void SetBudget(uint64_t a_bytes);
+
 		/**
-		 * @brief Frees the bend data of shapes not drawn for a while, then the least recently drawn until the buffers
-		 * fit a_budgetBytes. Data drawn in the last few frames is never freed for the budget.
+		 * @brief Frees the records of trees not drawn for a while, then the least recently drawn until the buffers fit
+		 * the budget. A record drawn in the last few frames is never freed for the budget.
 		 */
-		void Evict(uint a_frame, uint64_t a_budgetBytes);
+		void Evict(uint a_frame);
 
 		/** @brief Frees all bend data, so it is rebuilt with new settings. */
 		void Clear();
@@ -207,44 +215,55 @@ namespace TreeShapes
 		/** @brief Shapes that move with a bespoke profile (counted in Count too). */
 		size_t BespokeCount() const { return bespokeCount; }
 
-		/** @brief Video memory held by the bend data of loaded trees. */
-		uint64_t Bytes() const { return sharedBytes; }
+		/** @brief Video memory held by the bend data of loaded trees, every live record counted. */
+		uint64_t Bytes() const { return treeBytes; }
 
 	private:
-		struct Entry
+		// The data of one shape of a tree record; srv is null for a shape the measurement left still
+		struct Shape
 		{
-			winrt::com_ptr<ID3D11ShaderResourceView> srv;  // nullptr for a shape checked once and left still
-			uint32_t vertexCount = 0;
-			float firstVertex[3]{};
-			uint lastFrame = 0;
-			uint64_t signature = 0;
-			bool bespoke = false;  // srv holds bespoke data
+			uint64_t id = 0;  // NearShapeId
+			winrt::com_ptr<ID3D11Buffer> buffer;
+			winrt::com_ptr<ID3D11ShaderResourceView> srv;
 		};
 
-		// One buffer per distinct shape content; the entries of the game's copies of the shape point at it
-		struct Shared
+		// One record per tree, built and freed as a whole. Its bytes are counted in treeBytes until the last
+		// reference (the map or an entry) lets go of it.
+		struct Tree
 		{
-			winrt::com_ptr<ID3D11Buffer> buffer;
-			winrt::com_ptr<ID3D11ShaderResourceView> srv;  // nullptr for a shape left still
+			std::vector<Shape> shapes;
 			uint64_t bytes = 0;
 			uint lastFrame = 0;
 			bool bespoke = false;
+			uint64_t* accounted = nullptr;
+			~Tree();
 		};
 
-		void Build(RE::NiNode* a_root, uint64_t a_modelHash, uint a_frame, float a_minHeight, const BespokeProfiles& a_profiles);
-		void Forget(const Entry& a_entry);
-		void Store(uint64_t a_signature, Shared a_record);
-		void Drop(uint64_t a_signature);
+		struct Entry
+		{
+			std::shared_ptr<Tree> tree;               // null for a shape remembered as still without a record
+			ID3D11ShaderResourceView* srv = nullptr;  // owned by tree; nullptr for a shape left still
+			uint32_t vertexCount = 0;
+			float firstVertex[3]{};
+			uint lastFrame = 0;
+			uint64_t treeKey = 0;
+			bool bespoke = false;  // srv holds bespoke data
+		};
 
-		std::unordered_map<const void*, Entry> entries;  // key = the shape's vertex buffer
-		std::unordered_map<uint64_t, Shared> shared;     // key = the shape's content signature
-		uint64_t sharedBytes = 0;
+		void Build(RE::NiNode* a_root, uint64_t a_treeKey, const BespokeProfile* a_profile, uint a_frame, float a_minHeight);
+		void Forget(const Entry& a_entry);
+		void DropEntriesOf(uint64_t a_treeKey);
+
+		uint64_t treeBytes = 0;  // declared before the maps: their records subtract from it as they go
+		std::unordered_map<const void*, Entry> entries;             // key = the shape's vertex buffer
+		std::unordered_map<uint64_t, std::shared_ptr<Tree>> trees;  // key = NearTreeKey
+		uint64_t budgetBytes = UINT64_MAX;
 		size_t swayCount = 0;
 		size_t bespokeCount = 0;
 		std::unordered_set<std::string> warnedModels;  // profiles whose mask does not fit the loaded mesh, logged once
 		uint budgetFrame = 0;
 		int64_t budgetSpentNs = 0;
-		uint64_t builtTrees = 0, loggedBuiltTrees = 0, reusedShapes = 0, loggedReusedShapes = 0;
+		uint64_t builtTrees = 0, loggedBuiltTrees = 0, reusedShapes = 0, loggedReusedShapes = 0, refusedTrees = 0, loggedRefusedTrees = 0;
 		int64_t buildNs = 0, loggedBuildNs = 0;
 		// Scratch for Evict, kept so the sweep allocates nothing
 		std::vector<std::pair<uint, uint64_t>> evictOrder;
@@ -284,19 +303,26 @@ namespace TreeShapes
 		 */
 		ID3D11ShaderResourceView* GetCrownData(RE::BSGeometry* a_geometry, uint a_frame, float& a_weight) const;
 
+		/** @brief Video memory the records may hold. At or above it no new shape is built until the sweep frees room. */
+		void SetBudget(uint64_t a_bytes);
+
+		/** @brief The worldspace new records belong to; records of another worldspace are freed by Evict. */
+		void SetWorldSpace(RE::FormID a_worldSpace);
+
 		/**
-		 * @brief Frees the data of LOD blocks outside the loaded rings (a_bounds, when valid), of shapes not drawn for
-		 * a while, and the blocks left without shapes; then the least recently drawn data until the buffers fit
-		 * a_budgetBytes. Data drawn in the last few frames is never freed for the budget.
+		 * @brief Frees the data of LOD blocks outside the loaded rings or in another worldspace (a_bounds, when valid
+		 * and not in an interior; never anything drawn since the last sweep), of shapes not drawn for a while, and the
+		 * blocks left without shapes; then the least recently drawn data until the buffers fit the budget. Data drawn in
+		 * the last few frames is never freed for the budget.
 		 */
-		void Evict(uint a_frame, const LodBounds& a_bounds, uint64_t a_budgetBytes);
+		void Evict(uint a_frame, const LodBounds& a_bounds);
 
 		/** @brief Frees all bend data, so it is rebuilt with new settings. */
 		void Clear();
 
 		size_t Count() const { return entries.size(); }
 
-		/** @brief Video memory held by the bend and crown data of tree LOD. */
+		/** @brief Video memory held by the bend and crown data of tree LOD, every live record counted. */
 		uint64_t Bytes() const { return sharedBytes; }
 
 		struct TrunkCard
@@ -318,24 +344,10 @@ namespace TreeShapes
 		};
 
 	private:
-		struct Entry
-		{
-			winrt::com_ptr<ID3D11ShaderResourceView> srv;  // nullptr for a shape checked once and left still
-			uint32_t vertexCount = 0;
-			float firstVertex[3]{};
-			uint lastFrame = 0;
-			uint64_t blockKey = 0;
-			uint64_t signature = 0;
-			uint32_t generation = 0;
-			bool crown = false;
-			winrt::com_ptr<ID3D11ShaderResourceView> crownSrv;  // nullptr without crown data
-			bool crownFade = false;                             // the shape was drawn without crown data before the build
-			uint crownFadeFrame = 0;                            // ... and this is the frame the data arrived
-		};
-
 		// Bend data by shape content. The game re-creates the render data of object LOD shapes (new vertex buffer,
 		// same vertices) whenever the loaded cell grid moves, so the data built for the old buffer is reused. The
-		// record owns the buffers; its entries hold views of them.
+		// record owns the buffers and is counted in sharedBytes until the last reference (the map or an entry) lets
+		// go of it, so a record replaced by a rebuild stays counted while a stale entry still draws from it.
 		struct Shared
 		{
 			winrt::com_ptr<ID3D11Buffer> buffer;
@@ -347,18 +359,36 @@ namespace TreeShapes
 			uint64_t bytes = 0;
 			float blockX = 0.0f, blockY = 0.0f;  // world position of the block's origin
 			float worldScale = 4.0f;             // 4, 8 or 16: the LOD level of the block
+			RE::FormID worldSpace = 0;           // the worldspace the block belongs to, 0 unknown
+			uint64_t* accounted = nullptr;
+			~Shared();
 		};
 
-		void Store(uint64_t a_signature, Shared a_record);
-		void Drop(uint64_t a_signature);
+		struct Entry
+		{
+			std::shared_ptr<Shared> record;  // the data drawn with; its srv is nullptr for a shape checked once and left still
+			ID3D11ShaderResourceView* Srv() const { return record ? record->srv.get() : nullptr; }
+			ID3D11ShaderResourceView* CrownSrv() const { return record ? record->crownSrv.get() : nullptr; }
+			uint32_t vertexCount = 0;
+			float firstVertex[3]{};
+			uint lastFrame = 0;
+			uint64_t blockKey = 0;
+			uint64_t signature = 0;
+			uint32_t generation = 0;
+			bool crown = false;
+			bool crownFade = false;   // the shape was drawn without crown data before the build
+			uint crownFadeFrame = 0;  // ... and this is the frame the data arrived
+		};
 
-		std::unordered_map<uint64_t, Block> blocks;      // key = the block's world translate
-		std::unordered_map<const void*, Entry> entries;  // key = the shape's vertex buffer
-		std::unordered_map<uint64_t, Shared> shared;     // key = the shape's content signature
-		std::unordered_set<const void*> waiting;         // vertex buffers of crowns drawn without crown data so far
-		uint64_t sharedBytes = 0;
+		uint64_t sharedBytes = 0;  // declared before the maps: their records subtract from it as they go
+		std::unordered_map<uint64_t, Block> blocks;                    // key = the block's world translate
+		std::unordered_map<const void*, Entry> entries;                // key = the shape's vertex buffer
+		std::unordered_map<uint64_t, std::shared_ptr<Shared>> shared;  // key = the shape's content signature
+		std::unordered_set<const void*> waiting;                       // vertex buffers of crowns drawn without crown data so far
+		uint64_t budgetBytes = UINT64_MAX;
+		RE::FormID worldSpace = 0;
 		uint64_t builtCount = 0, reusedCount = 0, loggedBuilt = 0, loggedReused = 0;
-		uint64_t unloadedCount = 0, loggedUnloaded = 0, budgetCount = 0, loggedBudget = 0;
+		uint64_t unloadedCount = 0, loggedUnloaded = 0, budgetCount = 0, loggedBudget = 0, refusedCount = 0, loggedRefused = 0, otherWorldCount = 0;
 		// Builds scan every vertex of a merged LOD shape on the render thread. When the LOD grid moves, hundreds of
 		// shapes arrive in one frame, so only a few milliseconds of builds run per frame and the rest wait
 		// (drawn with their previous data, or still) for the following frames.

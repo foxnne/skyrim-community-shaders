@@ -42,6 +42,11 @@ namespace TreeShapes
 		constexpr int kNearTreeDepth = 8;
 		// Data drawn within this many frames is never freed for the memory budget: it would be rebuilt next frame
 		constexpr uint kBudgetGraceFrames = 120;
+		// Data drawn within this many frames is resident whatever the position test says: the LOD sweep runs once a
+		// second, so a block drawn since the last sweep is never freed on the strength of a distance alone
+		constexpr uint kResidentFrames = 60;
+		// Most loaded tree shapes with bend data at once: past it (or the memory budget) new trees are not measured
+		constexpr size_t kMaxNearShapes = 4096;
 		// Side of an object LOD block in world units per unit of its scale: a LOD4 block (scale 4) is 4 x 4 cells
 		constexpr float kBlockSideAtScale1 = 4096.0f;
 
@@ -731,9 +736,11 @@ namespace TreeShapes
 	{
 		struct NearShape
 		{
+			RE::BSGeometry* geometry = nullptr;
 			VertexView vertices;
 			RE::NiTransform toRoot;            // shape space -> tree root space
 			std::vector<RE::NiPoint3> points;  // vertices in tree root space
+			uint64_t positionHash = 0;         // VertexView::PositionHash, for the shape id and the bespoke mask
 		};
 
 		// Shape space -> tree root space, or false when the root is not within kNearTreeDepth above the shape
@@ -749,6 +756,34 @@ namespace TreeShapes
 			return false;
 		}
 
+		uint64_t FnvString(const char* a_text)
+		{
+			uint64_t h = 0xcbf29ce484222325ull;
+			for (const char* c = a_text; c && *c; ++c) {
+				h ^= static_cast<unsigned char>(*c);
+				h *= 0x100000001b3ull;
+			}
+			return h;
+		}
+
+		void MixHash(uint64_t& a_hash, uint64_t a_value)
+		{
+			a_hash ^= a_value;
+			a_hash *= 0x100000001b3ull;
+			a_hash ^= a_hash >> 29;
+		}
+
+		void MixTransform(uint64_t& a_hash, const RE::NiTransform& a_transform)
+		{
+			uint32_t bits[13];
+			static_assert(sizeof(a_transform.rotate) == sizeof(float) * 9 && sizeof(a_transform.translate) == sizeof(float) * 3);
+			std::memcpy(bits, &a_transform.rotate, sizeof(float) * 9);
+			std::memcpy(bits + 9, &a_transform.translate, sizeof(float) * 3);
+			std::memcpy(bits + 12, &a_transform.scale, sizeof(float));
+			for (const auto b : bits)
+				MixHash(a_hash, b);
+		}
+
 		// FNV-1a 64 of the model path of the reference under a_root (the root's name when there is none): the tree
 		// the bend data belongs to
 		uint64_t ModelHash(RE::NiNode* a_root)
@@ -758,41 +793,55 @@ namespace TreeShapes
 			const auto model = base ? base->As<RE::TESModel>() : nullptr;
 			const char* path = model ? model->GetModel() : nullptr;
 			const char* rootName = a_root ? a_root->name.c_str() : nullptr;
-			const std::string key = path && *path ? NormalizeModelPath(path) : std::string(rootName ? rootName : "");
+			return FnvString(path && *path ? NormalizeModelPath(path).c_str() : (rootName ? rootName : ""));
+		}
+
+		// Identity of one shape within a tree record: its name, vertex and triangle counts, place in the tree and
+		// every vertex position. Two shapes with different vertices never share a record slot.
+		uint64_t NearShapeId(RE::BSGeometry* a_geometry, const RE::NiTransform& a_toRoot, const VertexView& a_vertices, uint64_t a_positionHash)
+		{
 			uint64_t h = 0xcbf29ce484222325ull;
-			for (const unsigned char c : key) {
-				h ^= c;
-				h *= 0x100000001b3ull;
-			}
+			MixHash(h, FnvString(a_geometry->name.c_str()));
+			MixHash(h, a_vertices.count);
+			const auto triShape = a_geometry->AsTriShape();
+			MixHash(h, triShape ? triShape->GetTrishapeRuntimeData().triangleCount : 0u);
+			MixTransform(h, a_toRoot);
+			MixHash(h, a_positionHash);
 			return h;
 		}
 
-		// Identity of a loaded tree shape by content: the tree's model, where the shape sits in it, its vertex count and
-		// three of its positions. The same when the game loads the tree again (new vertex buffer, same mesh), and
-		// different for two trees that share a shape mesh at different heights.
-		uint64_t NearSignature(uint64_t a_modelHash, const RE::NiTransform& a_toRoot, const VertexView& a_vertices)
+		void MixTreeShapes(RE::NiNode* a_root, RE::NiNode* a_node, int a_depth, uint64_t& a_hash)
 		{
-			uint64_t h = 0xcbf29ce484222325ull ^ a_modelHash;
-			const auto mix = [&h](uint64_t a_value) {
-				h ^= a_value;
-				h *= 0x100000001b3ull;
-				h ^= h >> 29;
-			};
-			uint32_t bits[13];
-			static_assert(sizeof(a_toRoot.rotate) == sizeof(float) * 9 && sizeof(a_toRoot.translate) == sizeof(float) * 3);
-			std::memcpy(bits, &a_toRoot.rotate, sizeof(float) * 9);
-			std::memcpy(bits + 9, &a_toRoot.translate, sizeof(float) * 3);
-			std::memcpy(bits + 12, &a_toRoot.scale, sizeof(float));
-			for (const auto b : bits)
-				mix(b);
-			mix(a_vertices.count);
-			for (const uint32_t index : { 0u, a_vertices.count / 2, a_vertices.count - 1 }) {
-				const auto p = a_vertices(index);
-				uint32_t pb[3];
-				std::memcpy(pb, &p, sizeof(pb));
-				mix((static_cast<uint64_t>(pb[0]) << 32) | pb[1]);
-				mix(pb[2]);
+			static REL::Relocation<const RE::NiRTTI*> triShapeRTTI{ RE::BSTriShape::Ni_RTTI };
+			for (const auto& child : a_node->GetChildren()) {
+				if (!child)
+					continue;
+				if (auto geometry = child->AsGeometry()) {
+					if (geometry->GetRTTI() != triShapeRTTI.get())
+						continue;
+					MixHash(a_hash, FnvString(geometry->name.c_str()));
+					const auto& data = geometry->AsTriShape()->GetTrishapeRuntimeData();
+					MixHash(a_hash, data.vertexCount);
+					MixHash(a_hash, data.triangleCount);
+					MixHash(a_hash, geometry->GetGeometryRuntimeData().skinInstance ? 1u : 0u);
+					RE::NiTransform toRoot;
+					if (ShapeToRoot(geometry, a_root, toRoot))
+						MixTransform(a_hash, toRoot);
+				} else if (auto node = child->AsNode(); node && a_depth < kNearTreeDepth) {
+					MixTreeShapes(a_root, node, a_depth + 1, a_hash);
+				}
 			}
+		}
+
+		// Identity of a whole loaded tree: its model, its bespoke profile (if any) and every shape under its root
+		// with its name, counts and place. Trees sharing a shape mesh at another height, or under another profile,
+		// get other keys, so a record is only ever reused by a tree built exactly like it.
+		uint64_t NearTreeKey(RE::NiNode* a_root, uint64_t a_modelHash, const BespokeProfile* a_profile)
+		{
+			uint64_t h = 0xcbf29ce484222325ull;
+			MixHash(h, a_modelHash);
+			MixHash(h, a_profile ? FnvString(a_profile->name.c_str()) : 0u);
+			MixTreeShapes(a_root, a_root, 0, h);
 			return h;
 		}
 
@@ -815,6 +864,7 @@ namespace TreeShapes
 					if (geometry->GetRTTI() != triShapeRTTI.get())
 						continue;
 					NearShape shape;
+					shape.geometry = geometry;
 					if (!GetVertices(geometry, shape.vertices)) {
 						sways = false;
 						continue;
@@ -833,25 +883,31 @@ namespace TreeShapes
 		}
 	}
 
+	NearTrees::Tree::~Tree()
+	{
+		if (accounted)
+			*accounted -= bytes;
+	}
+
 	void NearTrees::Forget(const Entry& a_entry)
 	{
 		swayCount -= a_entry.srv != nullptr;
 		bespokeCount -= a_entry.srv != nullptr && a_entry.bespoke;
 	}
 
-	void NearTrees::Store(uint64_t a_signature, Shared a_record)
+	void NearTrees::SetBudget(uint64_t a_bytes)
 	{
-		Drop(a_signature);
-		sharedBytes += a_record.bytes;
-		shared.emplace(a_signature, std::move(a_record));
+		budgetBytes = a_bytes;
 	}
 
-	void NearTrees::Drop(uint64_t a_signature)
+	void NearTrees::DropEntriesOf(uint64_t a_treeKey)
 	{
-		if (const auto it = shared.find(a_signature); it != shared.end()) {
-			sharedBytes -= it->second.bytes;
-			shared.erase(it);
-		}
+		std::erase_if(entries, [&](const auto& a_entry) {
+			const bool gone = a_entry.second.treeKey == a_treeKey && a_entry.second.tree;
+			if (gone)
+				Forget(a_entry.second);
+			return gone;
+		});
 	}
 
 	ID3D11ShaderResourceView* NearTrees::Get(RE::BSGeometry* a_geometry, RE::NiNode* a_root, uint a_frame, float a_minHeight, const BespokeProfiles& a_profiles, bool& a_bespoke)
@@ -867,34 +923,48 @@ namespace TreeShapes
 			if (entry.vertexCount == vertices.count && entry.firstVertex[0] == firstVertex.x && entry.firstVertex[1] == firstVertex.y && entry.firstVertex[2] == firstVertex.z) {
 				entry.lastFrame = a_frame;
 				a_bespoke = entry.bespoke;
-				return entry.srv.get();
+				return entry.srv;
 			}
 			// The vertex buffer address was reused by another shape
 			Forget(entry);
 			entries.erase(it);
 		}
 
-		// The same shape with another vertex buffer (the tree loaded again, or a second copy of its mesh): its data
-		// is shared instead of measured again
-		RE::NiTransform toRoot;
+		// The record of a tree built exactly like this one (same model, profile and shapes): the tree loaded again, or
+		// a second copy of its mesh. A tree with a bespoke profile is never served from a record: it is measured
+		// afresh and its mask matched to its own vertices, so the hand-masked tree cannot inherit anything.
 		const uint64_t modelHash = ModelHash(a_root);
-		const uint64_t signature = ShapeToRoot(a_geometry, a_root, toRoot) ? NearSignature(modelHash, toRoot, vertices) : 0;
-		if (const auto record = signature != 0 ? shared.find(signature) : shared.end(); record != shared.end()) {
-			Entry reused;
-			reused.srv = record->second.srv;
-			reused.bespoke = record->second.bespoke;
-			reused.vertexCount = vertices.count;
-			reused.firstVertex[0] = firstVertex.x;
-			reused.firstVertex[1] = firstVertex.y;
-			reused.firstVertex[2] = firstVertex.z;
-			reused.lastFrame = a_frame;
-			reused.signature = signature;
-			record->second.lastFrame = a_frame;
-			swayCount += reused.srv != nullptr;
-			bespokeCount += reused.srv != nullptr && reused.bespoke;
-			++reusedShapes;
-			a_bespoke = reused.bespoke;
-			return entries.insert_or_assign(vertices.vertexBuffer, std::move(reused)).first->second.srv.get();
+		const BespokeProfile* profile = a_profiles.Find(a_root);
+		const uint64_t treeKey = NearTreeKey(a_root, modelHash, profile);
+		if (!profile) {
+			if (const auto treeIt = trees.find(treeKey); treeIt != trees.end()) {
+				const auto& tree = treeIt->second;
+				RE::NiTransform toRoot;
+				if (ShapeToRoot(a_geometry, a_root, toRoot)) {
+					const uint64_t shapeId = NearShapeId(a_geometry, toRoot, vertices, vertices.PositionHash());
+					for (const auto& shape : tree->shapes) {
+						if (shape.id != shapeId)
+							continue;
+						Entry reused;
+						reused.tree = tree;
+						reused.srv = shape.srv.get();
+						reused.bespoke = tree->bespoke;
+						reused.vertexCount = vertices.count;
+						reused.firstVertex[0] = firstVertex.x;
+						reused.firstVertex[1] = firstVertex.y;
+						reused.firstVertex[2] = firstVertex.z;
+						reused.lastFrame = a_frame;
+						reused.treeKey = treeKey;
+						tree->lastFrame = a_frame;
+						swayCount += reused.srv != nullptr;
+						bespokeCount += reused.srv != nullptr && reused.bespoke;
+						++reusedShapes;
+						a_bespoke = reused.bespoke;
+						return entries.insert_or_assign(vertices.vertexBuffer, std::move(reused)).first->second.srv;
+					}
+				}
+				// A shape the record does not know: the tree is measured again as a whole below
+			}
 		}
 
 		// Out of time this frame: the tree stands still until its turn
@@ -904,27 +974,32 @@ namespace TreeShapes
 		}
 		if (budgetSpentNs >= kNearBuildBudgetNs)
 			return nullptr;
+		// Past the memory budget or the shape cap nothing new is measured: the tree stands still until the sweep frees room
+		if (treeBytes >= budgetBytes || swayCount >= kMaxNearShapes) {
+			++refusedTrees;
+			return nullptr;
+		}
 
-		Build(a_root, modelHash, a_frame, a_minHeight, a_profiles);
+		Build(a_root, treeKey, profile, a_frame, a_minHeight);
 
 		if (auto it = entries.find(vertices.vertexBuffer); it != entries.end()) {
 			a_bespoke = it->second.bespoke;
-			return it->second.srv.get();
+			return it->second.srv;
 		}
 
-		// Not part of the tree as measured (for example a skinned shape): remembered as still
+		// Not part of the tree as measured (for example a skinned shape): remembered as still, without a record
 		Entry still;
 		still.vertexCount = vertices.count;
 		still.firstVertex[0] = firstVertex.x;
 		still.firstVertex[1] = firstVertex.y;
 		still.firstVertex[2] = firstVertex.z;
 		still.lastFrame = a_frame;
-		still.signature = signature;
+		still.treeKey = treeKey;
 		entries.insert_or_assign(vertices.vertexBuffer, std::move(still));
 		return nullptr;
 	}
 
-	void NearTrees::Build(RE::NiNode* a_root, uint64_t a_modelHash, uint a_frame, float a_minHeight, const BespokeProfiles& a_profiles)
+	void NearTrees::Build(RE::NiNode* a_root, uint64_t a_treeKey, const BespokeProfile* a_profile, uint a_frame, float a_minHeight)
 	{
 		ZoneScopedN("TreeWind::BuildNearTree");
 		const auto start = std::chrono::steady_clock::now();
@@ -981,24 +1056,22 @@ namespace TreeShapes
 			crownRadius = std::sqrt(radiusSq);
 		}
 
+		// Every shape's identity in the record: the position hash is also what the bespoke mask is matched by
+		for (auto& shape : shapes)
+			shape.positionHash = shape.vertices.PositionHash();
+
 		// A bespoke tree needs a mask for every shape, made for exactly these vertices (same count, same positions in
 		// the same order); with another version of the mesh it sways like any other tree
-		const BespokeProfile* profile = sways ? a_profiles.Find(a_root) : nullptr;
+		const BespokeProfile* profile = sways ? a_profile : nullptr;
 		std::vector<const uint8_t*> masks(shapes.size(), nullptr);
 		if (profile) {
 			size_t matched = 0;
 			for (size_t s = 0; s < shapes.size(); ++s) {
 				const auto& vertices = shapes[s].vertices;
-				uint64_t hash = 0;
-				bool hashed = false;
 				for (const auto& candidate : profile->mask) {
 					if (candidate.vertexCount != vertices.count || candidate.rgba.size() != static_cast<size_t>(vertices.count) * 4)
 						continue;
-					if (!hashed) {
-						hash = vertices.PositionHash();
-						hashed = true;
-					}
-					if (candidate.positionHash == hash) {
+					if (candidate.positionHash == shapes[s].positionHash) {
 						masks[s] = candidate.rgba.data();
 						++matched;
 						break;
@@ -1014,52 +1087,16 @@ namespace TreeShapes
 		}
 		const bool bespoke = profile != nullptr;
 
-		// a_signature 0: a shape that does not reach the root, remembered by its vertex buffer alone
-		const auto insert = [&](const VertexView& a_vertices, uint64_t a_signature, winrt::com_ptr<ID3D11Buffer> a_buffer, winrt::com_ptr<ID3D11ShaderResourceView> a_srv, uint64_t a_bytes) {
-			Entry entry;
-			entry.bespoke = bespoke && a_srv;
-			entry.srv = a_srv;
-			entry.vertexCount = a_vertices.count;
-			const auto first = a_vertices(0);
-			entry.firstVertex[0] = first.x;
-			entry.firstVertex[1] = first.y;
-			entry.firstVertex[2] = first.z;
-			entry.lastFrame = a_frame;
-			entry.signature = a_signature;
-			if (const auto it = entries.find(a_vertices.vertexBuffer); it != entries.end())
-				Forget(it->second);
-			swayCount += entry.srv != nullptr;
-			bespokeCount += entry.srv != nullptr && entry.bespoke;
-			entries.insert_or_assign(a_vertices.vertexBuffer, std::move(entry));
-			if (a_signature != 0) {
-				Shared record;
-				record.bespoke = bespoke && a_srv;
-				record.buffer = std::move(a_buffer);
-				record.srv = std::move(a_srv);
-				record.bytes = a_bytes;
-				record.lastFrame = a_frame;
-				Store(a_signature, std::move(record));
-			}
-		};
-		const auto signatureOf = [&](const NearShape& a_shape) {
-			return NearSignature(a_modelHash, a_shape.toRoot, a_shape.vertices);
-		};
+		// The record of this tree: one slot per shape, built together and freed together
+		auto tree = std::make_shared<Tree>();
+		tree->bespoke = bespoke;
+		tree->lastFrame = a_frame;
+		tree->shapes.resize(shapes.size());
+		for (size_t s = 0; s < shapes.size(); ++s)
+			tree->shapes[s].id = NearShapeId(shapes[s].geometry, shapes[s].toRoot, shapes[s].vertices, shapes[s].positionHash);
 
-		if (!sways) {
-			// Remembered as still, so the tree is not measured again
-			for (const auto& shape : shapes)
-				insert(shape.vertices, signatureOf(shape), nullptr, nullptr, 0);
-			for (const auto& vertices : readable)
-				insert(vertices, 0, nullptr, nullptr, 0);
-		} else {
-			struct Built
-			{
-				winrt::com_ptr<ID3D11Buffer> buffer;
-				winrt::com_ptr<ID3D11ShaderResourceView> srv;
-				uint64_t bytes = 0;
-			};
-			std::vector<Built> built(shapes.size());
-			bool created = true;
+		bool created = true;
+		if (sways) {
 			for (size_t s = 0; s < shapes.size() && created && bespoke; ++s) {
 				// Layout in TreeShapes.h (NearTrees) and TreeWind.hlsli GetBespokeTree
 				constexpr uint32_t kHeader = 5;
@@ -1088,8 +1125,9 @@ namespace TreeShapes
 				}
 
 				// The same bytes as before, read raw by the shader (asfloat); the motion of the tree is unchanged
-				built[s].bytes = data.size() * sizeof(float);
-				created = CreateRawBuffer(data.data(), built[s].bytes, "TreeWind::BespokeTree", built[s].buffer, built[s].srv);
+				const size_t bytes = data.size() * sizeof(float);
+				created = CreateRawBuffer(data.data(), bytes, "TreeWind::BespokeTree", tree->shapes[s].buffer, tree->shapes[s].srv);
+				tree->bytes += created ? bytes : 0;
 			}
 			if (bespoke)
 				logger::info("[TreeWind] bespoke tree '{}': {} shapes, height {:.0f}, trunk axis ({:.0f}, {:.0f}){}", profile->name, shapes.size(), height, axisX, axisY, created ? "" : ", buffers failed");
@@ -1106,13 +1144,49 @@ namespace TreeShapes
 					const uint32_t packed = ToUnorm16((p.z - base) / height) | (static_cast<uint32_t>(ToUnorm16(std::hypot(p.x - axisX, p.y - axisY) / crownRadius)) << 16);
 					std::memcpy(&data[16 + static_cast<size_t>(i) * 4], &packed, sizeof(packed));
 				}
-				built[s].bytes = data.size();
-				created = CreateRawBuffer(data.data(), data.size(), "TreeWind::NearTree", built[s].buffer, built[s].srv);
+				created = CreateRawBuffer(data.data(), data.size(), "TreeWind::NearTree", tree->shapes[s].buffer, tree->shapes[s].srv);
+				tree->bytes += created ? data.size() : 0;
 			}
-			// All shapes of the tree or none, so the tree never moves in parts
-			for (size_t s = 0; s < shapes.size(); ++s)
-				insert(shapes[s].vertices, signatureOf(shapes[s]), created ? built[s].buffer : nullptr, created ? built[s].srv : nullptr, created ? built[s].bytes : 0);
 		}
+		// All shapes of the tree or none, so the tree never moves in parts
+		if (!created) {
+			for (auto& shape : tree->shapes) {
+				shape.buffer = nullptr;
+				shape.srv = nullptr;
+			}
+			tree->bytes = 0;
+		}
+		tree->accounted = &treeBytes;
+		treeBytes += tree->bytes;
+
+		// The record replaces any older one of this tree, together with the entries drawing from the old one: they
+		// find the new record on their next draw, so no entry keeps an orphaned buffer alive
+		DropEntriesOf(a_treeKey);
+		trees[a_treeKey] = tree;
+
+		const auto insert = [&](const VertexView& a_vertices, const std::shared_ptr<Tree>& a_tree, ID3D11ShaderResourceView* a_srv) {
+			Entry entry;
+			entry.tree = a_tree;
+			entry.srv = a_srv;
+			entry.bespoke = bespoke && a_srv;
+			entry.vertexCount = a_vertices.count;
+			const auto first = a_vertices(0);
+			entry.firstVertex[0] = first.x;
+			entry.firstVertex[1] = first.y;
+			entry.firstVertex[2] = first.z;
+			entry.lastFrame = a_frame;
+			entry.treeKey = a_treeKey;
+			if (const auto it = entries.find(a_vertices.vertexBuffer); it != entries.end())
+				Forget(it->second);
+			swayCount += entry.srv != nullptr;
+			bespokeCount += entry.srv != nullptr && entry.bespoke;
+			entries.insert_or_assign(a_vertices.vertexBuffer, std::move(entry));
+		};
+		for (size_t s = 0; s < shapes.size(); ++s)
+			insert(shapes[s].vertices, tree, tree->shapes[s].srv.get());
+		// Readable shapes that do not reach the root: remembered as still by their vertex buffer alone
+		for (const auto& vertices : readable)
+			insert(vertices, nullptr, nullptr);
 
 		const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
 		budgetSpentNs += ns;
@@ -1122,14 +1196,13 @@ namespace TreeShapes
 	void NearTrees::Clear()
 	{
 		entries.clear();
-		shared.clear();
-		sharedBytes = 0;
+		trees.clear();
 		swayCount = 0;
 		bespokeCount = 0;
 		warnedModels.clear();
 	}
 
-	void NearTrees::Evict(uint a_frame, uint64_t a_budgetBytes)
+	void NearTrees::Evict(uint a_frame)
 	{
 		std::erase_if(entries, [&](const auto& a_entry) {
 			const bool old = a_frame - a_entry.second.lastFrame > kEvictFrames;
@@ -1137,49 +1210,57 @@ namespace TreeShapes
 				Forget(a_entry.second);
 			return old;
 		});
-		// A shared record lives while a shape using it is drawn, and as long again after the last draw
+		// A record lives while a shape of its tree is drawn, and as long again after the last draw; it goes with
+		// every entry on it, so a tree never loses one shape's data and keeps another's
 		for (const auto& [vertexBuffer, entry] : entries)
-			if (const auto it = shared.find(entry.signature); it != shared.end())
-				it->second.lastFrame = std::max(it->second.lastFrame, entry.lastFrame);
-		for (auto it = shared.begin(); it != shared.end();) {
-			if (a_frame - it->second.lastFrame > kEvictFrames) {
-				sharedBytes -= it->second.bytes;
-				it = shared.erase(it);
+			if (entry.tree)
+				entry.tree->lastFrame = std::max(entry.tree->lastFrame, entry.lastFrame);
+		evicted.clear();
+		for (auto it = trees.begin(); it != trees.end();) {
+			if (a_frame - it->second->lastFrame > kEvictFrames) {
+				evicted.insert(it->first);
+				it = trees.erase(it);
 			} else {
 				++it;
 			}
 		}
-		// Over the budget: the least recently drawn go first, never what was drawn in the last kBudgetGraceFrames
+		// Over the budget: the least recently drawn trees go first, never one drawn in the last kBudgetGraceFrames.
+		// The bytes of a record are released when its entries go too, so the freed sum is kept here.
 		size_t budgetEvicted = 0;
-		if (sharedBytes > a_budgetBytes) {
+		if (treeBytes > budgetBytes) {
 			evictOrder.clear();
-			for (const auto& [signature, record] : shared)
-				if (record.bytes > 0 && a_frame - record.lastFrame > kBudgetGraceFrames)
-					evictOrder.emplace_back(record.lastFrame, signature);
+			for (const auto& [key, tree] : trees)
+				if (tree->bytes > 0 && a_frame - tree->lastFrame > kBudgetGraceFrames)
+					evictOrder.emplace_back(tree->lastFrame, key);
 			std::sort(evictOrder.begin(), evictOrder.end());
-			evicted.clear();
-			for (const auto& [lastFrame, signature] : evictOrder) {
-				if (sharedBytes <= a_budgetBytes)
+			uint64_t freed = 0;
+			for (const auto& [lastFrame, key] : evictOrder) {
+				if (treeBytes - freed <= budgetBytes)
 					break;
-				Drop(signature);
-				evicted.insert(signature);
-			}
-			budgetEvicted = evicted.size();
-			if (!evicted.empty()) {
-				std::erase_if(entries, [&](const auto& a_entry) {
-					const bool gone = evicted.contains(a_entry.second.signature);
-					if (gone)
-						Forget(a_entry.second);
-					return gone;
-				});
+				const auto it = trees.find(key);
+				if (it == trees.end())
+					continue;
+				freed += it->second->bytes;
+				trees.erase(it);
+				evicted.insert(key);
+				++budgetEvicted;
 			}
 		}
-		if (builtTrees != loggedBuiltTrees || reusedShapes != loggedReusedShapes || budgetEvicted > 0) {
-			logger::info("[TreeWind] near trees: {} measured (+{}, {:.1f} ms), {} shapes reused (+{}), {} shapes of which {} sway, {} buffers / {:.1f} MB{}",
-				builtTrees, builtTrees - loggedBuiltTrees, (buildNs - loggedBuildNs) / 1e6, reusedShapes, reusedShapes - loggedReusedShapes, entries.size(), swayCount,
-				shared.size(), sharedBytes / (1024.0 * 1024.0), budgetEvicted > 0 ? std::format(", {} freed for the budget", budgetEvicted) : std::string());
+		if (!evicted.empty()) {
+			std::erase_if(entries, [&](const auto& a_entry) {
+				const bool gone = a_entry.second.tree && evicted.contains(a_entry.second.treeKey);
+				if (gone)
+					Forget(a_entry.second);
+				return gone;
+			});
+		}
+		if (builtTrees != loggedBuiltTrees || reusedShapes != loggedReusedShapes || refusedTrees != loggedRefusedTrees || budgetEvicted > 0) {
+			logger::info("[TreeWind] near trees: {} measured (+{}, {:.1f} ms), {} shapes reused (+{}), {} refused for the budget (+{}), {} shapes of which {} sway, {} trees / {:.1f} MB{}",
+				builtTrees, builtTrees - loggedBuiltTrees, (buildNs - loggedBuildNs) / 1e6, reusedShapes, reusedShapes - loggedReusedShapes, refusedTrees, refusedTrees - loggedRefusedTrees,
+				entries.size(), swayCount, trees.size(), treeBytes / (1024.0 * 1024.0), budgetEvicted > 0 ? std::format(", {} trees freed for the budget", budgetEvicted) : std::string());
 			loggedBuiltTrees = builtTrees;
 			loggedReusedShapes = reusedShapes;
+			loggedRefusedTrees = refusedTrees;
 			loggedBuildNs = buildNs;
 		}
 	}
@@ -1194,11 +1275,12 @@ namespace TreeShapes
 		if (it == entries.end())
 			return nullptr;
 		const auto& entry = it->second;
-		if (entry.crownFade && entry.crownSrv) {
+		const auto crownSrv = entry.CrownSrv();
+		if (entry.crownFade && crownSrv) {
 			const float t = std::min(static_cast<float>(a_frame - entry.crownFadeFrame + 1) / kCrownFadeFrames, 1.0f);
 			a_weight = t * t * (3.0f - 2.0f * t);
 		}
-		return entry.crownSrv.get();
+		return crownSrv;
 	}
 
 	ID3D11ShaderResourceView* BendWeights::Get(RE::BSGeometry* a_geometry, Kind a_kind, uint a_frame, bool a_treeModSupport)
@@ -1221,12 +1303,12 @@ namespace TreeShapes
 			const bool sameShape = entry.vertexCount == vertices.count && entry.firstVertex[0] == firstVertex.x && entry.firstVertex[1] == firstVertex.y && entry.firstVertex[2] == firstVertex.z;
 			if (!stale && sameShape) {
 				entry.lastFrame = a_frame;
-				return entry.srv.get();
+				return entry.Srv();
 			}
 			if (sameShape) {
 				// Stale: the old data stays in use until the rebuild
 				staleEntry = &entry;
-				previous = entry.srv.get();
+				previous = entry.Srv();
 			} else {
 				// The vertex buffer address was reused by another shape
 				entries.erase(it);
@@ -1240,12 +1322,11 @@ namespace TreeShapes
 
 		// Same shape with re-created buffers: reuse its bend data instead of scanning the vertices again
 		if (const auto sharedIt = shared.find(signature); sharedIt != shared.end()) {
-			auto& record = sharedIt->second;
-			const bool crownStale = a_treeModSupport && a_kind == Kind::Crown && record.generation != block.generation;
+			const auto& record = sharedIt->second;
+			const bool crownStale = a_treeModSupport && a_kind == Kind::Crown && record->generation != block.generation;
 			if (!crownStale) {
 				Entry reused;
-				reused.srv = record.srv;
-				reused.crownSrv = record.crownSrv;
+				reused.record = record;
 				reused.vertexCount = vertices.count;
 				reused.firstVertex[0] = firstVertex.x;
 				reused.firstVertex[1] = firstVertex.y;
@@ -1253,15 +1334,15 @@ namespace TreeShapes
 				reused.lastFrame = a_frame;
 				reused.blockKey = blockKey;
 				reused.signature = signature;
-				reused.generation = record.generation;
+				reused.generation = record->generation;
 				reused.crown = a_kind == Kind::Crown;
-				record.lastFrame = a_frame;
+				record->lastFrame = a_frame;
 				++reusedCount;
-				return entries.insert_or_assign(vertices.vertexBuffer, std::move(reused)).first->second.srv.get();
+				return entries.insert_or_assign(vertices.vertexBuffer, std::move(reused)).first->second.Srv();
 			}
-			record.lastFrame = a_frame;
+			record->lastFrame = a_frame;
 			if (!previous)
-				previous = record.srv.get();
+				previous = record->srv.get();
 		}
 
 		// This draw goes out without crown data (no entry of its own to take it from): when the data arrives it
@@ -1287,6 +1368,16 @@ namespace TreeShapes
 		const bool settling = a_treeModSupport && a_kind == Kind::Crown && !block.cards.empty() && a_frame - block.changedFrame < kSettleFrames;
 		if (settling || budgetSpentNs >= kBuildBudgetNs) {
 			++deferredCount;
+			if (staleEntry)
+				staleEntry->lastFrame = a_frame;
+			drawnWithoutCrownData();
+			return previous;
+		}
+
+		// Past the memory budget nothing new is built: the shape is drawn with what it had (or still) until the
+		// sweep frees room, so the data never grows past the budget by more than one build
+		if (sharedBytes >= budgetBytes) {
+			++refusedCount;
 			if (staleEntry)
 				staleEntry->lastFrame = a_frame;
 			drawnWithoutCrownData();
@@ -1321,21 +1412,25 @@ namespace TreeShapes
 		entry.signature = signature;
 		entry.crown = a_kind == Kind::Crown;
 
-		// The shared record of this shape: where its block stands and at which LOD level, for the unload sweep
+		// The shared record of this shape: where its block stands, at which LOD level and in which worldspace, for the
+		// unload sweep. An older record of the same shape lives on in the entries still drawing from it (and stays
+		// counted) until they are replaced or swept.
 		const auto makeRecord = [&]() {
-			Shared record;
-			record.generation = block.generation;
-			record.lastFrame = a_frame;
-			record.blockX = a_geometry->world.translate.x;
-			record.blockY = a_geometry->world.translate.y;
-			record.worldScale = a_geometry->world.scale;
+			auto record = std::make_shared<Shared>();
+			record->generation = block.generation;
+			record->lastFrame = a_frame;
+			record->blockX = a_geometry->world.translate.x;
+			record->blockY = a_geometry->world.translate.y;
+			record->worldScale = a_geometry->world.scale;
+			record->worldSpace = worldSpace;
 			return record;
 		};
 
 		// Remembers a shape with nothing to sway, so it is not scanned again
 		const auto keepStill = [&]() -> ID3D11ShaderResourceView* {
 			entry.generation = block.generation;
-			Store(signature, makeRecord());
+			entry.record = makeRecord();
+			shared[signature] = entry.record;
 			entries.insert_or_assign(vertices.vertexBuffer, std::move(entry));
 			return nullptr;
 		};
@@ -1596,47 +1691,45 @@ namespace TreeShapes
 			}
 		}
 
-		winrt::com_ptr<ID3D11Buffer> buffer;
-		if (!CreateRawBuffer(data.data(), data.size(), "TreeWind::BendWeights", buffer, entry.srv))
+		auto record = makeRecord();
+		if (!CreateRawBuffer(data.data(), data.size(), "TreeWind::BendWeights", record->buffer, record->srv))
 			return nullptr;
 
 		// Without it (nothing followed a card, or the buffer could not be created) the crown keeps its plain shading
-		winrt::com_ptr<ID3D11Buffer> crownBuffer;
 		if (!vertexTree.empty())
-			BuildCrownData(vertices, vertexTree, block, crownBuffer, entry.crownSrv);
+			BuildCrownData(vertices, vertexTree, block, record->crownBuffer, record->crownSrv);
 
 		// Fade the crown data in if the shape has been on screen without it; a rebuild keeps the fade it was in
 		const bool waited = waiting.erase(vertices.vertexBuffer) > 0;
-		entry.crownFade = entry.crownSrv && (waited || (staleEntry && !staleEntry->crownSrv));
+		entry.crownFade = record->crownSrv && (waited || (staleEntry && !staleEntry->CrownSrv()));
 		entry.crownFadeFrame = a_frame;
-		if (staleEntry && staleEntry->crownSrv && entry.crownSrv) {
+		if (staleEntry && staleEntry->CrownSrv() && record->crownSrv) {
 			entry.crownFade = staleEntry->crownFade;
 			entry.crownFadeFrame = staleEntry->crownFadeFrame;
 		}
 		entry.generation = block.generation;
-		Shared record = makeRecord();
-		record.bytes = data.size() + (crownBuffer ? static_cast<uint64_t>(vertices.count) * 4 : 0);
-		record.buffer = std::move(buffer);
-		record.srv = entry.srv;
-		record.crownBuffer = std::move(crownBuffer);
-		record.crownSrv = entry.crownSrv;
-		Store(signature, std::move(record));
-		return entries.insert_or_assign(vertices.vertexBuffer, std::move(entry)).first->second.srv.get();
+		record->bytes = data.size() + (record->crownBuffer ? static_cast<uint64_t>(vertices.count) * 4 : 0);
+		record->accounted = &sharedBytes;
+		sharedBytes += record->bytes;
+		shared[signature] = record;
+		entry.record = std::move(record);
+		return entries.insert_or_assign(vertices.vertexBuffer, std::move(entry)).first->second.Srv();
 	}
 
-	void BendWeights::Store(uint64_t a_signature, Shared a_record)
+	BendWeights::Shared::~Shared()
 	{
-		Drop(a_signature);
-		sharedBytes += a_record.bytes;
-		shared.emplace(a_signature, std::move(a_record));
+		if (accounted)
+			*accounted -= bytes;
 	}
 
-	void BendWeights::Drop(uint64_t a_signature)
+	void BendWeights::SetBudget(uint64_t a_bytes)
 	{
-		if (const auto it = shared.find(a_signature); it != shared.end()) {
-			sharedBytes -= it->second.bytes;
-			shared.erase(it);
-		}
+		budgetBytes = a_bytes;
+	}
+
+	void BendWeights::SetWorldSpace(RE::FormID a_worldSpace)
+	{
+		worldSpace = a_worldSpace;
 	}
 
 	void BendWeights::Clear()
@@ -1645,42 +1738,47 @@ namespace TreeShapes
 		blocks.clear();
 		shared.clear();
 		waiting.clear();
-		sharedBytes = 0;
 	}
 
-	void BendWeights::Evict(uint a_frame, const LodBounds& a_bounds, uint64_t a_budgetBytes)
+	void BendWeights::Evict(uint a_frame, const LodBounds& a_bounds)
 	{
 		std::erase_if(entries, [a_frame](const auto& a_entry) { return a_frame - a_entry.second.lastFrame > kLodEvictFrames; });
 		// A shape still waiting for its data is drawn, and puts itself back, every frame
 		waiting.clear();
 		// A shared record lives while a shape using it is drawn
 		for (const auto& [vertexBuffer, entry] : entries)
-			if (const auto it = shared.find(entry.signature); it != shared.end())
-				it->second.lastFrame = std::max(it->second.lastFrame, entry.lastFrame);
+			if (entry.record)
+				entry.record->lastFrame = std::max(entry.record->lastFrame, entry.lastFrame);
 
-		// Records of shapes not drawn for a while, and of blocks the game has unloaded: a block is loaded while it
-		// lies within its LOD ring (fBlockLevelNDistance from the player), and a LOD8 or LOD16 block is replaced by
-		// the finer level when the player comes close. One block side of margin either way, so a block that is
-		// still loaded is never freed and rebuilt in turn.
+		// Records of shapes not drawn for a while, of another worldspace, and of blocks the game has unloaded: a
+		// block is loaded while it lies within its LOD ring (fBlockLevelNDistance from the player), and a LOD8 or
+		// LOD16 block is replaced by the finer level when the player comes close. One block side of margin either
+		// way, and nothing drawn since the last sweep (kResidentFrames) is judged by its position at all, so a
+		// block that is still drawn is never freed and rebuilt in turn. In an interior the position says nothing
+		// about the LOD: the position tests wait and the idle timer runs on (the LOD is not drawn there).
 		evicted.clear();
-		size_t unloaded = 0;
+		size_t unloaded = 0, otherWorld = 0;
 		for (auto it = shared.begin(); it != shared.end();) {
-			const auto& record = it->second;
+			const auto& record = *it->second;
 			bool gone = a_frame - record.lastFrame > kLodEvictFrames;
-			if (!gone && a_bounds.valid) {
-				const int level = record.worldScale < 6.0f ? 0 : (record.worldScale < 12.0f ? 1 : 2);
-				const float side = kBlockSideAtScale1 * record.worldScale;
-				const float dx = std::max({ record.blockX - a_bounds.playerX, a_bounds.playerX - (record.blockX + side), 0.0f });
-				const float dy = std::max({ record.blockY - a_bounds.playerY, a_bounds.playerY - (record.blockY + side), 0.0f });
-				const float nearest = std::hypot(dx, dy);
-				const float farX = std::max(std::abs(record.blockX - a_bounds.playerX), std::abs(record.blockX + side - a_bounds.playerX));
-				const float farY = std::max(std::abs(record.blockY - a_bounds.playerY), std::abs(record.blockY + side - a_bounds.playerY));
-				const float farthest = std::hypot(farX, farY);
-				gone = nearest > a_bounds.ringDistance[level] + side || (level > 0 && farthest < 0.5f * a_bounds.ringDistance[level - 1]);
-				unloaded += gone;
+			if (!gone && a_bounds.valid && !a_bounds.interior && a_frame - record.lastFrame > kResidentFrames) {
+				if (record.worldSpace != 0 && a_bounds.worldSpace != 0 && record.worldSpace != a_bounds.worldSpace) {
+					gone = true;
+					++otherWorld;
+				} else {
+					const int level = record.worldScale < 6.0f ? 0 : (record.worldScale < 12.0f ? 1 : 2);
+					const float side = kBlockSideAtScale1 * record.worldScale;
+					const float dx = std::max({ record.blockX - a_bounds.playerX, a_bounds.playerX - (record.blockX + side), 0.0f });
+					const float dy = std::max({ record.blockY - a_bounds.playerY, a_bounds.playerY - (record.blockY + side), 0.0f });
+					const float nearest = std::hypot(dx, dy);
+					const float farX = std::max(std::abs(record.blockX - a_bounds.playerX), std::abs(record.blockX + side - a_bounds.playerX));
+					const float farY = std::max(std::abs(record.blockY - a_bounds.playerY), std::abs(record.blockY + side - a_bounds.playerY));
+					const float farthest = std::hypot(farX, farY);
+					gone = nearest > a_bounds.ringDistance[level] + side || (level > 0 && farthest < 0.5f * a_bounds.ringDistance[level - 1]);
+					unloaded += gone;
+				}
 			}
 			if (gone) {
-				sharedBytes -= record.bytes;
 				evicted.insert(it->first);
 				it = shared.erase(it);
 			} else {
@@ -1688,39 +1786,49 @@ namespace TreeShapes
 			}
 		}
 		unloadedCount += unloaded;
+		otherWorldCount += otherWorld;
 
-		// Over the budget: the least recently drawn go first, never what was drawn in the last kBudgetGraceFrames
+		// Over the budget: the least recently drawn go first, never what was drawn in the last kBudgetGraceFrames.
+		// The bytes of a record are released when its entries go too, so the freed sum is kept here.
 		size_t budgetEvicted = 0;
-		if (sharedBytes > a_budgetBytes) {
+		if (sharedBytes > budgetBytes) {
 			evictOrder.clear();
 			for (const auto& [signature, record] : shared)
-				if (record.bytes > 0 && a_frame - record.lastFrame > kBudgetGraceFrames)
-					evictOrder.emplace_back(record.lastFrame, signature);
+				if (record->bytes > 0 && a_frame - record->lastFrame > kBudgetGraceFrames)
+					evictOrder.emplace_back(record->lastFrame, signature);
 			std::sort(evictOrder.begin(), evictOrder.end());
+			uint64_t freed = 0;
 			for (const auto& [lastFrame, signature] : evictOrder) {
-				if (sharedBytes <= a_budgetBytes)
+				if (sharedBytes - freed <= budgetBytes)
 					break;
-				Drop(signature);
+				const auto it = shared.find(signature);
+				if (it == shared.end())
+					continue;
+				freed += it->second->bytes;
+				shared.erase(it);
 				evicted.insert(signature);
 				++budgetEvicted;
 			}
 			budgetCount += budgetEvicted;
 		}
-		// The entries of the records that went: a view would keep the buffer alive
+		// The entries of the records that went (and the stale ones of older records of the same shapes): a view
+		// would keep the buffer alive
 		if (!evicted.empty())
 			std::erase_if(entries, [&](const auto& a_entry) { return evicted.contains(a_entry.second.signature); });
 
-		if (builtCount != loggedBuilt || reusedCount != loggedReused || unloadedCount != loggedUnloaded || budgetCount != loggedBudget) {
-			logger::info("[TreeWind] bend weights: {} built (+{}, {} of them rebuilds, {:.1f} ms, worst frame {:.1f} ms), {} reused (+{}), {} waits (+{}), {} freed with their blocks (+{}), {} freed for the budget (+{}), {} shapes, {} shared / {:.1f} MB, {} blocks",
+		if (builtCount != loggedBuilt || reusedCount != loggedReused || unloadedCount != loggedUnloaded || budgetCount != loggedBudget || refusedCount != loggedRefused || otherWorld > 0) {
+			logger::info("[TreeWind] bend weights: {} built (+{}, {} of them rebuilds, {:.1f} ms, worst frame {:.1f} ms), {} reused (+{}), {} waits (+{}), {} refused for the budget (+{}), {} freed with their blocks (+{}), {} freed with their worldspace (+{}), {} freed for the budget (+{}), {} shapes, {} shared / {:.1f} MB, {} blocks",
 				builtCount, builtCount - loggedBuilt, staleBuiltCount - loggedStaleBuilt, (buildNs - loggedBuildNs) / 1e6, worstFrameNs / 1e6,
-				reusedCount, reusedCount - loggedReused, deferredCount, deferredCount - loggedDeferred, unloadedCount, unloadedCount - loggedUnloaded,
-				budgetCount, budgetCount - loggedBudget, entries.size(), shared.size(), sharedBytes / (1024.0 * 1024.0), blocks.size());
+				reusedCount, reusedCount - loggedReused, deferredCount, deferredCount - loggedDeferred, refusedCount, refusedCount - loggedRefused,
+				unloadedCount, unloadedCount - loggedUnloaded, otherWorldCount, otherWorld, budgetCount, budgetCount - loggedBudget,
+				entries.size(), shared.size(), sharedBytes / (1024.0 * 1024.0), blocks.size());
 			loggedBuilt = builtCount;
 			loggedReused = reusedCount;
 			loggedDeferred = deferredCount;
 			loggedStaleBuilt = staleBuiltCount;
 			loggedUnloaded = unloadedCount;
 			loggedBudget = budgetCount;
+			loggedRefused = refusedCount;
 			loggedBuildNs = buildNs;
 			worstFrameNs = 0;
 		}

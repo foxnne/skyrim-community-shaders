@@ -598,18 +598,22 @@ void TreeWind::Reset()
 	// Bend data the game no longer draws goes about once a second: the LOD blocks outside the loaded rings (so a
 	// fast travel frees the old region within a second), shapes not drawn for a while, and the least recently drawn
 	// beyond the memory budget
+	bendWeights.SetBudget(static_cast<uint64_t>(std::max(settings.LodBendDataBudgetMB, 1)) << 20);
+	nearTrees.SetBudget(static_cast<uint64_t>(std::max(settings.NearTreeDataBudgetMB, 1)) << 20);
+	// Read once a frame on the render thread, where LODBlendRingFix reads the same game state
+	const auto lodBounds = GetLodBounds();
 	if (bendWeightsTreeModSupport != settings.TreeModSupport) {
 		bendWeights.Clear();
 		bendWeightsTreeModSupport = settings.TreeModSupport;
 	} else if (globals::state->frameCount % 60 == 0) {
-		bendWeights.Evict(globals::state->frameCount, GetLodBounds(), static_cast<uint64_t>(std::max(settings.LodBendDataBudgetMB, 1)) << 20);
+		bendWeights.Evict(globals::state->frameCount, lodBounds);
 	}
 
 	if (nearTreesMinHeight != settings.NearTreeMinHeight) {
 		nearTrees.Clear();
 		nearTreesMinHeight = settings.NearTreeMinHeight;
 	} else if (globals::state->frameCount % 60 == 30) {
-		nearTrees.Evict(globals::state->frameCount, static_cast<uint64_t>(std::max(settings.NearTreeDataBudgetMB, 1)) << 20);
+		nearTrees.Evict(globals::state->frameCount);
 	}
 }
 
@@ -618,16 +622,20 @@ TreeShapes::LodBounds TreeWind::GetLodBounds()
 	TreeShapes::LodBounds bounds;
 	const auto tes = globals::game::tes;
 	const auto player = globals::game::player;
-	if (!tes || !player || tes->interiorCell || !tes->GetRuntimeData2().worldSpace)
+	if (!tes || !player)
+		return bounds;
+	bounds.interior = tes->interiorCell != nullptr;
+	const auto worldSpacePtr = tes->GetRuntimeData2().worldSpace;
+	if (bounds.interior || !worldSpacePtr)
 		return bounds;
 
-	// Another worldspace: its LOD blocks share nothing with the last one's, and the position test says nothing about them
-	const RE::FormID worldSpace = tes->GetRuntimeData2().worldSpace->GetFormID();
-	if (lastWorldSpace != 0 && worldSpace != lastWorldSpace) {
-		logger::info("[TreeWind] worldspace changed, tree LOD bend data freed");
-		bendWeights.Clear();
-	}
+	// New records are stamped with the worldspace; after a change the sweep frees those of the old one alone
+	const RE::FormID worldSpace = worldSpacePtr->GetFormID();
+	if (lastWorldSpace != 0 && worldSpace != lastWorldSpace)
+		logger::info("[TreeWind] worldspace changed ({:08X} -> {:08X}): the tree LOD bend data of the old one is freed", lastWorldSpace, worldSpace);
 	lastWorldSpace = worldSpace;
+	bendWeights.SetWorldSpace(worldSpace);
+	bounds.worldSpace = worldSpace;
 
 	if (!ringSettingsLooked) {
 		ringSettingsLooked = true;

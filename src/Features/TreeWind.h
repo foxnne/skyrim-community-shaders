@@ -210,8 +210,8 @@ private:
 
 	/**
 	 * @brief Where the player stands and how far the object LOD rings reach (the game's fBlockLevel* settings), for
-	 * freeing the bend data of LOD blocks the game has unloaded. Not valid in interiors and menus. Also notices a
-	 * change of worldspace, after which the tree LOD data of the old one is freed.
+	 * freeing the bend data of LOD blocks the game has unloaded. Not valid in interiors (flagged) and menus. Stamps
+	 * the bend data with the worldspace, so a change of worldspace frees the tree LOD data of the old one alone.
 	 */
 	TreeShapes::LodBounds GetLodBounds();
 

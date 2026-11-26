@@ -39,6 +39,11 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	UseDynamicCubemapsAsFallback,
 	DiffuseCubemapMult,
 	FallbackSkyBoost,
+	PhysicalSkyFill,
+	SkyFillScale,
+	SkyFillSaturation,
+	SkyFillEnvWeight,
+	BounceSkyLimit,
 	EnableREBLUR,
 	Reblur,
 	DiffusePrepassBlurRadius,
@@ -240,6 +245,33 @@ void ScreenSpaceGI::DrawSettings()
 					if (auto _tt = Util::HoverTooltipWrapper()) {
 						ImGui::Text("%s", T(TKEY("fallback_sky_boost_tooltip"), "Extra sky light on surfaces that face up, outdoors, where indirect rays miss the screen. The extra is larger the lower Skylighting's Min Diffuse Visibility is. 1 = full: brighter open ground and forest floor, flatter sun to shade contrast. 0 = none: darker shade, stronger sun."));
 					}
+
+					auto resetOnChange = [&](bool a_changed) {
+						if (a_changed) {
+							resetReblurHistory = true;
+							hasMultiBounceHistory = false;
+						}
+					};
+					resetOnChange(ImGui::Checkbox(T(TKEY("physical_sky_fill"), "Physical Sky Fill"), &settings.PhysicalSkyFill));
+					if (auto _tt = Util::HoverTooltipWrapper()) {
+						ImGui::Text("%s", T(TKEY("physical_sky_fill_tooltip"), "Outdoors with Physical Sky: shade is lit by the sky's own colour (the sky reflection cubemap) at its own saturation, the weather's ambient colour stops doubling the sky on skyward rays, and IL Saturation applies to traced bounce only. Off = the IBL sky term as before."));
+					}
+					{
+						auto fillGuard = Util::DisableGuard(!settings.PhysicalSkyFill);
+						resetOnChange(ImGui::SliderFloat(T(TKEY("sky_fill_scale"), "Open Sky Fill Scale"), &settings.SkyFillScale, 0.0f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp));
+						if (auto _tt = Util::HoverTooltipWrapper()) {
+							ImGui::Text("%s", T(TKEY("sky_fill_scale_tooltip"), "Sky light brightness where Skylighting sees open sky; sets the sun to shade ratio on open ground. Under a canopy the Sky IBL Scale still applies, so forest shade holds."));
+						}
+						resetOnChange(ImGui::SliderFloat(T(TKEY("sky_fill_saturation"), "Sky Fill Saturation"), &settings.SkyFillSaturation, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp));
+						resetOnChange(ImGui::SliderFloat(T(TKEY("sky_fill_env_weight"), "Ambient On Open Sky"), &settings.SkyFillEnvWeight, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp));
+						if (auto _tt = Util::HoverTooltipWrapper()) {
+							ImGui::Text("%s", T(TKEY("sky_fill_env_weight_tooltip"), "Share of the weather's directional ambient kept on rays that look up at open sky. It is a stand-in for the same sky, so 0 removes the double count; occluded sky (canopy, overhangs) keeps all of it."));
+						}
+					}
+					resetOnChange(ImGui::SliderFloat(T(TKEY("bounce_sky_limit"), "Bounce Limit"), &settings.BounceSkyLimit, 0.0f, 16.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp));
+					if (auto _tt = Util::HoverTooltipWrapper()) {
+						ImGui::Text("%s", T(TKEY("bounce_sky_limit_tooltip"), "Caps traced bounce light at this many times the ambient light the hit geometry hides from the pixel. Keeps bounce colour, trims overestimates (thick-occluder guesses, lit sides seen from shade). 0 = off."));
+					}
 				}
 			}
 		}
@@ -374,6 +406,10 @@ void ScreenSpaceGI::LoadSettings(json& o_json)
 	ResetIfOutOfRange(settings.ILSaturation, 0.0f, 2.0f, defaults.ILSaturation);
 	ResetIfOutOfRange(settings.DiffuseCubemapMult, 0.0f, 5.0f, defaults.DiffuseCubemapMult);
 	settings.FallbackSkyBoost = Util::ClampFinite(settings.FallbackSkyBoost, defaults.FallbackSkyBoost, 0.0f, 1.0f);
+	settings.SkyFillScale = Util::ClampFinite(settings.SkyFillScale, defaults.SkyFillScale, 0.0f, 3.0f);
+	settings.SkyFillSaturation = Util::ClampFinite(settings.SkyFillSaturation, defaults.SkyFillSaturation, 0.0f, 2.0f);
+	settings.SkyFillEnvWeight = Util::ClampFinite(settings.SkyFillEnvWeight, defaults.SkyFillEnvWeight, 0.0f, 1.0f);
+	settings.BounceSkyLimit = Util::ClampFinite(settings.BounceSkyLimit, defaults.BounceSkyLimit, 0.0f, 16.0f);
 	ResetIfOutOfRange(settings.DiffusePrepassBlurRadius, 0.0f, 75.0f, defaults.DiffusePrepassBlurRadius);
 	if (settings.QuarterRes)
 		settings.HalfRes = false;
@@ -1240,6 +1276,11 @@ ScreenSpaceGI::SharedData ScreenSpaceGI::GetCommonBufferData()
 	data.AOPower = settings.AOPower;
 	data.ILSaturation = appliedE11Overlay.active ? userSettings.E11ILSaturation : settings.ILSaturation;
 	data.FallbackSkyBoost = std::clamp(settings.FallbackSkyBoost, 0.0f, 1.0f);
+	data.PhysicalSkyFill = settings.PhysicalSkyFill ? 1u : 0u;
+	data.SkyFillScale = std::clamp(settings.SkyFillScale, 0.0f, 3.0f);
+	data.SkyFillSaturation = std::clamp(settings.SkyFillSaturation, 0.0f, 2.0f);
+	data.SkyFillEnvWeight = std::clamp(settings.SkyFillEnvWeight, 0.0f, 1.0f);
+	data.BounceSkyLimit = std::clamp(settings.BounceSkyLimit, 0.0f, 16.0f);
 	return data;
 }
 

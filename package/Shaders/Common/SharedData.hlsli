@@ -445,7 +445,12 @@ namespace SharedData
 		float AOPower;
 		float ILSaturation;
 		float FallbackSkyBoost;  // share of the up-facing sky boost in the ambient fallback, 1 = full, 0 = none
-		float2 pad0;
+		uint PhysicalSkyFill;    // foxnne sky-lit shadows: sky fill from the Physical Sky's own radiance
+		float SkyFillScale;
+		float SkyFillSaturation;
+		float SkyFillEnvWeight;
+		float BounceSkyLimit;
+		float pad0;
 	};
 
 	struct SSRSettings

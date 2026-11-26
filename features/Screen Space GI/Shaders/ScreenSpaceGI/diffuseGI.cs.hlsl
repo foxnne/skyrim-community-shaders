@@ -112,6 +112,19 @@ bool IsSkinPixel(uint2 pxCoord)
 // under a canopy alike and halves the direct : ambient ratio. ssgiSettings.FallbackSkyBoost (Sky Fill Boost in the
 // menu) is the share of that boost in use: 1 keeps it, 0 removes it.
 
+// foxnne sky-lit shadows (ssgiSettings.PhysicalSkyFill). Outdoors, sun shadow is lit by the sky. The fallback
+// below already samples that sky (the reflection cubemap Physical Sky draws), but three things took its blue out:
+// Sky IBL Saturation (0.6 in the look pack) greyed it, the DALC term (the weather's ambient colour, itself a
+// stand-in for the same sky) was added on top of it on every ray, and IL Saturation in the composite greyed the
+// whole fill, sky included. With the switch on: the sky term keeps its own colour (Sky Fill Saturation), its
+// brightness on open sky is Open Sky Fill Scale, DALC on skyward rays under open sky drops to Ambient On Open Sky,
+// and IL Saturation is applied here to the traced bounce only. Where Skylighting sees the sky occluded (a canopy)
+// the old scale and the DALC term stay, so forest shade holds.
+bool UsePhysicalSkyFill()
+{
+	return SharedData::ssgiSettings.PhysicalSkyFill != 0 && SharedData::physSkyData.enabled && !SharedData::InInterior;
+}
+
 // sin/cos of the positive bit-center offsets from the projected receiver normal.
 // The negative half is mirrored, reducing the table and avoiding per-bit sincos.
 static const float2 SSGI_BIT_SIN_COS[SSGI_MAX_RAY / 2] = {
@@ -212,6 +225,9 @@ float3 SampleDiffuseFallbackCubemap(float3 worldPos, float3 worldNormal, float3 
 	float3 envSampleRaw = EnvTexture.SampleLevel(samplerLinearClamp, worldDir, SSGI_FALLBACK_MIP);
 	float3 envColor = envSampleRaw;
 
+	const bool physicalSkyFill = UsePhysicalSkyFill();
+	// How open the sky is over this point, 0 = fully occluded, 1 = open (Skylighting's visibility before its floor).
+	float skyOpen = 1.0;
 #	if defined(SKYLIGHTING)
 	float skylightingDiffuse = 1.0;
 	if (!SharedData::InInterior) {
@@ -219,7 +235,10 @@ float3 SampleDiffuseFallbackCubemap(float3 worldPos, float3 worldNormal, float3 
 		float3 skylightingNormal = normalize(float3(worldNormal.xy, max(0, worldNormal.z)));
 		float skylightingBoost = 1.0 + SharedData::ssgiSettings.FallbackSkyBoost * saturate(worldNormal.z) * (1.0 - SharedData::skylightingSettings.MinDiffuseVisibility);
 		sh2 skylightingSH = Skylighting::Sample(worldPos, worldDir);
-		skylightingDiffuse = Skylighting::EvaluateDiffuse(skylightingSH, skylightingNormal, fadeOutFactor) * skylightingBoost;
+		skylightingDiffuse = Skylighting::EvaluateDiffuse(skylightingSH, skylightingNormal, fadeOutFactor);
+		const float minVisibility = SharedData::skylightingSettings.MinDiffuseVisibility;
+		skyOpen = saturate((skylightingDiffuse - minVisibility) / max(1.0 - minVisibility, 1e-3));
+		skylightingDiffuse *= skylightingBoost;
 	}
 #	endif
 
@@ -241,7 +260,17 @@ float3 SampleDiffuseFallbackCubemap(float3 worldPos, float3 worldNormal, float3 
 		float3 reflectionColor = 0;
 		if (!SharedData::InInterior) {
 			float3 skySample = ReflectionCubemap.SampleLevel(samplerLinearClamp, worldDir, SSGI_FALLBACK_MIP);
-			float3 skyColor = Color::Saturation(skySample, SharedData::iblSettings.SkyIBLSaturation) * SharedData::iblSettings.SkyIBLScale;
+			float skySaturation = SharedData::iblSettings.SkyIBLSaturation;
+			float skyScale = SharedData::iblSettings.SkyIBLScale;
+			if (physicalSkyFill) {
+				skySaturation = SharedData::ssgiSettings.SkyFillSaturation;
+				skyScale = lerp(skyScale, SharedData::ssgiSettings.SkyFillScale, skyOpen);
+				// A ray that looks up at open sky is lit by the sky term; the DALC term there counts the same sky twice
+				// in the weather's grey. Rays at and below the horizon keep it as the stand-in for ground bounce.
+				const float skyward = saturate(worldDir.z * 4.0);
+				envColor *= lerp(1.0, SharedData::ssgiSettings.SkyFillEnvWeight, skyward * skyOpen);
+			}
+			float3 skyColor = Color::Saturation(skySample, skySaturation) * skyScale;
 #		if defined(SKYLIGHTING)
 			skyColor *= skylightingDiffuse;
 			if (SharedData::iblSettings.SkylightingAffectsEnv != 0)
@@ -294,6 +323,8 @@ void CalculateGI(
 	float normHitDist = 0;
 	float3 totalRadiance = 0;
 	float3 fallbackRadiance = 0;
+	float hitWeightTotal = 0;   // angular measure of the traced hits (Bounce Limit)
+	float openWeightTotal = 0;  // and of the open bits the fallback lit
 #ifdef SSGI_SH
 	float3 totalDirection = 0;
 	float3 fallbackDirection = 0;
@@ -386,6 +417,7 @@ void CalculateGI(
 					if (scalarWeight > 0.0) {
 						float3 diffuseRadiance = sampleRadiance * scalarWeight * GIStrength;
 						totalRadiance += diffuseRadiance;
+						hitWeightTotal += scalarWeight;
 #	ifdef SSGI_SH
 						totalDirection += directionWeight * sampleLuminance * GIStrength;
 #	endif
@@ -423,6 +455,7 @@ void CalculateGI(
 
 				if (openWeight <= 0)
 					continue;
+				openWeightTotal += openWeight;
 
 				float3 rayDir = normalize(openDirectionWeight / openWeight);
 				float3 worldDir = ViewToWorldVector(rayDir, FrameBuffer::CameraViewInverse);
@@ -440,9 +473,39 @@ void CalculateGI(
 	normHitDist /= SSGI_ROTATION_COUNT;
 	totalRadiance /= SSGI_ROTATION_COUNT;
 	fallbackRadiance /= SSGI_ROTATION_COUNT;
+	hitWeightTotal /= SSGI_ROTATION_COUNT;
+	openWeightTotal /= SSGI_ROTATION_COUNT;
 #ifdef SSGI_SH
 	totalDirection /= SSGI_ROTATION_COUNT;
 	fallbackDirection /= SSGI_ROTATION_COUNT;
+#endif
+
+	// foxnne sky-lit shadows: with Physical Sky Fill the composite leaves the fill's colour alone, so IL Saturation
+	// (the guard against sunlit grass and ground tinting shade) acts here on the traced bounce only. The operation is
+	// linear in RGB, so applying it before the denoiser equals applying it after.
+	if (UsePhysicalSkyFill()) {
+		const float tracedLuminance = Color::RGBToLuminance(totalRadiance);
+		totalRadiance = max(lerp(tracedLuminance, totalRadiance, SharedData::ssgiSettings.ILSaturation), 0.0);
+	}
+
+#if defined(DYNAMIC_CUBEMAPS)
+	// foxnne sky-lit shadows, Bounce Limit: a traced hit takes the place of the ambient light that direction would
+	// have brought. Cap the traced bounce at BounceSkyLimit times that ambient (the mean fallback radiance of the
+	// open bits, over the hit measure). It scales, so the bounce keeps its colour. It trims the screen-space
+	// overestimates: thick-occluder guesses behind thin geometry, and lit sides seen from a shadowed receiver.
+	// Real bounce off a sunlit wall can exceed the sky it hides several times over, so useful values are 2 to 6.
+	if (UseDynamicCubemap != 0 && SharedData::ssgiSettings.BounceSkyLimit > 0.0 && openWeightTotal > 1e-3 && hitWeightTotal > 0.0) {
+		const float ambientMean = _NRD_LinearToYCoCg(fallbackRadiance).x / openWeightTotal;
+		const float bounceCap = SharedData::ssgiSettings.BounceSkyLimit * ambientMean * hitWeightTotal * GIStrength;
+		const float tracedLuminance = _NRD_LinearToYCoCg(totalRadiance).x;
+		if (tracedLuminance > bounceCap) {
+			const float bounceScale = bounceCap / max(tracedLuminance, EPSILON_DIVISION);
+			totalRadiance *= bounceScale;
+#	ifdef SSGI_SH
+			totalDirection *= bounceScale;
+#	endif
+		}
+	}
 #endif
 
 	normHitDist = saturate(normHitDist);

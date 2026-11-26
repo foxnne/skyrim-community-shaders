@@ -313,7 +313,7 @@ void VoxelCloudManager::UpdateLighting(ID3D11ComputeShader* shader, float3 direc
 		lightingValid = false;
 	}
 	if (!lightingConstants)
-		lightingConstants = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<std::array<uint32_t, 4>>());
+		lightingConstants = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<std::array<uint32_t, 4>>(), "PhysicalSky::VoxelCloudLighting");
 	const bool rebuild = changed || !lightingValid;
 	if (rebuild || (lightingRemaining == 0 && (direction - lightingDirection).LengthSquared() > 1e-8f)) {
 		lightingGeometry = std::move(geometry);

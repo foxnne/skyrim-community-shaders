@@ -146,8 +146,8 @@ namespace
 
 void NdfManager::SetupResources()
 {
-	generatorCb = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<NdfGenerationParameters>());
-	noiseCb = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<NdfNoiseParameters>());
+	generatorCb = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<NdfGenerationParameters>(), "PhysicalSky::NdfGeneration");
+	noiseCb = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<NdfNoiseParameters>(), "PhysicalSky::NdfNoise");
 	texHeight = CreateNdfTexture(kNdfDim, DXGI_FORMAT_R16G16B16A16_FLOAT, "PhysicalSky::NdfHeight");
 	texModeling = CreateNdfTexture(kNdfDim, DXGI_FORMAT_R16G16B16A16_FLOAT, "PhysicalSky::NdfModeling");
 	for (auto& texture : noiseTextures)
@@ -748,7 +748,7 @@ bool MidCloudMapManager::Update(const MidCloudSettings& settings, TextureManager
 
 void CirrusMapManager::SetupResources()
 {
-	generationCb = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<GenerationParameters>());
+	generationCb = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<GenerationParameters>(), "PhysicalSky::CirrusGeneration");
 	for (auto& texture : texWeather)
 		texture = CreateNdfTexture(kDimension, DXGI_FORMAT_R16G16_FLOAT, "PhysicalSky::CirrusWeather", true);
 	D3D11_SAMPLER_DESC desc{

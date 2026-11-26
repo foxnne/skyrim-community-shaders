@@ -15,11 +15,25 @@ namespace TreeWind
 		float4 Gusts;   // gust strength, gust rarity, loaded tree scale, crown data bound (t121): 0 no, else its weight (1 in full, less while it fades in)
 	};
 
-	// Tree LOD, per vertex: bend weight, tree random, tree scale, distance from the trunk.
-	// Loaded trees: [0] tree origin xy and [1] tree origin z, tree height, both in the shape's own space;
-	// then per vertex at [2 + vertex]: bend weight, distance from the trunk.
-	// Bespoke trees: five header elements, then the wind mask per vertex (see GetBespokeTree).
-	Buffer<float4> VertexData : register(t120);
+	// Raw per-vertex data of the shape being drawn, in one of three layouts (TreeShapes.h):
+	// Tree LOD: 4 bytes per vertex as R8G8B8A8_UNORM: bend weight, tree random, tree scale / LodScaleRange,
+	//           distance from the trunk (see GetLodData).
+	// Loaded trees: 16 bytes of header (tree origin xyz and tree height as floats, in the shape's own space),
+	//           then 4 bytes per vertex as R16G16_UNORM: bend weight, distance from the trunk.
+	// Bespoke trees: five float4 header elements, then one float4 wind mask per vertex (see GetBespokeTree).
+	ByteAddressBuffer VertexData : register(t120);
+
+	// The tree LOD sway scale is stored as scale / this (TreeShapes::BendWeights::kLodScaleRange)
+	static const float LodScaleRange = 2.0;
+
+	// Tree LOD, per vertex: bend weight (0 base, 1 top), tree random 0-1, tree scale, distance from the trunk 0-1
+	float4 GetLodData(uint vertexID)
+	{
+		const uint packed = VertexData.Load(vertexID * 4);
+		float4 data = float4(packed & 0xFFu, (packed >> 8) & 0xFFu, (packed >> 16) & 0xFFu, packed >> 24) * (1.0 / 255.0);
+		data.z *= LodScaleRange;
+		return data;
+	}
 
 	// Tree LOD crowns, per vertex, for the pixel shader: xy = offset from the trunk (1 = widest point of that
 	// tree's crown), z = height inside the crown 0-1, w = 0 without data, else (1 + the tree's tint code) / 127.
@@ -88,7 +102,7 @@ namespace TreeWind
 
 	float2 GetOffset(float3 positionMS, float phase, uint vertexID, float nearScale)
 	{
-		float4 data = VertexData.Load(vertexID);
+		float4 data = GetLodData(vertexID);
 		float bend = Shape.y > 0.5 ? pow(saturate(data.x), max(Shape.x, 0.05)) : 1.0;
 		float scale = bend * data.z * nearScale;
 		float2 offset = Sway(positionMS, phase + data.y * Shape.w) * scale;
@@ -151,10 +165,10 @@ namespace TreeWind
 	{
 		NearTree tree;
 
-		precise float2 header0 = VertexData.Load(0).xy;
-		precise float2 header1 = VertexData.Load(1).xy;
-		precise float2 weights = VertexData.Load(a_vertexID + 2).xy;
-		precise float3 originMS = float3(header0, header1.x);
+		precise float4 header = asfloat(VertexData.Load4(0));
+		const uint packedWeights = VertexData.Load(16 + a_vertexID * 4);
+		precise float2 weights = float2(packedWeights & 0xFFFFu, packedWeights >> 16) * (1.0 / 65535.0);
+		precise float3 originMS = header.xyz;
 		precise float3 originRel = mul(a_world, float4(originMS, 1.0));
 		precise float3 originWS = originRel + a_posAdjust;
 		tree.originWS = originWS;
@@ -163,7 +177,7 @@ namespace TreeWind
 		precise float3 row1 = a_world[1].xyz;
 		precise float3 row2 = a_world[2].xyz;
 		precise float worldScale = length(float3(row0.x, row1.x, row2.x));
-		precise float heightWS = header1.y * worldScale;
+		precise float heightWS = header.w * worldScale;
 
 		precise float random = Triangle(dot(originWS.xy, float2(0.0077, 0.0113)) + 0.37 * Triangle(dot(originWS.xy, float2(-0.0091, 0.0053))));
 		precise float random2 = Triangle(dot(originWS.xy, float2(0.0101, -0.0067)) + 0.5 * random);
@@ -255,12 +269,13 @@ namespace TreeWind
 	{
 		BespokeTree tree;
 
-		precise float4 header0 = VertexData.Load(0);
-		precise float4 header1 = VertexData.Load(1);
-		precise float4 header2 = VertexData.Load(2);
-		precise float4 header3 = VertexData.Load(3);
-		precise float4 header4 = VertexData.Load(4);
-		precise float4 mask = VertexData.Load(a_vertexID + 5);
+		// Float4 elements of 16 bytes, read raw: the same values the typed view gave before
+		precise float4 header0 = asfloat(VertexData.Load4(0));
+		precise float4 header1 = asfloat(VertexData.Load4(16));
+		precise float4 header2 = asfloat(VertexData.Load4(32));
+		precise float4 header3 = asfloat(VertexData.Load4(48));
+		precise float4 header4 = asfloat(VertexData.Load4(64));
+		precise float4 mask = asfloat(VertexData.Load4((a_vertexID + 5) * 16));
 		tree.branchParams = header1;
 		tree.mixParams = header2;
 		tree.ivyParams = header3;

@@ -153,13 +153,26 @@ namespace VramTracker
 			return a_cat == kRT || a_cat == kUAV || a_cat == kTex3D || a_cat == kCube || a_cat == kBufUAV || a_cat == kBufOther;
 		}
 
+		// Live bytes per debug name of our own resources (OnNamed), for the report line. Fixed table: Tag::Release
+		// reads it without a lock. The last slot collects every name beyond the table.
+		constexpr int kMaxNamed = 512;
+		struct NamedSlot
+		{
+			std::atomic<int64_t> liveBytes{ 0 }, liveCount{ 0 }, newBytes{ 0 }, newCount{ 0 };
+		};
+		NamedSlot g_namedSlots[kMaxNamed];
+		std::mutex g_nameMutex;
+		std::vector<std::string> g_names;  // index = slot; written under g_nameMutex, read in OnPresent under it
+		std::unordered_map<std::string, int> g_nameIndex;
+
 		struct Tag : IUnknown
 		{
 			std::atomic<ULONG> rc{ 1 };
 			int mod = 0, cat = 0;
 			int64_t bytes = 0;
 			bool registered = false;
-			std::string name;  // debug name, set through OnNamed; guarded by g_liveMutex
+			std::atomic<int> named{ -1 };  // slot in g_namedSlots once the resource has a debug name
+			std::string name;              // debug name, set through OnNamed; guarded by g_liveMutex
 			HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_riid, void** a_out) override
 			{
 				if (a_riid == __uuidof(IUnknown)) {
@@ -179,6 +192,10 @@ namespace VramTracker
 					s.liveBytes -= bytes;
 					s.liveCount -= 1;
 					s.freedBytes += bytes;
+					if (const int slot = named.load(); slot >= 0) {
+						g_namedSlots[slot].liveBytes -= bytes;
+						g_namedSlots[slot].liveCount -= 1;
+					}
 					if (registered) {
 						std::lock_guard lock(g_liveMutex);
 						g_live.erase(this);
@@ -464,6 +481,25 @@ namespace VramTracker
 		j["created"] = std::move(created);
 		j["freed"] = std::move(freed);
 		{
+			// Our own resources by debug name: a second breakdown of the bytes above
+			nlohmann::json named = nlohmann::json::object(), namedCount = nlohmann::json::object(), namedNew = nlohmann::json::object();
+			std::lock_guard lock(g_nameMutex);
+			for (size_t n = 0; n < g_names.size(); ++n) {
+				auto& s = g_namedSlots[n];
+				const int64_t lb = s.liveBytes.load(), nb = s.newBytes.exchange(0), nc = s.newCount.exchange(0);
+				if (lb > 0) {
+					named[g_names[n]] = std::round(lb * kMB * 10) / 10;
+					namedCount[g_names[n]] = s.liveCount.load();
+				}
+				if (nb > 0)
+					namedNew[g_names[n]] = std::round(nb * kMB * 10) / 10;
+				(void)nc;
+			}
+			j["named"] = std::move(named);
+			j["namedCount"] = std::move(namedCount);
+			j["namedNew"] = std::move(namedNew);
+		}
+		{
 			// Top engine call sites of this second's large allocations
 			std::vector<Site> top;
 			{
@@ -534,6 +570,35 @@ namespace VramTracker
 		if (tag->registered) {
 			std::lock_guard lock(g_liveMutex);
 			tag->name = a_name;
+		}
+
+		// The per-name totals of the report line
+		int slot;
+		{
+			std::lock_guard lock(g_nameMutex);
+			if (const auto it = g_nameIndex.find(a_name); it != g_nameIndex.end()) {
+				slot = it->second;
+			} else if (g_names.size() < static_cast<size_t>(kMaxNamed) - 1) {
+				slot = static_cast<int>(g_names.size());
+				g_names.emplace_back(a_name);
+				g_nameIndex.emplace(a_name, slot);
+			} else {
+				slot = kMaxNamed - 1;
+				if (g_names.size() < static_cast<size_t>(kMaxNamed))
+					g_names.emplace_back("other named");
+			}
+		}
+		const int previous = tag->named.exchange(slot);
+		if (previous != slot) {
+			if (previous >= 0) {
+				g_namedSlots[previous].liveBytes -= tag->bytes;
+				g_namedSlots[previous].liveCount -= 1;
+			}
+			auto& s = g_namedSlots[slot];
+			s.liveBytes += tag->bytes;
+			s.liveCount += 1;
+			s.newBytes += tag->bytes;
+			s.newCount += 1;
 		}
 		tag->Release();
 	}

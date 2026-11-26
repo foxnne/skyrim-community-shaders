@@ -91,6 +91,9 @@ public:
 		float NearTreeTransmissionSaturation = 0.5f;
 		float TreeLeafChromaMin = 0.3f;  // shared by the leaves of loaded trees and the LOD crown tint
 		float TreeLeafChromaMax = 0.6f;
+		// Video memory the per-vertex bend data may hold (TreeShapes); beyond it the least recently drawn shapes are freed
+		int LodBendDataBudgetMB = 512;
+		int NearTreeDataBudgetMB = 128;
 	};
 
 	/** @brief Mirrors TreeWindCB in TreeWind.hlsli. */
@@ -205,6 +208,13 @@ private:
 	/** @brief How stormy a weather is, 0 calm to 1 storm: the larger of its type and its own wind speed. */
 	float GetStorminess(const RE::TESWeather* a_weather) const;
 
+	/**
+	 * @brief Where the player stands and how far the object LOD rings reach (the game's fBlockLevel* settings), for
+	 * freeing the bend data of LOD blocks the game has unloaded. Not valid in interiors (flagged) and menus. Stamps
+	 * the bend data with the worldspace, so a change of worldspace frees the tree LOD data of the old one alone.
+	 */
+	TreeShapes::LodBounds GetLodBounds();
+
 	std::unique_ptr<ConstantBuffer> windOnCB;
 	std::unique_ptr<ConstantBuffer> windOffCB;
 	std::unique_ptr<ConstantBuffer> windNearCB;
@@ -245,4 +255,9 @@ private:
 	bool bendWeightsTreeModSupport = true;
 	// Loaded tree data built with another minimum height is freed
 	float nearTreesMinHeight = 250.0f;
+	// The worldspace the tree LOD data belongs to; its blocks share nothing with another worldspace's
+	RE::FormID lastWorldSpace = 0;
+	// fBlockLevel0Distance, fBlockLevel1Distance, fBlockMaximumDistance, looked up once
+	const RE::Setting* ringSettings[3] = {};
+	bool ringSettingsLooked = false;
 };

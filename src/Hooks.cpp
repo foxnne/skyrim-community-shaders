@@ -1405,7 +1405,7 @@ namespace Hooks
 		logger::info("Hooking weather extensions");
 		stl::detour_thunk<WeatherExtensions::Precipitation_Restore>(REL::RelocationID(25640, 26181));
 		stl::detour_thunk<WeatherExtensions::Sky_UpdateColors>(REL::RelocationID(25686, 26233));
-		Util::VisualClock::SetColorsHookInstalled(true);
+		Util::VisualClock::SetColorsHookInstalled(WeatherExtensions::Sky_UpdateColors::func.address() != 0);
 		stl::detour_thunk<WeatherExtensions::Sky_UpdateWeather>(REL::RelocationID(25684, 26231));
 		stl::detour_thunk<WeatherExtensions::Sky_SetDirectionalAmbientColors>(REL::RelocationID(98989, 105643));
 

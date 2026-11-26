@@ -205,7 +205,7 @@ void SkySync::PostPostLoad()
 	}
 
 	stl::detour_thunk<Sky_Update>(REL::RelocationID(25682, 26229));
-	Util::VisualClock::SetSkyHookInstalled(true);
+	Util::VisualClock::SetSkyHookInstalled(Sky_Update::func.address() != 0);
 	Util::SetCelestialTransitionHandlerAvailable(true);
 
 	gSunPosition = reinterpret_cast<RE::NiPoint3*>(REL::RelocationID(527924, 414871).address());

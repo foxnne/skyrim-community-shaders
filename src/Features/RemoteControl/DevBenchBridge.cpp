@@ -5,6 +5,7 @@
 #include "Features/SkySync.h"
 #include "Features/InteriorSun.h"
 #include "Features/PostProcessing.h"
+#include "Deferred.h"
 #include "Features/PostProcessing/HistogramAutoExposure.h"
 
 // Registers our tools into the devbench test bench over its C-ABI. Gated by
@@ -1688,7 +1689,7 @@ namespace
 	{
 		const std::string action = a_args.value("action", std::string{});
 		if (action.empty())
-			return json{ { "error", "missing required parameter 'action'" }, { "supported", json::array({ "spawn", "talk", "place", "equip", "remove", "clear", "list", "camera", "camera_get", "view_get", "pin", "unpin", "mipbias", "inspect_actor" }) } };
+			return json{ { "error", "missing required parameter 'action'" }, { "supported", json::array({ "spawn", "talk", "place", "equip", "remove", "clear", "list", "camera", "camera_get", "view_get", "pin", "unpin", "mipbias", "inspect_actor", "piece_cull", "debug_view" }) } };
 
 		return RunOnMainThread([action, a_args]() -> json {
 			auto* player = RE::PlayerCharacter::GetSingleton();
@@ -1828,6 +1829,23 @@ namespace
 					});
 				const char* name = actor->GetDisplayFullName();
 				return json{ { "actor", name ? name : "" }, { "formID", std::format("{:08X}", actor->GetFormID()) }, { "pieces", std::move(pieces) } };
+			}
+
+			// Deferred debug view (menu Advanced > Deferred Debug View), so a black-skin moment can be split into material
+			// (Albedo) vs lighting (Diffuse Lighting) without the user opening the menu (2026-11-25). mode: 0 off .. 12.
+			if (action == "debug_view") {
+				auto* deferred = globals::deferred;
+				if (!deferred)
+					return json{ { "error", "deferred not available" } };
+				const int mode = a_args.value("mode", 0);
+				if (mode < 0 || mode >= static_cast<int>(Deferred::DebugView::Count))
+					return json{ { "error", "mode out of range" }, { "count", static_cast<int>(Deferred::DebugView::Count) } };
+				const bool wasOff = deferred->debugView == Deferred::DebugView::Off;
+				deferred->debugView = static_cast<Deferred::DebugView>(mode);
+				if (wasOff != (mode == 0))
+					deferred->ClearShaderCache();  // the debug branch is a shader define, as in the menu
+				return json{ { "action", "debug_view" }, { "mode", mode },
+					{ "names", json::array({ "Off", "Albedo", "Reflectance", "Normal", "Roughness", "Mask", "Diffuse", "Specular", "SSGI", "SSR", "DynamicCubemaps", "DiffuseLighting", "SSGIAO" }) } };
 			}
 
 			// Hide or show an actor's 3D pieces by name (substring, case-insensitive), to tell overlapping meshes apart

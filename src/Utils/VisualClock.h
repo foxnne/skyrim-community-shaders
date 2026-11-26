@@ -66,9 +66,14 @@ namespace Util::VisualClock
 	};
 }
 
-// Exports for other plugins (resolved with GetProcAddress, like BottledShaders_GetCloudDeck).
+// Exports for other plugins (resolved with GetProcAddress, like BottledShaders_GetCloudDeck). Versioned: a caller
+// checks BottledShaders_VisualClockVersion() >= 2 and resolves the whole set before using any of it. (The
+// unversioned BottledShaders_SetVisualClock was dropped: an early build exported it returning void, so its
+// result could not be trusted.)
+inline constexpr int kVisualClockVersion = 2;
+extern "C" __declspec(dllexport) int BottledShaders_VisualClockVersion();
 // a_daysPassed: the visual clock as an absolute GameDaysPassed value. a_rate: its current rate as a TimeScale.
 // Returns false, and activates nothing, when the sky cannot follow a visual clock.
-extern "C" __declspec(dllexport) bool BottledShaders_SetVisualClock(double a_daysPassed, float a_rate);
+extern "C" __declspec(dllexport) bool BottledShaders_SetVisualClock2(double a_daysPassed, float a_rate);
 extern "C" __declspec(dllexport) void BottledShaders_ClearVisualClock();
 extern "C" __declspec(dllexport) bool BottledShaders_VisualClockSupported();

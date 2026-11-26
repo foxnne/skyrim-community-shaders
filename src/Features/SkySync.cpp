@@ -397,10 +397,10 @@ SkySync::DirectionPacket SkySync::TakeDirections() const
 	return publishedDirections;
 }
 
-void SkySync::PublishLightColors(const LightColorPacket& colors)
+void SkySync::PublishLightColors(const LightColorPacket& packet)
 {
 	std::lock_guard lock{ exchangeMutex };
-	publishedLightColors = colors;
+	publishedLightColors = packet;
 }
 
 SkySync::LightColorPacket SkySync::TakeLightColors() const

@@ -15,7 +15,9 @@ namespace HitchSampler
 		// A frame older than this is sampled; a finished frame longer than kReportMs is written to the log
 		constexpr double kSampleStartMs = 38.0;
 		constexpr double kReportMs = 50.0;
-		constexpr double kDumpMs = 300.0;  // frames this long also get every sample written to SKSE/HitchSamples
+		// Frames this long also get every sample written to SKSE/HitchSamples. 120 ms (was 300) so the fast-travel
+		// move frame at the top of the arc (220-300 ms since spread attach, 2026-11-25) and the frames after it are kept.
+		constexpr double kDumpMs = 120.0;
 		constexpr size_t kStackWords = 768;  // 6 KB of stack above the stack pointer
 		constexpr size_t kChain = 6;         // return addresses into this module kept per sample
 		constexpr size_t kMaxSamples = 4096;
@@ -171,7 +173,11 @@ namespace HitchSampler
 				const auto dir = (logDir ? *logDir : std::filesystem::path{}) / "HitchSamples";
 				std::error_code ec;
 				std::filesystem::create_directories(dir, ec);
-				if (std::ofstream out(dir / std::format("frame{}_{:.0f}ms.txt", a_frame, a_frameMs)); out) {
+				// Local wall-clock time in the name, to match a dump to a line of another plugin's log (Sky Above "Move timing")
+				SYSTEMTIME now;
+				GetLocalTime(&now);
+				const auto name = std::format("frame{}_{:.0f}ms_{:02}{:02}{:02}.{:03}.txt", a_frame, a_frameMs, now.wHour, now.wMinute, now.wSecond, now.wMilliseconds);
+				if (std::ofstream out(dir / name); out) {
 					for (size_t i = 0; i < g_sampleCount; ++i) {
 						const auto& sample = g_samples[i];
 						if (sample.frame != a_frame)

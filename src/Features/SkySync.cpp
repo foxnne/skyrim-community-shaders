@@ -247,8 +247,10 @@ void SkySync::OnSkyUpdateColors(RE::Sky* sky)
 		return;
 	}
 
-	const bool moonsHidden = lightNightWeight >= 1.0f && globals::features::effects11.enableEffect && sky->skyColor[RE::TESWeather::ColorTypes::kMoonGlare] == RE::NiColor{};
-	const float moonsVisible = moonsHidden ? 0.0f : 1.0f;
+	// Continuous in both the night weight and the glare, so neither the blend nor a glare graded down to black cuts the light at once
+	const float moonsVisible = globals::features::effects11.enableEffect ?
+	                               GetNightMoonVisibility(sky->skyColor[RE::TESWeather::ColorTypes::kMoonGlare], lightNightWeight) :
+	                               1.0f;
 
 	auto& dirLight = sky->skyColor[static_cast<uint>(RE::TESWeather::ColorTypes::kSunlight)];
 	// Lightning strikes from overhead rather than the caster, so only the light under the flash is dimmed
@@ -282,11 +284,16 @@ void SkySync::ApplyMoonlightColors(RE::Sky* sky)
 		return RE::Sky::COLOR_BLEND{ { nightColor(sky->currentWeather), {}, nightColor(sky->lastWeather), {} }, { currentWeight, 0.0f, lastWeight, 0.0f } };
 	};
 
-	// Full night at once, since the light is dimmed out at the handover; undimmed, vanilla's blend avoids a pop
+	// Blend into night on the same clock as the moonlight cap rather than switching at once: NAT night sunlight
+	// can be brighter than late sunset, and a switch shows whenever the light is not fully dimmed out at that moment.
+	// Undimmed, vanilla's blend avoids a pop.
 	if (settings.DimSunlightUnderHorizon) {
 		auto sunlightBlend = nightBlend(RE::TESWeather::ColorTypes::kSunlight);
-		sky->SetColor(sky->skyColor[RE::TESWeather::ColorTypes::kSunlight], &sunlightBlend, GetDirectionalFlash(sky));
-		lightNightWeight = 1.0f;
+		RE::NiColor nightSunlight;
+		sky->SetColor(nightSunlight, &sunlightBlend, GetDirectionalFlash(sky));
+		auto& sunlight = sky->skyColor[RE::TESWeather::ColorTypes::kSunlight];
+		lightNightWeight = std::clamp(twilightCap, 0.0f, 1.0f);
+		sunlight += (nightSunlight - sunlight) * lightNightWeight;
 	}
 
 	// Moon::Update tints the discs with this; ease it in with the moonlight, as the moons stay visible through the handover
@@ -378,6 +385,7 @@ void SkySync::PreparePendingTransitions()
 		return;
 
 	if (request.gameLoad) {
+		moonlightSnapPending = true;
 		shadowFader.Reset();
 		currentCell = nullptr;
 		currentCellInterior = false;
@@ -483,17 +491,19 @@ bool SkySync::Update(const RE::Sky* sky)
 
 	const bool transitionCompleted = std::exchange(immediateTransitionReady, false);
 	twilightCap = GetTwilightCap(climate->timing, hour, sunHeight);
-	UpdateMoonlightFade(fadeAdvance / SecondsPerGameHour, transitionCompleted);
 
 	const bool wasTransitioning = shadowFader.transitioning;
 	const Caster previousTarget = shadowFader.target;
 	shadowFader.Update(sky, directions, intensities, settings.ShadowTransitionDuration, fadeAdvance, transitionCompleted || resetTransition);
+	// After the fader, so the fade knows whether a moon is the caster this frame
+	UpdateMoonlightFade(fadeAdvance / SecondsPerGameHour, std::exchange(moonlightSnapPending, false) || resetTransition, previousTarget);
 	// A finished caster fade counts as a completed transition, so cached shadows (terrain) refresh to the new caster.
 	// A swap can also start and finish in one update (zero duration), so a changed target counts too.
 	const bool casterSettled = (wasTransitioning || shadowFader.target != previousTarget) && !shadowFader.transitioning;
 
 	// At night follow the light's own direction, so the dim stays continuous while it swings between moons
 	currentDim = sunBelowHorizon ? moonlightFade * GetHorizonDim(GetHeightAboveHorizon(shadowFader.dimDir)) : GetHorizonDim(sunHeight);
+	lastLightLevel = GetLightFactor(true);
 	ApplyLightColor(sky);
 
 	return transitionCompleted || casterSettled;
@@ -533,11 +543,36 @@ float SkySync::GetHorizonDim(float heightAboveHorizon) const
 	return std::clamp(heightAboveHorizon / fadeRadians, 0.0f, 1.0f);
 }
 
-void SkySync::UpdateMoonlightFade(float advanceHours, bool immediate)
+void SkySync::UpdateMoonlightFade(float advanceHours, bool snap, Caster previousTarget)
 {
-	const float target = sunBelowHorizon ? 1.0f : 0.0f;
+	// The fade starts when a moon actually lights the scene, not at the sun's handover. Counted from the handover,
+	// it was already spent when a moon rose or faded in later, which then popped in at the caster swap's speed
+	// (ShadowTransitionDuration game seconds: one frame at flight time scales, and one step of an hour scrub).
+	// Game hours throughout, so the fade keeps its length in game time at any time scale.
 	const float step = GetMoonlightFadeProgress(advanceHours);
-	moonlightFade = std::min(immediate ? target : std::clamp(target, moonlightFade - step, moonlightFade + step), twilightCap);
+	const bool moonLit = sunBelowHorizon && (shadowFader.target == Caster::Masser || shadowFader.target == Caster::Secunda);
+
+	// Light still showing from before the moon took over fades out on its own, so the incoming ramp can start at zero
+	moonlightOut = sunBelowHorizon && !snap ? std::max(moonlightOut - step, 0.0f) : 0.0f;
+
+	if (!sunBelowHorizon || (snap && !moonLit)) {
+		moonlightFade = 0.0f;
+	} else if (!moonLit) {
+		// The zenith fallback fades the light out through casterFade; the ramp restarts when a moon is selected
+	} else if (snap) {
+		// Only a game load or a new space; a long scrub or time jump still ramps from zero
+		moonlightFade = 1.0f;
+	} else if (shadowFader.target != previousTarget) {
+		// First frame of a new moon caster, from the zenith or the other moon: none of this update's elapsed time
+		// belongs to it. The old caster's light is kept on and faded out, but never daylight: nothing carries over
+		// from the sun, and the carry-over is capped like the moonlight, which is zero at the sun's handover.
+		const bool fromNight = previousTarget != Caster::Sun;
+		moonlightOut = std::max(moonlightOut, fromNight ? std::min(lastLightLevel, twilightCap) : 0.0f);
+		moonlightFade = 0.0f;
+	} else {
+		moonlightFade = std::min(moonlightFade + step, 1.0f);
+	}
+	moonlightFade = std::min(moonlightFade, twilightCap);
 }
 
 float SkySync::GetTwilightCap(const RE::TESClimate::Timing& timing, float hour, float sunHeight) const

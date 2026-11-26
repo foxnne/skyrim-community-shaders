@@ -1120,9 +1120,15 @@ void ScreenSpaceGI::DrawSSGI()
 		if (dynamicCubemaps.loaded && skylighting.loaded && skylighting.texProbeArray)
 			srvs.at(6) = skylighting.texProbeArray->srv.get();
 		srvs.at(8) = texNormal->srv.get();
-		// t9: Physical Sky's sky-view LUT for the open-sky fill (SkyFillSource 1) and the debug reference; null = unused
-		if (globals::features::physicalSky.IsRendering() && globals::features::physicalSky.texSvLut)
-			srvs.at(9) = globals::features::physicalSky.texSvLut->srv.get();
+		// t9: Physical Sky's sky-view LUT (generated in EarlyPrepass, before this pass) for the open-sky fill
+		// (SkyFillSource 1) and the debug reference; t10: its volumetric cloud transmittance cube, which decides per
+		// direction between the clear-sky LUT and the cubemap. srvs has 11 entries and is bound as t0-t10. Null = unused.
+		if (auto& physicalSky = globals::features::physicalSky; physicalSky.IsRendering()) {
+			if (physicalSky.texSvLut)
+				srvs.at(9) = physicalSky.texSvLut->srv.get();
+			if (physicalSky.texVolCubeTr)
+				srvs.at(10) = physicalSky.texVolCubeTr->srv.get();
+		}
 		ID3D11ShaderResourceView* envIBLSrv = ibl.loaded && ibl.envIBLTexture ? ibl.envIBLTexture->srv.get() : nullptr;
 
 		uavs.at(0) = texNRDInput->uav.get();

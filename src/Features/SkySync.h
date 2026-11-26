@@ -95,7 +95,7 @@ public:
 	/** @brief How far this frame's moon glare was moved to the night colour, 0 to 1, so moon grading can follow it. */
 	float GetMoonNightWeight() const { return moonNightWeight; }
 
-	/** @brief 1 when this frame's sunlight was rebuilt from night colours, else 0, so light grading can follow it. */
+	/** @brief How far this frame's sunlight was blended to the night colour, 0 to 1, so light grading can follow it; above 0 only while the sun is below the horizon. */
 	float GetLightNightWeight() const { return lightNightWeight; }
 
 	/** @brief Installs rendering hooks and detects conflicting mods after plugin load. */
@@ -258,6 +258,7 @@ private:
 	bool skyRotationApplied = false;  // survives the game-load cache reset until the root is restored
 	float lastGameHour = -1.0f;
 	bool immediateTransitionReady = false;
+	bool moonlightSnapPending = false;  // a game load sets the moonlight fade at once instead of ramping it
 
 	float4 colors[BodyCount] = {};
 	RE::NiPoint3 rawDirections[BodyCount] = {};  // sky-local, before shadow elevation locking; zero when not computed this frame
@@ -295,8 +296,8 @@ private:
 	/** @brief Fraction of the moonlight fade duration that the given hours cover; 1 when the duration is zero. */
 	float GetMoonlightFadeProgress(float hours) const { return settings.HorizonFadeHours > 0.0f ? hours / settings.HorizonFadeHours : 1.0f; }
 
-	/** @brief Ramps moonlightFade in while the sun is below the horizon and out otherwise, never above twilightCap. */
-	void UpdateMoonlightFade(float advanceHours, bool immediate);
+	/** @brief Ramps moonlightFade in over the fade duration from when a moon becomes the caster, drops it with the light when none is, never above twilightCap. */
+	void UpdateMoonlightFade(float advanceHours, bool snap);
 
 	/** @brief Upper bound on moonlight: zero at the sun's handover, rising over the moonlight fade duration after sunset and falling with the sun's depth before sunrise. */
 	float GetTwilightCap(const RE::TESClimate::Timing& timing, float hour, float sunHeight) const;

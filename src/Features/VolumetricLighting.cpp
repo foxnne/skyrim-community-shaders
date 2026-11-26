@@ -437,24 +437,28 @@ namespace
 		return result;
 	}
 
-	RE::NiColor GetWeatherSunlight(RE::Sky* a_sky, const RE::TESWeather* a_weather, const WeatherTimeBlend& a_time, bool a_night)
+	RE::NiColor GetWeatherSunlight(RE::Sky* a_sky, const RE::TESWeather* a_weather, const WeatherTimeBlend& a_time, float a_nightWeight)
 	{
 		RE::NiColor result{};
 		if (!a_weather)
 			return result;
 
+		// Sky Sync blends the sunlight towards the night colour by a_nightWeight after sunset, so do the same here
 		constexpr auto sunlight = RE::TESWeather::ColorTypes::kSunlight;
 		RE::Sky::COLOR_BLEND blend{};
-		if (a_night) {
-			blend.RGBVal[0] = a_weather->colorData[sunlight][RE::TESWeather::ColorTime::kNight];
-			blend.blend[0] = 1.0f;
-		} else {
-			blend.RGBVal[0] = a_weather->colorData[sunlight][a_time.first];
-			blend.RGBVal[1] = a_weather->colorData[sunlight][a_time.second];
-			blend.blend[0] = a_time.firstWeight;
-			blend.blend[1] = 1.0f - a_time.firstWeight;
-		}
+		blend.RGBVal[0] = a_weather->colorData[sunlight][a_time.first];
+		blend.RGBVal[1] = a_weather->colorData[sunlight][a_time.second];
+		blend.blend[0] = a_time.firstWeight;
+		blend.blend[1] = 1.0f - a_time.firstWeight;
 		a_sky->SetColor(result, &blend, 0.0f);
+		if (a_nightWeight > 0.0f) {
+			RE::Sky::COLOR_BLEND nightBlend{};
+			nightBlend.RGBVal[0] = a_weather->colorData[sunlight][RE::TESWeather::ColorTime::kNight];
+			nightBlend.blend[0] = 1.0f;
+			RE::NiColor night{};
+			a_sky->SetColor(night, &nightBlend, 0.0f);
+			result += (night - result) * std::min(a_nightWeight, 1.0f);
+		}
 		return result;
 	}
 
@@ -498,7 +502,7 @@ void VolumetricLighting::FinishSkyUpdate(RE::Sky* a_sky)
 	if (a_sky && a_sky->mode.get() == RE::Sky::Mode::kFull && a_sky->currentClimate && a_sky->currentWeather && a_sky->lastWeather &&
 		weatherPct > 0.0f && weatherPct < 1.0f) {
 		const bool nightVolumetricLighting = nightRenderData;
-		const bool nightSunlight = globals::features::skySync.GetLightNightWeight() >= 1.0f;
+		const float nightSunlight = globals::features::skySync.GetLightNightWeight();
 		const auto time = GetWeatherTimeBlend(a_sky);
 
 		float intensityLast = 1.0f;

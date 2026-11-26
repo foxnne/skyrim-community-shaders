@@ -826,7 +826,8 @@ void Effects11::BlendGradedWeathers(RE::Sky* a_sky, std::span<RE::NiColor, RE::T
 	using ColorTime = RE::TESWeather::ColorTime;
 	using SkyColors = std::array<RE::NiColor, ColorTypes::kTotal>;
 
-	const bool nightSunlight = globals::features::skySync.GetLightNightWeight() >= 1.0f;
+	const float lightNightWeight = globals::features::skySync.GetLightNightWeight();
+	const bool nightSunlight = lightNightWeight > 0.0f;
 	const float moonNightWeight = globals::features::skySync.GetMoonNightWeight();
 	auto weatherColors = [&](const RE::TESWeather* a_weather) {
 		auto night = [&](uint32_t a_type) {
@@ -837,8 +838,8 @@ void Effects11::BlendGradedWeathers(RE::Sky* a_sky, std::span<RE::NiColor, RE::T
 		SkyColors result;
 		for (uint32_t type = 0; type < ColorTypes::kTotal; ++type)
 			result[type] = BlendColorTimes(a_sky, a_weather->colorData[type][transition->first], a_weather->colorData[type][transition->second], transition->firstWeight);
-		if (nightSunlight)
-			result[ColorTypes::kSunlight] = night(ColorTypes::kSunlight);
+		auto& sunlight = result[ColorTypes::kSunlight];
+		sunlight += (night(ColorTypes::kSunlight) - sunlight) * lightNightWeight;
 		auto& moonGlare = result[ColorTypes::kMoonGlare];
 		moonGlare += (night(ColorTypes::kMoonGlare) - moonGlare) * moonNightWeight;
 		return result;

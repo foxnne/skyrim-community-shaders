@@ -92,6 +92,7 @@ float3 SampleSSGIILSkin(uint2 pixCoord)
 
 	float3 linAlbedo = ColorManagement::SceneToLinear(AlbedoTexture[dispatchID.xy] / Color::PBRLightingScale);
 	float3 ssgiIl = IsSkinMask(MasksTexture[dispatchID.xy].xy) ? SampleSSGIILSkin(dispatchID.xy) : SampleSSGIIL(dispatchID.xy);
+	// Physical Sky Fill pre-compensates the open-sky fallback's chroma in diffuseGI, so this pass stays as it was.
 	ssgiIl = max(lerp(Color::RGBToLuminance(ssgiIl), ssgiIl, SharedData::ssgiSettings.ILSaturation), 0.0);
 	ssgiIl *= lerp(1.0, pow(max(SampleSSGIContactAO(dispatchID.xy), 1e-4), SharedData::ssgiSettings.AOPower), SSGI_CONTACT_IL_OCCLUSION);
 	// Masks.z is an IL gain here: Lighting's character light fill, or grass transmission albedo relative to reflection albedo.

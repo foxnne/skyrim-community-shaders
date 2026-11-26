@@ -110,6 +110,12 @@ public:
 		bool UseDynamicCubemapsAsFallback = true;
 		float DiffuseCubemapMult = 1.0f;
 		float FallbackSkyBoost = 1.0f;  // share of the up-facing sky boost in the ambient fallback
+		// foxnne sky-lit shadows: outdoor fill from the Physical Sky's own radiance (see diffuseGI.cs.hlsl)
+		bool PhysicalSkyFill = false;     // A/B switch; off = the IBL sky term as before
+		float SkyFillScale = 1.0f;        // sky term brightness where Skylighting sees open sky (replaces Sky IBL Scale there)
+		float SkyFillSaturation = 1.0f;   // sky term saturation (replaces Sky IBL Saturation); 1 = the sky's own blue
+		float SkyFillEnvWeight = 0.25f;   // DALC/env share on skyward rays under open sky; occluded sky keeps all of it
+		float BounceSkyLimit = 0.0f;      // traced bounce cap, in multiples of the ambient it hides; 0 = off
 		// NRD REBLUR
 		bool EnableREBLUR = true;
 		NRD::REBLURSettings Reblur;
@@ -173,9 +179,14 @@ public:
 		float AOPower;
 		float ILSaturation;
 		float FallbackSkyBoost;
-		float pad0[2];
+		uint PhysicalSkyFill;
+		float SkyFillScale;
+		float SkyFillSaturation;
+		float SkyFillEnvWeight;
+		float BounceSkyLimit;
+		float pad0;
 	};
-	static_assert(sizeof(SharedData) == 32);
+	static_assert(sizeof(SharedData) == 48);
 
 	SharedData GetCommonBufferData();
 

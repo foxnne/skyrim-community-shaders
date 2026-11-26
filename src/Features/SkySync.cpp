@@ -363,12 +363,12 @@ void SkySync::Sky_Update::thunk(RE::Sky* sky, float deltaTime)
 {
 	auto& lightning = globals::features::physicalSky.lightning;
 	lightning.SuppressVanilla(sky);
-	{
-		// A fast-travel flight's visual clock (Sky Above) runs ahead of the game's: the sky shows that time.
-		const Util::VisualClock::SkyScope visualTime;
-		func(sky, deltaTime);
-	}
+	// A fast-travel flight's visual clock (Sky Above) can run ahead of the game's: the sky's own hour shows it
+	// (colours via the Sky_UpdateColors hook, then everything that reads the sky's hour after this update).
+	Util::VisualClock::BeginSkyUpdate(sky);
+	func(sky, deltaTime);
 	lightning.SuppressVanilla(sky);
+	Util::VisualClock::ApplyToSky(sky);
 	auto& skySync = globals::features::skySync;
 	if (sky && sky->sun)
 		globals::features::linearLighting.ClearSunlightColor(sky->sun->light.get());
@@ -477,7 +477,7 @@ bool SkySync::Update(const RE::Sky* sky)
 
 	const auto calendar = globals::game::calendar;
 	const auto deltaTime = globals::game::deltaTime;
-	float fadeAdvance = calendar && deltaTime ? std::max(*deltaTime * static_cast<float>(Util::VisualClock::TimeRate()), 0.0f) : 0.0f;
+	float fadeAdvance = calendar && deltaTime ? std::max(*deltaTime * static_cast<float>(Util::VisualClock::Current().rate), 0.0f) : 0.0f;
 
 	// The clock can outrun real time (waiting, fast travel) or move while frames are paused
 	// (console, scrubbing), so advance by whichever of the two elapsed more.

@@ -39,6 +39,7 @@
 #include "Features/ScreenshotFeature.h"
 #include "Features/Skin.h"
 #include "Features/SkySync.h"
+#include "Utils/VisualClock.h"
 #include "Features/Skylighting.h"
 #include "Features/Upscaling.h"
 #include "Features/VolumetricLighting.h"
@@ -420,6 +421,7 @@ namespace WeatherExtensions
 	{
 		static void thunk(RE::Sky* sky, float a_delta)
 		{
+			Util::VisualClock::ApplyToSky(sky);  // a flight's visual clock: colours interpolated at the hour the sky shows
 			func(sky, a_delta);
 			globals::features::volumetricLighting.BeginSkyUpdate();
 			// Moonlight colours feed Effects11's grading; the dim must follow it, as its colour filter lifts zero

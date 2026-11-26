@@ -1,59 +1,57 @@
 // Visual clock: lets another plugin show game time passing faster than the world runs.
 //
-// Sky Above's fast-travel flight shows hours passing (sun, sky colours, weather blend, cloud drift) but
-// no longer runs the live world at TimeScale 5000 for it: at 5000x every loaded and low-process actor,
-// Papyrus game-time update and spawn timer ran ~15 game hours per flight in real time, and the game
-// crashed in the Havok broadphase after 14-21 flights (harness/RESEARCH-flight-durability-2026-11-25.md).
-// The plugin keeps the game's TimeScale normal, publishes a visual clock that runs ahead of the game's
-// own, and steps the real clock up to it at the landing. While the visual clock is ahead:
-//   - Sky::Update runs with the calendar's GameHour/GameDaysPassed showing the visual time (SkySync's
-//     Sky_Update hook), so the engine's own sun position, sky colours, moon phase and weather blend follow it;
-//   - cloud drift and Sky Sync's fades follow the visual time rate instead of the game's TimeScale;
-//   - the hour/day readers outside Sky::Update (ground fog, ENB helper, night sky palette) see the visual time.
-// The plugin refreshes it every frame; it lapses by itself 2 s after the last refresh, and as soon as the
-// real clock has caught up. Normal play is untouched.
+// Sky Above's fast-travel flight shows hours passing (sun, sky colours, cloud drift) but no longer runs
+// the live world at TimeScale 5000 for it: at 5000x every loaded and low-process actor, Papyrus game-time
+// update and spawn timer ran ~15 game hours per flight in real time, and the game crashed in the Havok
+// broadphase after 14-21 flights (harness/RESEARCH-flight-durability-2026-11-25.md). The plugin keeps the
+// game's TimeScale normal, publishes a visual clock that runs ahead of the game's own, and steps the real
+// clock up to it at the landing.
+//
+// The calendar globals are never written here. Only the sky's own hour field (Sky::currentGameHour) shows the
+// visual hour, and only between the engine's reads of it:
+//   - BeginSkyUpdate (before Sky::Update): puts back the value the engine itself left last frame, so
+//     Sky::Update always starts from its own state, and takes this frame's snapshot;
+//   - ApplyToSky before Sky::UpdateColors (the time-of-day colour interpolation) and after Sky::Update
+//     (Sky Sync's sun and shadow direction, exposure, Effects11, night sky and the renderers read it then).
+// Weather timing, the moons' phases and everything outside the sky keep the real clock. Consumers read one
+// coherent per-frame snapshot (Current()). Normal play is untouched.
 
 #pragma once
 
+#include <cstdint>
+
 namespace Util::VisualClock
 {
-	/** @brief True while a visual clock is published, fresh, and ahead of the game's own clock. */
-	[[nodiscard]] bool Active();
+	/** @brief One frame's view of the visual clock, taken on the main thread at the start of Sky::Update. */
+	struct Frame
+	{
+		bool          active = false;  // fresh, supported, and ahead of the game's clock
+		float         hoursAhead = 0.0f;
+		float         hour = 12.0f;    // the hour the sky shows (0-24); the game's when inactive
+		float         daysPassed = 0.0f;
+		double        rate = 20.0;     // time rate sky motion follows (TimeScale-like)
+		std::uint32_t sequence = 0;    // publication the frame was taken from
+	};
 
-	/** @brief Hours the visual clock runs ahead of the game's (0 when inactive). */
-	[[nodiscard]] float HoursAhead();
+	/** @brief The current frame's snapshot (any thread). Take it once per calculation. */
+	[[nodiscard]] Frame Current();
 
-	/** @brief The hour (0-24) the sky shows: the visual clock's while active, else the game's. */
-	[[nodiscard]] float GameHour();
+	/** @brief Whether the sky can follow a visual clock (hooks installed and Sky Sync enabled). */
+	[[nodiscard]] bool Supported();
 
-	/** @brief GameDaysPassed as the sky shows it. */
-	[[nodiscard]] float DaysPassed();
-
-	/** @brief The time rate (game seconds per real second, like TimeScale) sky motion should follow. */
-	[[nodiscard]] double TimeRate();
-
-	/** @brief Set once the Sky::Update hook that applies the visual clock is installed (Sky Sync). */
+	/** @brief Set once Sky Sync's Sky::Update hook is installed. */
 	void SetSkyHookInstalled(bool a_installed);
 
-	/** @brief Swaps the calendar globals to the visual time for the duration of Sky::Update (main thread only). */
-	class SkyScope
-	{
-	public:
-		SkyScope();
-		~SkyScope();
-		SkyScope(const SkyScope&) = delete;
-		SkyScope& operator=(const SkyScope&) = delete;
+	/** @brief Main thread, before the engine's Sky::Update: restore the sky's own hour and take this frame's snapshot. */
+	void BeginSkyUpdate(RE::Sky* a_sky);
 
-	private:
-		bool  swapped = false;
-		float savedHour = 0.0f;
-		float savedDays = 0.0f;
-	};
+	/** @brief Main thread, inside Sky::Update before Sky::UpdateColors, and after Sky::Update: show the visual hour. */
+	void ApplyToSky(RE::Sky* a_sky);
 }
 
 // Exports for other plugins (resolved with GetProcAddress, like BottledShaders_GetCloudDeck).
 // a_daysPassed: the visual clock as an absolute GameDaysPassed value. a_rate: its current rate as a TimeScale.
-extern "C" __declspec(dllexport) void BottledShaders_SetVisualClock(double a_daysPassed, float a_rate);
+// Returns false, and activates nothing, when the sky cannot follow a visual clock.
+extern "C" __declspec(dllexport) bool BottledShaders_SetVisualClock(double a_daysPassed, float a_rate);
 extern "C" __declspec(dllexport) void BottledShaders_ClearVisualClock();
-// False when the sky cannot follow a visual clock (Sky Sync's Sky::Update hook is not installed).
 extern "C" __declspec(dllexport) bool BottledShaders_VisualClockSupported();

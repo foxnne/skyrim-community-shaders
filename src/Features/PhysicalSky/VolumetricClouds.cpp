@@ -1027,7 +1027,7 @@ void PhysicalSky::UpdateCloudWind()
 	// the hours passing), the clouds drift and develop that much faster too. Normal play is unchanged.
 	if (!reference) {
 		// The game's TimeScale, or a flight's visual clock rate while one runs ahead (Utils/VisualClock.h).
-		const double rate = Util::VisualClock::TimeRate();
+		const double rate = Util::VisualClock::Current().rate;
 		if (std::isfinite(rate))
 			elapsed *= std::clamp(rate / 20.0, 1.0, 250.0);
 	}

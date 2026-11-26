@@ -726,7 +726,8 @@ float GroundFog::TimeOfDayAmount(float& a_daylight) const
 	if (!sky || !sky->currentClimate)
 		return settings.MiddayAmount;
 	const auto calendar = Util::Climate::GetCalendar();
-	float hour = Util::VisualClock::Active() ? Util::VisualClock::GameHour() : calendar && calendar->gameHour ? calendar->gameHour->value : sky->currentGameHour;
+	const auto visual = Util::VisualClock::Current();
+	float hour = visual.active ? visual.hour : calendar && calendar->gameHour ? calendar->gameHour->value : sky->currentGameHour;
 	if (!std::isfinite(hour))
 		return settings.MiddayAmount;
 	hour = std::fmod(std::max(hour, 0.0f), 24.0f);

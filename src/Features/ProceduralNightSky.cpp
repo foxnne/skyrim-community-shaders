@@ -100,7 +100,8 @@ namespace
 	const AuroraPalette& GetNightlyPalette()
 	{
 		const auto* calendar = RE::Calendar::GetSingleton();
-		const float days = calendar ? Util::VisualClock::DaysPassed() : 0.0f;
+		const auto  visual = Util::VisualClock::Current();
+		const float days = visual.active ? visual.daysPassed : calendar ? calendar->GetDaysPassed() : 0.0f;
 		std::uint32_t hash = static_cast<std::uint32_t>(std::floor(days + 0.5f)) * 2654435761u;
 		hash ^= hash >> 16;
 		const std::uint32_t roll = hash % 20u;

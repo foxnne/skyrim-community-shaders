@@ -1990,7 +1990,12 @@ void PhysicalSky::RenderVolumetricClouds(VolumetricCloudPass a_pass)
 				dispatchConstants = nullptr;
 				context->CSSetConstantBuffers(3, 1, &dispatchConstants);
 			}
-			if (cloudData.middleLayer.z > 0.f || renderCirrus) {
+			// The upper layers use the voxel trace set as scratch targets, so it must exist whenever they render
+			// (it is otherwise created lazily for voxel clouds only); rendering them also keeps it from idling out.
+			const bool upperLayers = cloudData.middleLayer.z > 0.f || renderCirrus;
+			if (upperLayers)
+				voxelTraceIdleFrames = 0;
+			if (upperLayers && EnsureVoxelTraceResources()) {
 				// Reuse the free composition targets after the voxel pass. Upper
 				// layers retain their own march and share only temporal reconstruction.
 				ID3D11UnorderedAccessView* nullLightning = nullptr;

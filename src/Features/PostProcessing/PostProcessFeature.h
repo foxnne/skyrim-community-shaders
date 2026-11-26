@@ -121,6 +121,12 @@ struct PostProcessFeature : public std::enable_shared_from_this<PostProcessFeatu
 	virtual void ClearShaderCache() = 0;
 	virtual void RestoreDefaultSettings() = 0;
 
+	/// Called once per frame for every pipeline feature, active or not, before the pipeline runs. Features that
+	/// own large targets release them here after a spell without a Draw, and re-create them on the next Draw.
+	virtual void ReleaseIdleResources() {}
+	/// Frames without a Draw after which ReleaseIdleResources drops a feature's targets (about ten seconds).
+	static constexpr uint32_t kIdleResourceFrames = 600;
+
 	virtual void LoadSettings(json& o_json) = 0;
 	virtual void SaveSettings(json& o_json) = 0;
 	/// Rewrites settings keys from an older version into the current shape, in place.

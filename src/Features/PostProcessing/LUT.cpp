@@ -105,6 +105,15 @@ void LUT::LoadSettings(json& o_json)
 
 void LUT::UpdateTexture()
 {
+	// A LUT that is switched off holds no texture: it is dropped after a spell disabled (so a scene toggling it
+	// does not thrash the disk) and read again, from the same path, as soon as the feature is enabled.
+	if (!enabled) {
+		if (++disabledFrames > kIdleResourceFrames && (texLUT2D || texLUT3D))
+			ReleaseTexture();
+		return;
+	}
+	disabledFrames = 0;
+
 	// Scene blends reload every frame, so only hit the disk when the path or the pack it resolves against changes.
 	if (settings.LutPath == attemptedPath && UnifiedPresetCatalog::GetSingleton().GetActivePackId() == attemptedPackId)
 		return;

@@ -444,7 +444,7 @@ bool GrassBucketStore::EnsureArgsCapacity(uint32_t count)
 
 bool GrassBucketStore::PrepareCullOutputs(std::vector<GrassBucket*>& visible)
 {
-	constexpr uint32_t kRetentionFrames = 600;
+	constexpr uint32_t kRetentionFrames = 3000;  // about 50 s of exterior frames under half capacity before the output shrinks
 	constexpr uint32_t kGrowthRetryFrames = 300;
 
 	if (!EnsureArgsCapacity((uint32_t)visible.size()))
@@ -495,10 +495,15 @@ bool GrassBucketStore::PrepareCullOutputs(std::vector<GrassBucket*>& visible)
 		return !visible.empty();
 	}
 
-	// Delay shrinking so camera turns do not cause repeated reallocations.
-	if (!CanReduceInstanceCapacity(cullOutput.capacity, (uint32_t)used)) {
-		cullOutput.underutilizedFrames = 0;
-		cullOutput.underutilizedPeak = 0;
+	// Delay shrinking so camera turns do not cause repeated reallocations. The output is tens of MB and both copies
+	// are alive at a swap, so it only shrinks after a long spell at under half its capacity, and never on the
+	// strength of frames with no grass at all (interiors, menus, loading): those say nothing about the next exterior.
+	const bool reducible = used > 0 && cullOutput.capacity > 4096 && reservedCapacity((uint32_t)used) <= cullOutput.capacity / 2;
+	if (!reducible) {
+		if (used > 0) {
+			cullOutput.underutilizedFrames = 0;
+			cullOutput.underutilizedPeak = 0;
+		}
 		return true;
 	}
 

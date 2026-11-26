@@ -59,8 +59,6 @@ struct LookGrade : public PostProcessFeature
 	};
 	eastl::unique_ptr<ConstantBuffer> lookCB = nullptr;
 
-	eastl::unique_ptr<Texture2D> texOutput = nullptr;
-
 	winrt::com_ptr<ID3D11PixelShader> lookPS = nullptr;
 
 	virtual void SetupResources() override;

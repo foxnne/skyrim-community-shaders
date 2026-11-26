@@ -94,7 +94,12 @@ struct MotionBlur : public PostProcessFeature
 	eastl::unique_ptr<Texture2D> horizontalPassTexture;  // [grid x height]
 	eastl::unique_ptr<Texture2D> verticalPassTexture;    // [grid x grid]
 	eastl::unique_ptr<Texture2D> neighborMaxTexture;     // [grid x grid]
-	eastl::unique_ptr<Texture2D> blurOutputTexture;      // Full resolution
+	eastl::unique_ptr<Texture2D> blurOutputTexture;      // Full resolution; only when the owner's pool cannot serve the format
+
+	/// The output for this frame: a pooled colour scratch target when possible, else blurOutputTexture.
+	Texture2D* AcquireBlurOutput(const TextureInfo& inout_tex);
+	virtual void ReleaseIdleResources() override;
+	uint32_t lastDrawFrame = 0;
 
 	// Dimensions tracking
 	uint32_t lastWidth = 0;

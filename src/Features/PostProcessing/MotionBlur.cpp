@@ -231,6 +231,7 @@ void MotionBlur::Draw(TextureInfo& inout_tex)
 
 		// Check for resize and update resources if needed
 		CheckAndResizeResources(inout_tex);
+		lastDrawFrame = globals::state->frameCount;
 
 		// Compute dynamic resolution dimensions for dispatch (without overwriting lastWidth/lastHeight
 		// which are used for resource size tracking)
@@ -344,38 +345,15 @@ bool MotionBlur::CheckAndResizeResources(const TextureInfo& inout_tex)
 			neighborMaxTexture->CreateSRV(gridSrvDesc);
 			neighborMaxTexture->CreateUAV(gridUavDesc);
 
-			// Create full-resolution output texture with format matching the input texture
-			D3D11_TEXTURE2D_DESC blurDesc = texDesc;
-			blurDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-
-			// Output texture views need to match its format
-			D3D11_SHADER_RESOURCE_VIEW_DESC blurSrvDesc = {
-				.Format = blurDesc.Format,
-				.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D,
-				.Texture2D = { .MostDetailedMip = 0, .MipLevels = 1 }
-			};
-
-			D3D11_UNORDERED_ACCESS_VIEW_DESC blurUavDesc = {
-				.Format = blurDesc.Format,
-				.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D,
-				.Texture2D = { .MipSlice = 0 }
-			};
-
-			blurOutputTexture = eastl::make_unique<Texture2D>(blurDesc, "MotionBlur::BlurOutput");
-			blurOutputTexture->CreateSRV(blurSrvDesc);
-			blurOutputTexture->CreateUAV(blurUavDesc);
-
-			if (auto context = globals::d3d::context; context && blurOutputTexture->uav) {
-				const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-				context->ClearUnorderedAccessViewFloat(blurOutputTexture->uav.get(), clearColor);
-			}
+			// The full-resolution output comes from the owner's colour scratch pool each frame (AcquireBlurOutput);
+			// a dedicated texture is only made when the pool cannot serve the input format.
 		} catch (const std::exception& e) {
 			logger::error("Motion blur error creating textures: {}", e.what());
 			return false;
 		}
 
 		// Validate that all textures were created successfully
-		if (!horizontalPassTexture || !verticalPassTexture || !neighborMaxTexture || !blurOutputTexture) {
+		if (!horizontalPassTexture || !verticalPassTexture || !neighborMaxTexture) {
 			logger::error("Motion blur error: Failed to create one or more required textures");
 			return false;
 		}
@@ -569,7 +547,8 @@ void MotionBlur::ExecuteBlurPass(TextureInfo& inout_tex)
 	auto& motionVectorTex = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
 	auto* depthSRV = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV;
 
-	if (!motionVectorTex.SRV || !depthSRV || !neighborMaxTexture || !neighborMaxTexture->srv || !blurOutputTexture || !blurOutputTexture->uav)
+	Texture2D* output = AcquireBlurOutput(inout_tex);
+	if (!motionVectorTex.SRV || !depthSRV || !neighborMaxTexture || !neighborMaxTexture->srv || !output || !output->uav || !output->srv)
 		return;
 
 	ID3D11ShaderResourceView* velocitySRV = motionVectorTex.SRV;
@@ -588,7 +567,7 @@ void MotionBlur::ExecuteBlurPass(TextureInfo& inout_tex)
 	ID3D11ShaderResourceView* srvs[] = { inout_tex.srv, velocitySRV, neighborMaxTexture->srv.get(), depthSRV };
 	ID3D11Buffer* blurCB = blurConstantBufferObj->CB();
 
-	SetupComputePass(blurPassShader.get(), srvs, 4, blurOutputTexture->uav.get(), blurCB);
+	SetupComputePass(blurPassShader.get(), srvs, 4, output->uav.get(), blurCB);
 
 	// Dispatch blur pass at dynamic resolution (full-screen blur)
 	uint32_t dispatchX = (dynamicWidth + 7) / 8;
@@ -609,7 +588,54 @@ void MotionBlur::ExecuteBlurPass(TextureInfo& inout_tex)
 	context->CSSetShader(nullptr, nullptr, 0);
 
 	// Set output
-	if (blurOutputTexture && blurOutputTexture->resource && blurOutputTexture->srv) {
-		inout_tex = { blurOutputTexture->resource.get(), blurOutputTexture->srv.get() };
+	inout_tex = { output->resource.get(), output->srv.get() };
+}
+
+Texture2D* MotionBlur::AcquireBlurOutput(const TextureInfo& inout_tex)
+{
+	if (!inout_tex.tex)
+		return nullptr;
+
+	D3D11_TEXTURE2D_DESC inputDesc{};
+	inout_tex.tex->GetDesc(&inputDesc);
+
+	// Only the dynamic-resolution region is written and read each frame, so a pooled target that other
+	// passes also use is fine; the pool keeps a UAV for the scene and RGBA16F/RGBA32F formats.
+	if (owner) {
+		auto* pooled = owner->GetColorTarget(inout_tex.tex, inputDesc.Format);
+		if (pooled && pooled->uav && pooled->srv && pooled->desc.Width == inputDesc.Width && pooled->desc.Height == inputDesc.Height) {
+			blurOutputTexture = nullptr;
+			return pooled;
+		}
+	}
+
+	if (blurOutputTexture && (blurOutputTexture->desc.Width != inputDesc.Width || blurOutputTexture->desc.Height != inputDesc.Height || blurOutputTexture->desc.Format != inputDesc.Format))
+		blurOutputTexture = nullptr;
+	if (!blurOutputTexture) {
+		try {
+			D3D11_TEXTURE2D_DESC blurDesc = inputDesc;
+			blurDesc.MipLevels = 1;
+			blurDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+			blurDesc.MiscFlags = 0;
+			auto texture = eastl::make_unique<Texture2D>(blurDesc, "MotionBlur::BlurOutput");
+			texture->CreateSRV({ .Format = blurDesc.Format, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D, .Texture2D = { .MostDetailedMip = 0, .MipLevels = 1 } });
+			texture->CreateUAV({ .Format = blurDesc.Format, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D, .Texture2D = { .MipSlice = 0 } });
+			blurOutputTexture = std::move(texture);
+		} catch (const std::exception& e) {
+			logger::error("Motion blur error creating the output texture: {}", e.what());
+			blurOutputTexture = nullptr;
+		}
+	}
+	return blurOutputTexture.get();
+}
+
+void MotionBlur::ReleaseIdleResources()
+{
+	if ((verticalPassTexture || blurOutputTexture) && globals::state->frameCount - lastDrawFrame > kIdleResourceFrames) {
+		horizontalPassTexture = nullptr;
+		verticalPassTexture = nullptr;
+		neighborMaxTexture = nullptr;
+		blurOutputTexture = nullptr;
+		lastWidth = lastHeight = 0;  // CheckAndResizeResources re-creates the grid textures on the next Draw
 	}
 }

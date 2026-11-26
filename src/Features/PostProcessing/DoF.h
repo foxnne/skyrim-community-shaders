@@ -150,7 +150,15 @@ struct DoF : public PostProcessFeature
 	float debugFocusPlane = 0.0f;
 	uint currentRef = 0;
 
+	virtual void ReleaseIdleResources() override;
+
 private:
+	/// Creates the screen-sized targets on first use (and again after a resize); false while they cannot be made.
+	bool EnsureTargets();
+	void CreateTargets(const D3D11_TEXTURE2D_DESC& colorDesc);
+	void ReleaseTargets();
+	std::chrono::steady_clock::time_point nextTargetsAttempt{};
+	uint32_t lastDrawFrame = 0;
 	bool EnsurePostSmoothingTargets(const D3D11_TEXTURE2D_DESC& colorDesc);
 	std::chrono::steady_clock::time_point nextPostSmoothingAttempt{};
 };

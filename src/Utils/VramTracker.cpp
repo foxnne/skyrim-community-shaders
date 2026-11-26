@@ -12,6 +12,7 @@
 #include <format>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <nlohmann/json.hpp>
 #include <wrl/client.h>
 
@@ -140,11 +141,24 @@ namespace VramTracker
 			return static_cast<int>(g_mods.size() - 1);
 		}
 
+		struct Tag;
+		// Live tags of the categories our own code allocates (targets, UAV textures, volumes, UAV buffers), so the
+		// names dump can list them without touching the D3D objects themselves.
+		std::mutex g_liveMutex;
+		std::unordered_set<Tag*> g_live;
+		constexpr int64_t kLiveMinBytes = 256 * 1024;
+		bool IsLiveCategory(int a_cat)
+		{
+			return a_cat == kRT || a_cat == kUAV || a_cat == kTex3D || a_cat == kCube || a_cat == kBufUAV || a_cat == kBufOther;
+		}
+
 		struct Tag : IUnknown
 		{
 			std::atomic<ULONG> rc{ 1 };
 			int mod = 0, cat = 0;
 			int64_t bytes = 0;
+			bool registered = false;
+			std::string name;  // debug name, set through OnNamed; guarded by g_liveMutex
 			HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_riid, void** a_out) override
 			{
 				if (a_riid == __uuidof(IUnknown)) {
@@ -164,6 +178,10 @@ namespace VramTracker
 					s.liveBytes -= bytes;
 					s.liveCount -= 1;
 					s.freedBytes += bytes;
+					if (registered) {
+						std::lock_guard lock(g_liveMutex);
+						g_live.erase(this);
+					}
 					delete this;
 				}
 				return n;
@@ -183,6 +201,11 @@ namespace VramTracker
 			s.liveCount += 1;
 			s.newBytes += a_bytes;
 			s.newCount += 1;
+			if (IsLiveCategory(a_cat) && a_bytes >= kLiveMinBytes) {
+				t->registered = true;
+				std::lock_guard lock(g_liveMutex);
+				g_live.insert(t);
+			}
 			a_res->SetPrivateDataInterface(kTagGuid, t);
 			if (a_cat != kStaging)
 				RecordSite(a_cat, a_bytes);
@@ -440,5 +463,55 @@ namespace VramTracker
 		}
 		std::ofstream out(g_outPath, std::ios::app);
 		out << j.dump() << '\n';
+
+		// Every ten seconds: the live targets, UAV textures, volumes and UAV buffers by debug name and size, largest
+		// first, so a target can be attributed by name and not only by module and call site.
+		static auto lastNames = clock::now() - std::chrono::seconds(60);
+		if (now - lastNames >= std::chrono::seconds(10)) {
+			lastNames = now;
+			struct Row
+			{
+				int64_t bytes;
+				int cat;
+				std::string name;
+			};
+			std::vector<Row> rows;
+			{
+				std::lock_guard lock(g_liveMutex);
+				rows.reserve(g_live.size());
+				for (const Tag* tag : g_live)
+					rows.push_back({ tag->bytes, tag->cat, tag->name });
+			}
+			std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.bytes > b.bytes; });
+			int64_t namedBytes = 0, unnamedBytes = 0;
+			for (const auto& row : rows)
+				(row.name.empty() ? unnamedBytes : namedBytes) += row.bytes;
+			std::ofstream names(g_outPath.parent_path() / "VramTrackNames.txt", std::ios::trunc);
+			names << std::format("# live tracked targets >= {} KB: {} entries, named {:.1f} MB, unnamed {:.1f} MB\n", kLiveMinBytes / 1024, rows.size(), namedBytes * kMB, unnamedBytes * kMB);
+			names << "# MB\tcategory\tname\n";
+			size_t listed = 0;
+			for (const auto& row : rows) {
+				if (listed++ >= 400)
+					break;
+				names << std::format("{:.1f}\t{}\t{}\n", row.bytes * kMB, kCatNames[row.cat], row.name.empty() ? "<unnamed>" : row.name);
+			}
+		}
+	}
+
+	void OnNamed(ID3D11DeviceChild* a_resource, const char* a_name)
+	{
+		if (!g_active || !a_resource || !a_name || !*a_name)
+			return;
+		IUnknown* data = nullptr;
+		UINT size = sizeof(data);
+		if (FAILED(a_resource->GetPrivateData(kTagGuid, &size, &data)) || !data)
+			return;
+		// Only our tags live under kTagGuid; GetPrivateData hands back a reference we must release.
+		auto* tag = static_cast<Tag*>(data);
+		if (tag->registered) {
+			std::lock_guard lock(g_liveMutex);
+			tag->name = a_name;
+		}
+		tag->Release();
 	}
 }

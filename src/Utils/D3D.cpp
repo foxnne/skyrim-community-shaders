@@ -9,6 +9,7 @@
 #include "State.h"
 #include "Utils/Format.h"
 #include "Utils/Logging.h"
+#include "Utils/VramTracker.h"
 #include <DDSTextureLoader.h>
 #include <DirectXTex.h>
 #include <d3dcompiler.h>
@@ -164,6 +165,7 @@ namespace Util
 		if (len < 0)
 			len = static_cast<int>(strnlen(buffer, sizeof(buffer)));
 		Resource->SetPrivateData(WKPDID_D3DDebugObjectNameT, static_cast<UINT>(len), buffer);
+		VramTracker::OnNamed(Resource, buffer);
 	}
 
 	uint64_t ResourceBytes(ID3D11Resource* a_resource)

@@ -240,7 +240,7 @@ float3 SampleDiffuseFallbackCubemap(float3 worldPos, float3 worldNormal, float3 
 		sh2 skylightingSH = Skylighting::Sample(worldPos, worldDir);
 		const float skylightingVisibility = Skylighting::EvaluateDiffuse(skylightingSH, skylightingNormal, fadeOutFactor);
 		skylightingDiffuse = skylightingVisibility * skylightingBoost;
-		[branch] if (UsePhysicalSkyFill())
+		[branch] if (UsePhysicalSkyFill() || SharedData::ssgiSettings.SkyFillDebug == 2)
 		{
 			const float minVisibility = SharedData::skylightingSettings.MinDiffuseVisibility;
 			fillBlend = saturate((skylightingVisibility - minVisibility) / max(1.0 - minVisibility, 1e-3));
@@ -333,6 +333,8 @@ void CalculateGI(
 	float3 fallbackRadiance = 0;
 	// Physical Sky Fill bookkeeping, only accumulated with the switch on (uniform branch).
 	const bool physicalSkyFill = UsePhysicalSkyFill();
+	const uint skyFillDebug = SharedData::ssgiSettings.SkyFillDebug;
+	const bool trackFill = physicalSkyFill || skyFillDebug == 2;
 	float hitWeightTotal = 0;   // angular measure of the traced hits (Bounce Limit)
 	float openWeightTotal = 0;  // and of the open bits the fallback lit
 	float fillBlendTotal = 0;   // fallback fill share, weighted by open measure
@@ -428,7 +430,7 @@ void CalculateGI(
 					if (scalarWeight > 0.0) {
 						float3 diffuseRadiance = sampleRadiance * scalarWeight * GIStrength;
 						totalRadiance += diffuseRadiance;
-						if (physicalSkyFill)
+						if (trackFill)
 							hitWeightTotal += scalarWeight;
 #	ifdef SSGI_SH
 						totalDirection += directionWeight * sampleLuminance * GIStrength;
@@ -472,7 +474,7 @@ void CalculateGI(
 				float3 worldDir = ViewToWorldVector(rayDir, FrameBuffer::CameraViewInverse);
 				float sampleFillBlend;
 				float3 fallbackSample = SampleDiffuseFallbackCubemap(worldPos, worldNormal, worldDir, iblRatio, sampleFillBlend);
-				if (physicalSkyFill) {
+				if (trackFill) {
 					openWeightTotal += openWeight;
 					fillBlendTotal += sampleFillBlend * openWeight;
 				}
@@ -560,6 +562,31 @@ void CalculateGI(
 
 	o_ao = normHitDist;
 	o_radiance = totalRadiance + fallbackRadiance;
+
+	// foxnne sky fill debug (ssgiSettings.SkyFillDebug), shown by the deferred debug view SSGI (8)
+	[branch] if (skyFillDebug != 0)
+	{
+		if (skyFillDebug == 1) {
+			float iblOn = 0.0;
+#	if defined(IBL)
+			iblOn = SharedData::iblSettings.EnableIBL != 0 ? 1.0 : 0.0;
+#	endif
+			o_radiance = float3(UseDynamicCubemap != 0 ? 1.0 : 0.0, iblOn, UsePhysicalSkyFill() ? 1.0 : 0.0);
+		} else if (skyFillDebug == 2) {
+			const float fillShareDebug = openWeightTotal > 0.0 ? saturate(fillBlendTotal / openWeightTotal) : 0.0;
+			const float openShareDebug = (openWeightTotal + hitWeightTotal) > 0.0 ? openWeightTotal / (openWeightTotal + hitWeightTotal) : 0.0;
+#	if defined(SKYLIGHTING)
+			const float skylightingCompiled = 1.0;
+#	else
+			const float skylightingCompiled = 0.0;
+#	endif
+			o_radiance = float3(fillShareDebug, openShareDebug, skylightingCompiled);
+		} else if (skyFillDebug == 3) {
+			o_radiance = totalRadiance;
+		} else {
+			o_radiance = fallbackRadiance;
+		}
+	}
 #ifdef SSGI_SH
 	// NRD SH stores the first directional moment. Keep its magnitude (directionality) and use
 	// world space so temporal history and the world-space resolve guides share one basis.

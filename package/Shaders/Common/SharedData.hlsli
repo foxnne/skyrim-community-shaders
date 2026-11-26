@@ -450,7 +450,7 @@ namespace SharedData
 		float SkyFillSaturation;
 		float SkyFillEnvWeight;
 		float BounceSkyLimit;
-		float pad0;
+		uint SkyFillDebug;  // 0 off; 1 gates, 2 openness, 3 traced only, 4 fallback only (written as SSGI radiance)
 	};
 
 	struct SSRSettings

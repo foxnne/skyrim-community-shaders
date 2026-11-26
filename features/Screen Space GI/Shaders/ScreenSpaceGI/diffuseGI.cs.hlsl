@@ -360,7 +360,7 @@ void CalculateGI(
 	// Skylight tint: the share of coplanar ground hits handed back to the sky (0 = legacy, also under a canopy)
 	float coplanarReject = 0.0;
 #if defined(DYNAMIC_CUBEMAPS) && defined(SKYLIGHTING)
-	[branch] if (UseSkylightTint() && UseDynamicCubemap != 0)
+	[branch] if (UseSkylightTint() && UseDynamicCubemap != 0 && SharedData::ssgiSettings.CoplanarBounceReject > 0.0)
 	{
 		const float3 pixelPosWS = ViewToWorldPosition(pixCenterPos, FrameBuffer::CameraViewInverse);
 		const float3 pixelNormalWS = ViewToWorldVector(viewspaceNormal, FrameBuffer::CameraViewInverse);
@@ -374,8 +374,10 @@ void CalculateGI(
 	float3 coplanarRadiance = 0;   // traced bounce from coplanar hits, kept apart
 	float coplanarOpenWeight = 0;  // their angular measure as sky directions
 	float coplanarBits = 0;        // and their share of the occluded bits
+	float coplanarHitWeight = 0;   // their traced-hit measure (Bounce Limit), restored by (1 - reject)
 #ifdef SSGI_SH
-	float3 coplanarDirection = 0;
+	float3 coplanarDirection = 0;     // traced bounce moment
+	float3 coplanarSkyDirection = 0;  // their open-direction moment, for the reclaimed sky
 #endif
 #ifdef SSGI_SH
 	float3 totalDirection = 0;
@@ -476,6 +478,7 @@ void CalculateGI(
 					if (coplanarHit) {
 						if (scalarWeight > 0.0) {
 							coplanarRadiance += sampleRadiance * scalarWeight * GIStrength;
+							coplanarHitWeight += scalarWeight;
 #	ifdef SSGI_SH
 							coplanarDirection += directionWeight * sampleLuminance * GIStrength;
 #	endif
@@ -490,6 +493,9 @@ void CalculateGI(
 							openWeight, openDirectionWeight);
 						coplanarOpenWeight += openWeight;
 						coplanarBits += float(countbits(currentOccludedBitfield));
+#	ifdef SSGI_SH
+						coplanarSkyDirection += openDirectionWeight;
+#	endif
 					} else if (scalarWeight > 0.0) {
 						float3 diffuseRadiance = sampleRadiance * scalarWeight * GIStrength;
 						totalRadiance += diffuseRadiance;
@@ -578,12 +584,18 @@ void CalculateGI(
 		fillBlendTotal += fillShareOpen * coplanarOpenWeight * reject;
 		openWeightTotal += coplanarOpenWeight * reject;
 		totalRadiance += coplanarRadiance * (1.0 - reject);
+		if (trackFill)
+			hitWeightTotal += coplanarHitWeight / SSGI_ROTATION_COUNT * (1.0 - reject);
 		normHitDist = max(normHitDist - reject * coplanarBits / float(SSGI_MAX_RAY), 0.0);
 #	ifdef SSGI_SH
 		totalDirection += coplanarDirection / SSGI_ROTATION_COUNT * (1.0 - reject);
+		// The reclaimed sky keeps the open-direction moment of those bits, weighted like the fallback's own samples.
+		fallbackDirection += coplanarSkyDirection / SSGI_ROTATION_COUNT * _NRD_LinearToYCoCg(openSkyMean).x * reject;
 #	endif
 	} else {
 		totalRadiance += coplanarRadiance / SSGI_ROTATION_COUNT;
+		if (trackFill)
+			hitWeightTotal += coplanarHitWeight / SSGI_ROTATION_COUNT;
 #	ifdef SSGI_SH
 		totalDirection += coplanarDirection / SSGI_ROTATION_COUNT;
 #	endif

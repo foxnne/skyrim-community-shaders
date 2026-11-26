@@ -1,6 +1,7 @@
 #include "ENBHelper.h"
 
 #include "Globals.h"
+#include "Utils/Climate.h"
 #include "Utils/VisualClock.h"
 
 // ENB Helper functionality
@@ -66,7 +67,7 @@ namespace ENBHelper
 			cachedTime.skyMode = 0;
 		}
 
-		if (const auto* calendar = globals::game::calendar) {
+		if (const auto* calendar = Util::Climate::GetCalendar()) {  // the cached global is null (set before the calendar exists)
 			const auto visual = Util::VisualClock::Current();
 			cachedTime.gameHour = visual.active ? visual.hour : calendar->GetHour();
 			cachedTime.dayOfYear = calendar->GetDay() + (calendar->GetMonth() - 1) * 30.0f;
